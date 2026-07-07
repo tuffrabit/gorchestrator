@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Orchestration System — Planning Session Summary</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        .pipeline {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.95rem;
+            color: var(--accent);
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.92rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        .tag {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            margin-right: 6px;
+        }
+        .tag-go { background: #00add8; color: #000; }
+        .tag-core { background: var(--accent-soft); color: #fff; }
+        .tag-decision { background: var(--success); color: #000; }
+        .tag-phase { background: var(--warning); color: #000; }
+        .tag-port { background: #a371f7; color: #fff; }
+        .tag-adapter { background: #d2a8ff; color: #000; }
+        .tag-security { background: var(--danger); color: #fff; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-done { background: #238636; color: #fff; }
+        .status-progress { background: var(--warning); color: #000; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        .deliverable {
+            background: var(--code-bg);
+            border-left: 3px solid var(--accent);
+            padding: 12px 16px;
+            margin: 12px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            border-radius: 0 6px 6px 0;
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .principle {
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+            margin: 16px 0;
+            padding: 16px 20px;
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        .principle-icon {
+            font-size: 1.4rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .principle-text strong {
+            color: var(--text-bright);
+            display: block;
+            margin-bottom: 4px;
+        }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+        .tree {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            background: var(--code-bg);
+            padding: 16px 20px;
+            border-radius: 8px;
+            color: var(--text-muted);
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+        .tree .comment { color: var(--text-muted); font-style: italic; }
+        .tree .dir { color: var(--accent); }
+        .tree .file { color: var(--text-bright); }
+        .adapter-box {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        .adapter-box .label { color: var(--accent); font-weight: 600; }
+        .adapter-box .builtin { color: var(--success); }
+        .adapter-box .external { color: var(--warning); }
+        .adapter-box .deferred { color: var(--text-muted); font-style: italic; }
+        .security-box {
+            background: var(--code-bg);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        .security-box .label { color: var(--danger); font-weight: 600; }
+        .check { color: var(--success); }
+        .cross { color: var(--danger); }
+    </style>
+</head>
+<body>
+
+<h1>AI Agent Orchestration System</h1>
+<p class="subtitle">Planning Session Summary — Architecture & Direction</p>
+
+<div class="meta">
+    <span>📅 July 4, 2026</span>
+    <span>📝 Status: <span class="status-badge status-done">Planning Complete</span></span>
+    <span>🎯 Ready for Phase 1 Implementation</span>
+</div>
+
+<h2>What We're Building</h2>
+
+<p>A <strong>tight human + AI agent collaboration platform</strong> for software engineering teams. Not a generic "solve everything" orchestrator. Not an autonomous Devin clone. A structured, multi-agent pipeline that teams deploy against their own codebases and business problems.</p>
+
+<div class="highlight-box">
+    <p><strong>The core insight:</strong> The human's job is <em>casting</em> — choosing which LLM plays which role. Deep research model for investigation. Fast planner for architecture. Competent coder for implementation. The system orchestrates the handoffs; the human configures the talent.</p>
+</div>
+
+<h2>Core Principles</h2>
+
+<div class="principle">
+    <div class="principle-icon">👤</div>
+    <div class="principle-text">
+        <strong>Human-in-the-loop is first-class</strong>
+        Humans observe, configure, and intervene. The system is transparent, not autonomous. A web dashboard is a first-class citizen, not an afterthought.
+    </div>
+</div>
+
+<div class="principle">
+    <div class="principle-icon">📁</div>
+    <div class="principle-text">
+        <strong>Filesystem is the agent's memory</strong>
+        Agents share data through filesystem artifacts, not shared memory or session state. This provides crash resilience, human readability, and freedom from schema lock-in.
+    </div>
+</div>
+
+<div class="principle">
+    <div class="principle-icon">⚡</div>
+    <div class="principle-text">
+        <strong>Goroutines are a feature, not a bug</strong>
+        In-process Go concurrency, SQLite, and filesystem storage are sufficient for hundreds of users. No Redis, no Postgres, no Kubernetes. If the process crashes, agents resume from filesystem state on restart.
+    </div>
+</div>
+
+<div class="principle">
+    <div class="principle-icon">🔌</div>
+    <div class="principle-text">
+        <strong>Hexagonal architecture for extensibility</strong>
+        Ports and adapters for storage, triggers, LLM providers, adjudication, and tools. Core stays small; extensions plug in cleanly. Adapters are external processes — no recompilation needed.
+    </div>
+</div>
+
+<div class="principle">
+    <div class="principle-icon">🔒</div>
+    <div class="principle-text">
+        <strong>Secure by default</strong>
+        Core tools are architecturally scoped by agent type. Agents do not get raw filesystem, shell, or git access. Security is the architecture, not a bolted-on permission layer.
+    </div>
+</div>
+
+<h2>The Pipeline</h2>
+
+<div class="pipeline">
+Trigger → Researcher → [Adjudicate] → Planner → [Adjudicate] → Implementer → Done
+</div>
+
+<p>Each handoff boundary is configurable. Adjudication is optional and pluggable. The orchestrator manages the state machine; Google ADK Go powers the individual agent reasoning loops.</p>
+
+<h2>Key Architectural Decisions</h2>
+
+<table>
+    <tr>
+        <th>Decision</th>
+        <th>Choice</th>
+        <th>Rationale</th>
+    </tr>
+    <tr>
+        <td><span class="tag tag-go">Go</span> Language</td>
+        <td>Go</td>
+        <td>Concurrency model fits the agent pipeline perfectly. Goroutines are cheap. Context cancellation is native.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-core">Core</span> Agent Runtime</td>
+        <td>Google ADK Go v2</td>
+        <td>Use for LLM provider abstraction and single-agent reasoning. Do NOT use for multi-agent orchestration or state management — we build that ourselves.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> State Storage</td>
+        <td>SQLite + Filesystem</td>
+        <td>SQLite for application state (projects, issues, users, audit log). Filesystem for agent artifacts and memory. No Postgres or Redis needed.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Scale Target</td>
+        <td>Hundreds of users</td>
+        <td>In-process goroutines + SQLite + filesystem is sufficient. Horizontal scaling is explicitly out of scope for MVP.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Agent Identity</td>
+        <td>Baked-in Go structs</td>
+        <td>Researcher, Planner, and Implementer are first-class citizens with default behavior. Configurable via YAML but not generic.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Human Gates</td>
+        <td>Goroutines die, respawn on decision</td>
+        <td>No long-running sleep loops. Go concurrency is cheap. On restart, orchestrator reads SQLite and filesystem to resume.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Config First</td>
+        <td>YAML-backed, CLI-first</td>
+        <td>Dashboard starts as observation + adjudication only. Strong YAML config enables future web-based configuration migration.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Agent Output</td>
+        <td>Completely free-form</td>
+        <td>Content determined by system prompt + LLM. Orchestrator only enforces a minimal <code>result.json</code> status envelope. Next agent receives previous output as context.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Adapter Model</td>
+        <td>Built-in + External Process</td>
+        <td>Common adapters compiled into core for zero-config. External JSON-RPC processes for exotic/enterprise needs. No recompilation required for extensions.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Adapter Protocol</td>
+        <td>JSON-RPC over stdio</td>
+        <td>Simple, debuggable, language-agnostic, natural fit for MCP. Go stdlib JSON or <code>goccy/go-json</code> for serialization.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> WASM</td>
+        <td>Deferred</td>
+        <td>WASM via <code>wazero</code> is promising for high-frequency adapters, but over-complicates MVP. Revisit if external process overhead becomes measurable.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-security">Security</span> Shell Access</td>
+        <td>None for core agents</td>
+        <td>Core agents get typed tools, not raw shell. <code>run_test</code> is pre-configured and immutable. Security is architectural.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-security">Security</span> Git Access</td>
+        <td>Orchestrator-managed only</td>
+        <td>Agent never touches git. Orchestrator handles branch creation, workspace copy, commit, and push.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-security">Security</span> File Write</td>
+        <td>Tool-scoped by agent type</td>
+        <td>Researcher/Planner use <code>write_output</code> (orchestrator-resolved path). Implementer uses <code>write_file</code> (workspace-scoped). Different tools, not different permissions.</td>
+    </tr>
+</table>
+
+<h2>Adapter Architecture</h2>
+
+<p>Go is statically compiled. <code>plugin.Open()</code> is dead (Linux-only, fragile version matching). The core binary remains a single static executable. Extensibility is achieved through <strong>external process adapters</strong> communicating via JSON-RPC over stdin/stdout.</p>
+
+<h3>Two Adapter Categories</h3>
+
+<table>
+    <tr>
+        <th>Category</th>
+        <th>Description</th>
+        <th>Examples</th>
+    </tr>
+    <tr>
+        <td><span class="tag tag-core">Built-in</span></td>
+        <td>Compiled directly into the core binary. Zero external dependencies. Covers the 80% use case.</td>
+        <td>OS filesystem storage, OpenAI/Anthropic LLM, webhook trigger, null/self adjudicator, OIDC auth, console logging</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-adapter">External</span></td>
+        <td>Standalone binary discovered at runtime. Communicates via JSON-RPC over stdio. Language-agnostic.</td>
+        <td>S3 storage, Jira trigger, email notification, SAML auth, custom LLM gateway</td>
+    </tr>
+</table>
+
+<h3>External Process Contract</h3>
+
+<p><strong>Protocol:</strong> JSON-RPC 2.0 over stdin/stdout (line-delimited JSON).</p>
+
+<div class="adapter-box">
+<span class="label">Lifecycle:</span><br>
+1. Core discovers adapter binaries in <code>./adapters/</code> directory<br>
+2. Core spawns adapter as child process, holds stdin/stdout pipes open<br>
+3. Core sends <code>initialize</code> method with port interface schema<br>
+4. All calls are JSON-RPC request/response pairs<br>
+5. If adapter dies, core restarts with exponential backoff<br>
+6. For streaming (LLM tokens), adapter sends JSON-RPC <code>notification</code> messages<br><br>
+<span class="label">Adapter Manifest</span> (YAML file next to binary):<br>
+<span class="builtin">name:</span> s3<br>
+<span class="builtin">version:</span> "1.0.0"<br>
+<span class="builtin">protocol:</span> jsonrpc-stdio<br>
+<span class="builtin">port:</span> storage<br>
+<span class="builtin">capabilities:</span> [read, write, list, watch]<br><br>
+<span class="label">Example:</span><br>
+<span class="external">// Core → Adapter</span><br>
+{"jsonrpc":"2.0","method":"storage.read","params":{"path":"research/output.md"},"id":1}<br><br>
+<span class="external">// Adapter → Core</span><br>
+{"jsonrpc":"2.0","result":{"content":"...","exists":true,"size":1234},"id":1}
+</div>
+
+<h3>Port-Specific Adapter Strategy</h3>
+
+<table>
+    <tr>
+        <th>Port</th>
+        <th>Built-in</th>
+        <th>External</th>
+        <th>Rationale</th>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> StoragePort</td>
+        <td>OS filesystem</td>
+        <td>S3, Azure Blob</td>
+        <td>High-frequency; external process overhead acceptable for MVP. Built-in filesystem covers 80%.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> LLMProviderPort</td>
+        <td>OpenAI, Anthropic, Gemini, local HTTP</td>
+        <td>Enterprise gateways, custom APIs</td>
+        <td>Common providers built-in for zero-config. Exotic providers use external process.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> TriggerPort</td>
+        <td>Manual CLI, HTTP webhook</td>
+        <td>GitHub Issues, Jira, email, Slack bot</td>
+        <td>Triggers are naturally long-running listeners. External process is a good fit.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> AdjudicatorPort</td>
+        <td>Null, Self, Human</td>
+        <td>Custom AI reviewer</td>
+        <td>Core adjudication modes built-in. Custom reviewers can be external.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> MCPAdapterPort</td>
+        <td>—</td>
+        <td>Any MCP server</td>
+        <td>MCP is natively an external process protocol. Core implements MCP client.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> NotificationAdapterPort</td>
+        <td>Console logging</td>
+        <td>Email (SMTP), Slack webhook</td>
+        <td>Low-frequency, naturally external.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-port">Port</span> SSOAdapterPort</td>
+        <td>OIDC</td>
+        <td>SAML</td>
+        <td>OIDC is standard HTTP flow, built-in. SAML is complex enough for external.</td>
+    </tr>
+</table>
+
+<h3>Future: WebAssembly Adapters</h3>
+
+<p>WASM via <code>wazero</code> is a candidate for future phases if external process overhead becomes a bottleneck. This would introduce a third adapter category:</p>
+
+<ul>
+    <li><strong>WASM adapters:</strong> Sandboxed, near-native performance, single-binary deployment (core + <code>.wasm</code> files)</li>
+    <li><strong>Use case:</strong> High-frequency ports like StoragePort where process spawn overhead is measurable</li>
+</ul>
+
+<p><span class="tag tag-phase">Deferred</span> to Phase 4 or beyond. Not in MVP scope.</p>
+
+<h2>Security Model: Secure by Default</h2>
+
+<p>Security is not a permissions layer bolted on top — it is the architecture itself. Agents do not get raw filesystem, shell, or git access. They receive orchestrator-mediated tools that are scoped by design. Each agent type receives a <strong>different tool binding</strong>, not the same tools with different permissions.</p>
+
+<h3>Core Tool Matrix</h3>
+
+<table>
+    <tr>
+        <th>Tool</th>
+        <th>Researcher</th>
+        <th>Planner</th>
+        <th>Implementer</th>
+        <th>Description</th>
+    </tr>
+    <tr>
+        <td><code>read_file</code></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td>Read file content (full or partial). Paths resolved against orchestrator allowlist.</td>
+    </tr>
+    <tr>
+        <td><code>list_directory</code></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td>List contents of a directory.</td>
+    </tr>
+    <tr>
+        <td><code>grep_search</code></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td>Pattern search across files.</td>
+    </tr>
+    <tr>
+        <td><code>write_output</code></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="check">✅</span></td>
+        <td><span class="cross">❌</span></td>
+        <td>Write to the agent's designated <code>output.*</code> file. Orchestrator resolves path; agent doesn't know the filesystem layout.</td>
+    </tr>
+    <tr>
+        <td><code>write_file</code></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="check">✅</span></td>
+        <td>Write a file within the implementer's workspace. Path is workspace-relative.</td>
+    </tr>
+    <tr>
+        <td><code>update_file</code></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="check">✅</span></td>
+        <td>Update/patch a file within the implementer's workspace.</td>
+    </tr>
+    <tr>
+        <td><code>run_test</code></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="check">✅</span></td>
+        <td>Execute the project's pre-configured test command in a sandboxed subprocess with timeout.</td>
+    </tr>
+    <tr>
+        <td><code>bash</code> / <code>shell_exec</code></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="cross">❌</span></td>
+        <td><span class="cross">❌</span></td>
+        <td><strong>Not available to any core agent.</strong></td>
+    </tr>
+</table>
+
+<h3>Key Principles</h3>
+
+<ul>
+    <li><strong>Researcher and Planner never write files directly.</strong> They use <code>write_output</code>, which is an orchestrator-provided tool that only writes to the current agent's <code>output.*</code> path in the issue directory. The agent does not know the path; the orchestrator resolves it. This is not a "permission" — it is a completely different tool with a single hardcoded destination.</li>
+    <li><strong>Implementer writes to a workspace.</strong> The <code>write_file</code> and <code>update_file</code> tools are bound to the implementer's workspace directory. The agent sees relative paths (e.g., <code>src/auth.go</code>) but the orchestrator resolves them to the workspace absolute path.</li>
+    <li><strong>No shell access.</strong> Core agents do not have <code>bash</code> or <code>shell_exec</code> tools. All operations are mediated through typed tool calls.</li>
+    <li><strong>Path allowlist.</strong> The orchestrator maintains an allowlist of readable paths for each agent run. Attempts to access paths outside the allowlist are rejected by the orchestrator before reaching the StoragePort.</li>
+</ul>
+
+<h3>MCP Permission Model</h3>
+
+<p>MCP servers are the real permission surface because they expose arbitrary capabilities (database access, API calls, internal service invocations).</p>
+
+<p><strong>MVP Model:</strong></p>
+<ul>
+    <li>MCP servers are <strong>project-level configuration</strong></li>
+    <li>All tools from an enabled MCP server are available to all agents</li>
+    <li>The human maintainer decides which MCP servers to connect</li>
+    <li><strong>Default: deny</strong> — no MCP servers are connected unless explicitly configured</li>
+</ul>
+
+<p><strong>Future (Phase 4+):</strong></p>
+<ul>
+    <li>Per-agent, per-tool allowlists</li>
+    <li>Tool-level permission granularity (e.g., <code>query_database</code> only allows <code>SELECT</code>)</li>
+    <li>Endpoint restrictions for API tools</li>
+</ul>
+
+<h2>Git Workspace Model</h2>
+
+<p>The core implementer agent and toolset are geared around a <strong>targeted, pre-existing git repository</strong>. No agent can create a new git repository or GitHub/Bitbucket project via core tools. Repository management is a human responsibility.</p>
+
+<h3>Prerequisites</h3>
+<ul>
+    <li><code>git</code> must be installed and configured in the environment</li>
+    <li><code>gh</code> CLI is optional but recommended for GitHub-specific workflows</li>
+    <li>SSH keys, tokens, or <code>gh</code> profiles must be configured by the human maintainer outside the application</li>
+    <li>The application does not manage auth setup; it assumes the environment is ready</li>
+</ul>
+
+<h3>Project-Level Git Configuration</h3>
+
+<div class="security-box">
+<span class="label">project.yaml</span><br>
+<span class="builtin">project:</span><br>
+&nbsp;&nbsp;<span class="builtin">name:</span> "auth-service"<br>
+&nbsp;&nbsp;<span class="builtin">git:</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="builtin">repo_url:</span> "git@github.com:myorg/auth-service.git"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="builtin">base_branch:</span> "develop"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="builtin">auth:</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="builtin">type:</span> "ssh_key"&nbsp;&nbsp;<span class="comment"># or "token", "gh_cli"</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="builtin">ssh_key_path:</span> "/secrets/deploy_key"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># or:</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># type: "gh_cli"</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># profile: "work"</span>
+</div>
+
+<h3>Implementer Workspace Lifecycle</h3>
+
+<p>The <strong>agent never touches git</strong>. The orchestrator handles the entire git lifecycle:</p>
+
+<ol>
+    <li><strong>Branch Creation:</strong> Orchestrator creates a unique branch per implementer run:
+        <div class="deliverable">git checkout -b ai-implementer/{issue_id}-{timestamp}</div>
+    </li>
+    <li><strong>Workspace Copy:</strong> Orchestrator copies repo files into the configured storage location:
+        <div class="deliverable">workspaces/{issue_id}/implementer-{run_id}/</div>
+    </li>
+    <li><strong>Agent Execution:</strong> Implementer receives <code>read_file</code>, <code>write_file</code>, <code>update_file</code> tools scoped to that workspace. The agent sees relative paths; the orchestrator resolves to absolute.</li>
+    <li><strong>Post-Execution:</strong> Orchestrator stages changes, commits with a structured message, and optionally pushes. The human decides whether to merge.</li>
+</ol>
+
+<p><strong>Parallel Implementers:</strong> Each run gets its own branch and workspace. No collision. The orchestrator tracks <code>workspace_id</code> and <code>branch_name</code> in SQLite.</p>
+
+<h3>Test Execution (<code>run_test</code> Tool)</h3>
+
+<p>The implementer has access to a <code>run_test</code> core tool that executes the project's pre-configured test command in a sandboxed subprocess.</p>
+
+<div class="security-box">
+<span class="label">project.yaml</span><br>
+<span class="builtin">project:</span><br>
+&nbsp;&nbsp;<span class="builtin">test_command:</span> "go test ./..."<br>
+&nbsp;&nbsp;<span class="builtin">test_timeout:</span> "60s"<br>
+&nbsp;&nbsp;<span class="comment"># Or more complex:</span><br>
+&nbsp;&nbsp;<span class="comment"># test_command: "docker run --rm -v $(pwd):/app myproject-test-runner"</span><br>
+&nbsp;&nbsp;<span class="comment"># test_command: "./scripts/run-integration-tests.sh"</span><br>
+&nbsp;&nbsp;<span class="comment"># test_command: "python -m pytest tests/"</span>
+</div>
+
+<p><strong>Properties:</strong></p>
+<ul>
+    <li>Command is <strong>immutable</strong> — defined in project config, not modifiable by the agent</li>
+    <li>Executed in the implementer's workspace directory</li>
+    <li>Sandboxed subprocess with timeout and output capture</li>
+    <li>Agent receives stdout/stderr but cannot modify the command</li>
+    <li>Enables implementer test-and-fix loops without opening arbitrary shell access</li>
+</ul>
+
+<h2>Filesystem Artifact Contract</h2>
+
+<p>Each issue gets a directory tree. The orchestrator manages a minimal status envelope; agents write whatever they want.</p>
+
+<div class="tree">
+<span class="dir">projects/{project_id}/issues/{issue_id}/</span><br>
+├── <span class="dir">research/</span><br>
+│   ├── <span class="file">task.json</span>          <span class="comment">← Orchestrator: instructions, model config, loop config</span><br>
+│   ├── <span class="file">result.json</span>          <span class="comment">← Orchestrator: status, error, tokens, done rationale</span><br>
+│   └── <span class="file">output.*</span>             <span class="comment">← Agent: COMPLETELY FREE-FORM (.md, .py, .json, etc.)</span><br>
+├── <span class="dir">plan/</span><br>
+│   ├── <span class="file">task.json</span><br>
+│   ├── <span class="file">result.json</span><br>
+│   └── <span class="file">output.*</span><br>
+├── <span class="dir">adjudication/</span><br>
+│   ├── <span class="file">task.json</span><br>
+│   ├── <span class="file">result.json</span><br>
+│   └── <span class="file">output.*</span><br>
+└── <span class="dir">implementation/</span><br>
+    ├── <span class="file">task.json</span><br>
+    ├── <span class="file">result.json</span><br>
+    └── <span class="file">output.*</span><br><br>
+<span class="dir">workspaces/{issue_id}/</span><br>
+└── <span class="dir">implementer-{run_id}/</span>   <span class="comment">← Git workspace copy for implementer</span>
+</div>
+
+<p><strong>Critical rule:</strong> No agent reads or parses <code>result.json</code>. Only the orchestrator manages status. Agents read their <code>task.json</code> and write their <code>output.*</code>.</p>
+
+<h2>Agent Handoff Modes</h2>
+
+<p>Each handoff boundary is independently configurable:</p>
+
+<table>
+    <tr>
+        <th>Mode</th>
+        <th>Behavior</th>
+        <th>Use Case</th>
+    </tr>
+    <tr>
+        <td><code>n_loops</code></td>
+        <td>Agent runs exactly N times. Orchestrator tracks count. After N loops, status becomes <code>done</code> regardless of output quality.</td>
+        <td>"Don't overthink it" agents</td>
+    </tr>
+    <tr>
+        <td><code>self_done</code></td>
+        <td>Agent evaluates itself against an English rubric. Writes assessment to <code>output.*</code>. Orchestrator reads <code>result.json</code> status.</td>
+        <td>Agents that can judge their own completeness</td>
+    </tr>
+    <tr>
+        <td><code>human_gate</code></td>
+        <td>Agent completes, status becomes <code>waiting_human</code>. Goroutine <strong>dies</strong>. Human reviews via dashboard and clicks pass/fail/retry. New goroutine spawned on decision.</td>
+        <td>Critical phases requiring human judgment</td>
+    </tr>
+</table>
+
+<h2>Implementation Roadmap</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">1</div>
+        <div class="phase-title">The Engine <span class="tag tag-phase">CLI-Only</span></div>
+    </div>
+    <p>A running system that accepts a trigger, runs a no-op agent, and writes artifacts to storage.</p>
+    <ul>
+        <li>StoragePort interface + OS filesystem adapter (built-in)</li>
+        <li>Minimal artifact contract: <code>task.json</code> + <code>result.json</code> + free-form <code>output.*</code></li>
+        <li>Trigger: manual CLI adapter (built-in)</li>
+        <li>LLM Port: OpenAI + local llama.cpp adapters (built-in) via ADK Go</li>
+        <li>Orchestrator: goroutine-based agent runner with context cancellation</li>
+        <li>One agent type: Researcher (basic)</li>
+        <li><code>n_loops</code> handoff mode only</li>
+        <li>SQLite: project and issue registry, run history</li>
+        <li>Adapter discovery framework: scan <code>./adapters/</code>, load manifests, spawn external processes</li>
+        <li>JSON-RPC stdio protocol foundation</li>
+    </ul>
+    <div class="deliverable">
+        $ cli run --issue="add auth" --project=foo<br>
+        → Creates issue, runs researcher, writes to filesystem, marks done in SQLite
+    </div>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">2</div>
+        <div class="phase-title">The Pipeline <span class="tag tag-phase">CLI-Only</span></div>
+    </div>
+    <p>Full Research → Plan → Implement pipeline with configurable handoffs.</p>
+    <ul>
+        <li>Agent types: Researcher, Planner, Implementer (Go structs)</li>
+        <li>Core toolset: <code>read_file</code>, <code>list_directory</code>, <code>grep_search</code>, <code>write_output</code>, <code>write_file</code>, <code>update_file</code></li>
+        <li>Handoff modes: <code>n_loops</code>, <code>self_done</code>, <code>human_gate</code></li>
+        <li>Adjudication port: NullAdjudicator, SelfAdjudicator (built-in)</li>
+        <li>Context chaining: Agent N+1 receives Agent N's <code>output.*</code> as context</li>
+        <li>Token tracking per run, SQLite logging</li>
+        <li>External process adapter examples: webhook trigger, email notification</li>
+    </ul>
+    <div class="deliverable">
+        Full automated pipeline from issue to code, configurable per-agent via YAML
+    </div>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">3</div>
+        <div class="phase-title">Human Interface <span class="tag tag-phase">Dashboard + Auth</span></div>
+    </div>
+    <p>Humans can see what's happening and intervene.</p>
+    <ul>
+        <li>Web dashboard: Go HTTP server + lightweight frontend</li>
+        <li>Real-time status: issue list, current phase, agent status, artifact viewer</li>
+        <li>Adjudication UI: pass/fail/retry at any boundary</li>
+        <li>HumanAdjudicator adapter (built-in): pauses, writes to SQLite notification queue, dashboard polls</li>
+        <li>User/team model with roles (admin, member, viewer)</li>
+        <li>SSO: OIDC adapter (built-in)</li>
+        <li>Admin notifications: email/Slack webhook (external process adapters)</li>
+    </ul>
+    <div class="deliverable">
+        Team can log in, watch agents work, click retry, get Slack alerts
+    </div>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">4</div>
+        <div class="phase-title">Extensibility</div>
+    </div>
+    <p>Users can plug in their own world.</p>
+    <ul>
+        <li>MCP adapter port: custom tools via MCP servers</li>
+        <li>Trigger adapters: GitHub Issues, Jira, Linear (external process)</li>
+        <li>Storage adapters: S3, Azure Blob (external process)</li>
+        <li>Agent personality config: system prompts, temperature, tool subsets</li>
+        <li>Git workspace model: branch creation, workspace isolation, commit/push</li>
+        <li><code>run_test</code> core tool with project-configured command</li>
+    </ul>
+    <div class="deliverable">
+        Connect Jira, plug in internal APIs via MCP, store artifacts in cloud, run test-and-fix loops
+    </div>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">5</div>
+        <div class="phase-title">Guardrails</div>
+    </div>
+    <p>The system protects itself and the user's wallet.</p>
+    <ul>
+        <li>Effort estimation: Planner tags high/med/low, high requires human confirmation</li>
+        <li>Token budget enforcement: hard stop + notification</li>
+        <li>Scope detection: basic heuristics to catch overly broad issues</li>
+        <li>Admin escalation rules: configurable thresholds</li>
+        <li>MCP permission granularity: per-agent, per-tool allowlists</li>
+    </ul>
+    <div class="deliverable">
+        System asks "are you sure?" before burning API budget
+    </div>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">6</div>
+        <div class="phase-title">Polish</div>
+    </div>
+    <p>Shippable product.</p>
+    <ul>
+        <li>Complete audit logging</li>
+        <li>Metrics dashboard: token burn, cycle time, human intervention rate</li>
+        <li>Documentation: architecture, admin guide, user guide</li>
+        <li>Deployment: single binary + Docker Compose</li>
+    </ul>
+    <div class="deliverable">
+        Team can deploy to production and audit every decision
+    </div>
+</div>
+
+<h2>Technology Stack</h2>
+
+<table>
+    <tr>
+        <th>Component</th>
+        <th>Choice</th>
+    </tr>
+    <tr>
+        <td>Language</td>
+        <td>Go</td>
+    </tr>
+    <tr>
+        <td>Agent Runtime</td>
+        <td>Google ADK Go v2</td>
+    </tr>
+    <tr>
+        <td>App Database</td>
+        <td>SQLite</td>
+    </tr>
+    <tr>
+        <td>Storage</td>
+        <td>Filesystem (hexagonal port, built-in + external adapters)</td>
+    </tr>
+    <tr>
+        <td>Web Framework</td>
+        <td>Standard library <code>net/http</code> + lightweight frontend</td>
+    </tr>
+    <tr>
+        <td>Auth</td>
+        <td>OIDC (built-in), SAML (external adapter)</td>
+    </tr>
+    <tr>
+        <td>Deployment</td>
+        <td>Single binary + Docker Compose</td>
+    </tr>
+    <tr>
+        <td>Config</td>
+        <td>YAML</td>
+    </tr>
+    <tr>
+        <td>Serialization</td>
+        <td><code>encoding/json</code> (stdlib) or <code>github.com/goccy/go-json</code></td>
+    </tr>
+    <tr>
+        <td>Adapter Protocol</td>
+        <td>JSON-RPC 2.0 over stdio (JSON Lines)</td>
+    </tr>
+    <tr>
+        <td>Git Operations</td>
+        <td>Orchestrator-managed via <code>os/exec</code> (git/gh CLI prerequisites)</td>
+    </tr>
+    <tr>
+        <td>Test Execution</td>
+        <td>Sandboxed subprocess with pre-configured command</td>
+    </tr>
+</table>
+
+<h2>What "Bad Output" Means</h2>
+
+<p>For the MVP, "bad output" triggers admin notifications:</p>
+<ul>
+    <li>LLM API errors or timeouts</li>
+    <li>Agent exceptions during tool execution</li>
+    <li>Configuration errors or missing required config</li>
+    <li>Empty output files (zero-byte <code>output.*</code> heuristic)</li>
+</ul>
+
+<p>Heuristic-based "badness" detection (confidence scores, quality analysis) is deferred to Phase 5. The adjudicator port supports null, self, and human adapters. A dedicated AI adjudicator is a future possibility.</p>
+
+<h2>Open Questions for Future Sessions</h2>
+
+<ol>
+    <li><strong>Frontend technology:</strong> HTMX vs. minimal React vs. pure server-rendered HTML?</li>
+    <li><strong>Shell execution sandbox:</strong> Docker container, restricted user, or simple command timeout?</li>
+    <li><strong>Codebase search tool:</strong> Tree-sitter, ripgrep, or vector semantic search?</li>
+    <li><strong>Dashboard real-time updates:</strong> Server-Sent Events, WebSockets, or polling?</li>
+    <li><strong>Notification delivery:</strong> Email (SMTP), Slack webhook, or both?</li>
+    <li><strong>SSO scope:</strong> OIDC only for MVP, or SAML too?</li>
+    <li><strong>Agent output versioning:</strong> Overwrite or append? How to handle retries?</li>
+    <li><strong>Project/issue ID scheme:</strong> UUID, auto-increment, or human-readable?</li>
+    <li><strong>YAML config schema:</strong> Per-project, per-issue, or per-agent-type defaults with overrides?</li>
+    <li><strong>Local LLM integration:</strong> llama.cpp server, Ollama, or direct llama.cpp embedding?</li>
+    <li><strong>Adapter binary discovery:</strong> Static directory scan, PATH search, or configurable registry?</li>
+    <li><strong>Adapter authentication:</strong> How do external adapters authenticate to their backends (AWS credentials for S3, API keys for Jira)?</li>
+    <li><strong>Git commit strategy:</strong> Single commit per implementer run, or granular commits per file change?</li>
+    <li><strong>Workspace cleanup:</strong> Auto-delete old workspaces, or archive for audit?</li>
+    <li><strong>Test command environment:</strong> How to inject secrets/env vars into test subprocess without exposing them to the agent?</li>
+</ol>
+
+<div class="footer">
+    <p>Planning session complete. Ready to begin Phase 1 implementation.</p>
+    <p style="margin-top: 8px; font-size: 0.85rem;">Generated July 4, 2026 · AI Agent Orchestration System</p>
+</div>
+
+</body>
+</html>
