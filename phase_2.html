@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 2 Implementation Plan</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        .pipeline {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.95rem;
+            color: var(--accent);
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.92rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        .tag {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            margin-right: 6px;
+        }
+        .tag-go { background: #00add8; color: #000; }
+        .tag-core { background: var(--accent-soft); color: #fff; }
+        .tag-decision { background: var(--success); color: #000; }
+        .tag-phase { background: var(--warning); color: #000; }
+        .tag-port { background: #a371f7; color: #fff; }
+        .tag-adapter { background: #d2a8ff; color: #000; }
+        .tag-security { background: var(--danger); color: #fff; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-done { background: #238636; color: #fff; }
+        .status-progress { background: var(--warning); color: #000; }
+        .status-split { background: #a371f7; color: #fff; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        .deliverable {
+            background: var(--code-bg);
+            border-left: 3px solid var(--accent);
+            padding: 12px 16px;
+            margin: 12px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            border-radius: 0 6px 6px 0;
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .principle {
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+            margin: 16px 0;
+            padding: 16px 20px;
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        .principle-icon {
+            font-size: 1.4rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .principle-text strong {
+            color: var(--text-bright);
+            display: block;
+            margin-bottom: 4px;
+        }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+        .tree {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            background: var(--code-bg);
+            padding: 16px 20px;
+            border-radius: 8px;
+            color: var(--text-muted);
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+        .tree .comment { color: var(--text-muted); font-style: italic; }
+        .tree .dir { color: var(--accent); }
+        .tree .file { color: var(--text-bright); }
+        .adapter-box {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        .adapter-box .label { color: var(--accent); font-weight: 600; }
+        .adapter-box .builtin { color: var(--success); }
+        .adapter-box .external { color: var(--warning); }
+        .adapter-box .deferred { color: var(--text-muted); font-style: italic; }
+        .security-box {
+            background: var(--code-bg);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        .security-box .label { color: var(--danger); font-weight: 600; }
+        .check { color: var(--success); }
+        .cross { color: var(--danger); }
+        .split-banner {
+            background: linear-gradient(90deg, var(--accent-soft), #a371f7);
+            color: #fff;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+
+<h1>gorchestrator</h1>
+<p class="subtitle">Phase 2 Implementation Plan — The Pipeline</p>
+
+<div class="meta">
+    <span>📅 July 8, 2026</span>
+    <span>📝 Status: <span class="status-badge status-split">Split: Part 1 This Session</span></span>
+    <span>🎯 Scope: Research → Plan → Implement with configurable handoffs</span>
+</div>
+
+<h2>Goal</h2>
+
+<p>Execute the full agent pipeline from the CLI. Each phase feeds its <code>output.md</code> into the next phase. Handoff boundaries are configurable per agent.</p>
+
+<div class="pipeline">
+Trigger → Researcher → [Adjudicate] → Planner → [Adjudicate] → Implementer → Done
+</div>
+
+<div class="deliverable">
+$ gorchestrator run --issue="add auth" --project=foo<br>
+→ Creates issue, runs researcher → planner → implementer, writes artifacts, records state in SQLite
+</div>
+
+<div class="split-banner">
+    Session Plan: Part 1 = ADK migration (this session). Part 2 = multi-agent pipeline + handoffs (follow-up session).
+</div>
+
+<h2>Locked-In Decisions</h2>
+
+<table>
+    <tr>
+        <th>Topic</th>
+        <th>Decision</th>
+    </tr>
+    <tr>
+        <td><span class="tag tag-core">Core</span> Agent runtime</td>
+        <td>Tight integration with <code>google.golang.org/adk/v2</code>. No wrapper/port abstraction.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-core">Core</span> LLM providers</td>
+        <td>ADK's <code>model.LLM</code> interface. Gemini built-in via <code>model/gemini</code>; OpenAI via a custom <code>model.LLM</code> adapter. Old <code>internal/llm</code> port is removed.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Session/state</td>
+        <td>ADK session is ephemeral per phase. Filesystem is the only persisted memory/state. Use <code>session.InMemoryService()</code>.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Tools</td>
+        <td>Native ADK function tools (<code>tool/functiontool</code>) with typed arg/result structs. Kept generic enough for core tools + future MCP tools.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Implementer workspace</td>
+        <td>Scratch directory under <code>projects/{pid}/issues/{iid}/implementation/workspace/</code> for Phase 2. Git workspace model remains Phase 4.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Human gate (CLI-only)</td>
+        <td>Orchestrator writes <code>waiting_human</code>, exits, and records a pending decision. A <code>resume</code> subcommand applies pass/fail/retry.</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Phase split</td>
+        <td>Part 1 = ADK migration. Part 2 = pipeline, agents, handoffs, adjudicators.</td>
+    </tr>
+</table>
+
+<h2>Dependencies</h2>
+
+<div class="adapter-box">
+<span class="label">go.mod</span><br>
+<span class="external">google.golang.org/adk/v2</span> v2.0.0<br>
+<span class="external">google.golang.org/genai</span> <span class="comment">(transitive, used by ADK)</span><br>
+<span class="external">modernc.org/sqlite</span><br>
+<span class="external">gopkg.in/yaml.v3</span><br>
+<span class="deferred">Everything else from the Go standard library.</span>
+</div>
+
+<h2>Package Layout</h2>
+
+<div class="tree">
+<span class="file">main.go</span>                          <span class="comment">← CLI entrypoint; adds `resume` subcommand</span><br>
+<span class="dir">adapters/</span><br>
+├── <span class="dir">noop/</span>                        <span class="comment">← existing test adapter</span><br>
+├── <span class="dir">webhook/</span>                     <span class="comment">← NEW: example trigger adapter (Part 2)</span><br>
+└── <span class="dir">email/</span>                       <span class="comment">← NEW: example notification adapter (Part 2)</span><br>
+<span class="dir">internal/</span><br>
+├── <span class="dir">adapters/</span>            <span class="comment">← manifest parsing + JSON-RPC stdio client (existing)</span><br>
+├── <span class="dir">agents/</span>              <span class="comment">← NEW: ADK-native Researcher, Planner, Implementer builders</span><br>
+├── <span class="dir">cli/</span>                 <span class="comment">← run + resume subcommands</span><br>
+├── <span class="dir">config/</span>              <span class="comment">← config loader + per-agent overrides</span><br>
+├── <span class="dir">llm/</span>                 <span class="comment">← REDESIGNED: Gemini helper, custom OpenAI model.LLM, dry-run model</span><br>
+├── <span class="dir">orchestrator/</span>        <span class="comment">← phase machine, handoffs, adjudicators</span><br>
+├── <span class="dir">sqlite/</span>              <span class="comment">← schema + repositories (+ decisions table)</span><br>
+├── <span class="dir">storage/</span>             <span class="comment">← StoragePort + OS filesystem adapter (existing)</span><br>
+├── <span class="dir">tools/</span>               <span class="comment">← REDESIGNED: ADK function tools</span><br>
+└── <span class="dir">adjudication/</span>        <span class="comment">← NEW: Adjudicator port + Null/Self adapters</span><br>
+<span class="dir">configs/</span>                   <span class="comment">← example config files</span>
+</div>
+
+<h2>Part 1: ADK Migration (This Session)</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">1</div>
+        <div class="phase-title">Bootstrap ADK dependency</div>
+    </div>
+    <p>Fetch <code>google.golang.org/adk/v2@v2.0.0</code> and verify the module still builds. Update example config to support Gemini/OpenAI provider selection.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">2</div>
+        <div class="phase-title">Redesign tools as ADK function tools</div>
+    </div>
+    <p>Replace the custom <code>tools.Tool</code> interface with ADK's <code>tool.Tool</code>. Each tool is a <code>functiontool.New[TArgs, TResult]</code> wrapper around a typed Go function. Migrate <code>read_file</code>, <code>list_directory</code>, <code>grep_search</code>, and <code>write_output</code>. Preserve path allowlist enforcement inside the handlers.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">3</div>
+        <div class="phase-title">Redesign LLM layer around ADK model.LLM</div>
+    </div>
+    <p>Remove the old provider port. Add:</p>
+    <ul>
+        <li><code>internal/llm/gemini.go</code> — build Gemini model from config.</li>
+        <li><code>internal/llm/openai.go</code> — custom <code>model.LLM</code> that calls OpenAI chat completions and maps to/from <code>genai</code> types.</li>
+        <li><code>internal/llm/dryrun.go</code> — canned <code>model.LLM</code> for tests.</li>
+        <li><code>internal/llm/factory.go</code> — build a model from provider name.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">4</div>
+        <div class="phase-title">Rebuild Researcher as an ADK LLMAgent</div>
+    </div>
+    <p>Remove the custom agent loop. <code>NewResearcher(model model.LLM)</code> returns an <code>llmagent.New(...)</code> configured in task mode with the researcher toolset and system prompt. The orchestrator drives it via ADK's runner and drains events to capture output and usage.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">5</div>
+        <div class="phase-title">Rewrite orchestrator run flow for ADK</div>
+    </div>
+    <p>Keep project/issue/SQLite logic. For a single Researcher run, construct an ADK <code>Runner</code> with an in-memory session service, run the agent, extract the final output, write <code>output.md</code> and <code>result.json</code>, and record the run. Preserve <code>--dry-run</code>.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">6</div>
+        <div class="phase-title">Update tests</div>
+    </div>
+    <p>Ensure the existing dry-run integration test passes with the ADK backend. Add a unit test for the OpenAI-to-genai translation layer.</p>
+</div>
+
+<h3>Part 1 Success Criteria</h3>
+
+<ul>
+    <li><code>go run . run --issue="add auth" --project=foo --dry-run</code> completes and writes the same Phase 1 artifacts.</li>
+    <li>All existing tests pass.</li>
+    <li><code>go mod tidy</code> produces a clean module.</li>
+    <li>No custom agent loop or old <code>LLMProviderPort</code> code remains.</li>
+</ul>
+
+<h2>Part 2: Multi-Agent Pipeline + Handoffs (Follow-Up Session)</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">7</div>
+        <div class="phase-title">Add Planner and Implementer agents</div>
+    </div>
+    <p>Build ADK LLMAgents for <code>planner</code> (researcher-style tools + write_output) and <code>implementer</code> (workspace write tools). Each has a system prompt tuned for the next consumer.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">8</div>
+        <div class="phase-title">Add implementer tools</div>
+    </div>
+    <p>Implement <code>write_file</code> and <code>update_file</code> as ADK function tools. Paths are workspace-relative and constrained to <code>implementation/workspace/</code>.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">9</div>
+        <div class="phase-title">Define Adjudicator port</div>
+    </div>
+    <p>Create <code>internal/adjudication</code> with an <code>Adjudicator</code> interface returning <code>Pass/Fail/Retry</code>. Implement <code>NullAdjudicator</code> and <code>SelfAdjudicator</code>.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">10</div>
+        <div class="phase-title">Implement handoff modes</div>
+    </div>
+    <p>Support <code>n_loops</code>, <code>self_done</code>, and <code>human_gate</code>. <code>self_done</code> uses the agent's <code>finish_task</code> rationale. <code>human_gate</code> writes <code>waiting_human</code> and exits.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">11</div>
+        <div class="phase-title">Build the phase machine</div>
+    </div>
+    <p>Orchestrator runs <code>research → plan → implementation</code>. Each phase reads the previous <code>output.md</code>, writes its own <code>task.json</code>, runs the ADK agent, writes <code>output.md</code> + <code>result.json</code>, then applies the configured adjudicator before proceeding.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">12</div>
+        <div class="phase-title">SQLite decisions table + resume command</div>
+    </div>
+    <p>Add a <code>decisions</code> table. Implement <code>gorchestrator resume --project=foo --issue=N --decision=pass|fail|retry</code> to continue a <code>waiting_human</code> issue.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">13</div>
+        <div class="phase-title">External adapter examples</div>
+    </div>
+    <p>Add a <code>webhook</code> trigger adapter and an <code>email</code> notification adapter under <code>adapters/</code>. They exercise the existing JSON-RPC plumbing but are not wired into the core flow in Phase 2.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">14</div>
+        <div class="phase-title">Tests</div>
+    </div>
+    <p>Add end-to-end dry-run pipeline test, adjudicator unit tests, resume flow test, and implementer path-enforcement tests.</p>
+</div>
+
+<h2>Filesystem Artifact Contract</h2>
+
+<div class="tree">
+<span class="dir">{storage_root}/projects/{project_id}/issues/{issue_id}/</span><br>
+├── <span class="dir">research/</span><br>
+│   ├── <span class="file">task.json</span>      <span class="comment">← orchestrator writes</span><br>
+│   ├── <span class="file">output.md</span>      <span class="comment">← agent writes</span><br>
+│   └── <span class="file">result.json</span>    <span class="comment">← orchestrator writes</span><br>
+├── <span class="dir">plan/</span><br>
+│   ├── <span class="file">task.json</span><br>
+│   ├── <span class="file">output.md</span><br>
+│   └── <span class="file">result.json</span><br>
+└── <span class="dir">implementation/</span><br>
+    ├── <span class="file">task.json</span><br>
+    ├── <span class="file">output.md</span><br>
+    ├── <span class="file">result.json</span><br>
+    └── <span class="dir">workspace/</span>   <span class="comment">← implementer writes files here</span>
+</div>
+
+<h2>Full Phase 2 Success Criteria</h2>
+
+<ul>
+    <li><code>go run . run --issue="add auth" --project=foo --dry-run</code> executes research, plan, and implementation phases and writes all artifacts.</li>
+    <li><code>go run . resume --project=foo --issue=1 --decision=retry</code> continues a <code>waiting_human</code> issue.</li>
+    <li><code>go test ./...</code> passes.</li>
+    <li>No custom agent loop or old <code>LLMProviderPort</code> code remains.</li>
+    <li>Token usage and run history are recorded per phase.</li>
+</ul>
+
+<h2>Out of Scope for Phase 2</h2>
+
+<ul>
+    <li>Git workspace model (branching, committing, pushing) → Phase 4.</li>
+    <li><code>run_test</code> tool → Phase 4.</li>
+    <li>MCP adapter port → Phase 4.</li>
+    <li>Web dashboard / auth → Phase 3.</li>
+    <li>Token budgets / guardrails → Phase 5.</li>
+    <li>Slack/SMTP fully wired into notification flow → Phase 3/4.</li>
+</ul>
+
+<div class="footer">
+    <p>Phase 2 plan ready for implementation.</p>
+</div>
+
+</body>
+</html>
