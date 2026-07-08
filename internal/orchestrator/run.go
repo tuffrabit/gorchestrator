@@ -6,6 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/genai"
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+
 	"github.com/tuffrabit/gorchestrator/internal/adapters"
 	"github.com/tuffrabit/gorchestrator/internal/agents"
 	"github.com/tuffrabit/gorchestrator/internal/config"
@@ -25,13 +31,13 @@ type RunOptions struct {
 
 // Result is the orchestrator-written status envelope.
 type Result struct {
-	Status       string `json:"status"`
-	Error        string `json:"error"`
-	LoopCount    int    `json:"loop_count"`
-	TokensUsed   int    `json:"tokens_used"`
-	DurationMs   int64  `json:"duration_ms"`
+	Status        string `json:"status"`
+	Error         string `json:"error"`
+	LoopCount     int    `json:"loop_count"`
+	TokensUsed    int    `json:"tokens_used"`
+	DurationMs    int64  `json:"duration_ms"`
 	DoneRationale string `json:"done_rationale"`
-	Timestamp    string `json:"timestamp"`
+	Timestamp     string `json:"timestamp"`
 }
 
 // Task is the orchestrator-written instructions/config file.
@@ -81,10 +87,21 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 	// Discover external adapters (best-effort).
 	_, _ = adapters.Discovery(cfg.AdaptersDir)
 
-	// Select provider.
-	provider, err := buildProvider(cfg, opts.DryRun)
+	// Select model.
+	modelCfg := llm.Config{
+		Provider:  cfg.DefaultModel.Provider,
+		Model:     cfg.DefaultModel.Model,
+		APIKeyEnv: cfg.DefaultModel.APIKeyEnv,
+		BaseURL:   cfg.DefaultModel.BaseURL,
+		Timeout:   cfg.DefaultModel.TimeoutDur,
+	}
+	if opts.DryRun {
+		modelCfg.Provider = "dryrun"
+		modelCfg.Model = "dryrun"
+	}
+	llmModel, err := llm.New(ctx, modelCfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("build model: %w", err)
 	}
 
 	// Prepare paths.
@@ -93,9 +110,9 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 	allowlist := []string{issueDir}
 	outputPath := storage.OutputPath(project.ID, issue.ID, phase)
 
-	// Write task.json.
-	researcher := agents.NewResearcher(provider)
-	toolRegistry := tools.NewResearcherRegistry(&tools.BoundTools{})
+	// Build agent and capture tool schemas for task.json.
+	researcher := agents.NewResearcher()
+	toolSchemas := schemasFromTools(tools.NewResearcherRegistry(&tools.BoundTools{}))
 	task := Task{
 		AgentType:    "researcher",
 		SystemPrompt: researcher.SystemPrompt,
@@ -107,7 +124,7 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 		NLoops:    opts.Loops,
 		Input:     opts.IssueTitle,
 		Allowlist: allowlist,
-		Tools:     schemasFromRegistry(toolRegistry),
+		Tools:     toolSchemas,
 	}
 	taskData, err := json.MarshalIndent(task, "", "  ")
 	if err != nil {
@@ -123,91 +140,192 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 		return fmt.Errorf("create run: %w", err)
 	}
 
-	// Spawn agent goroutine.
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- runAgent(ctx, cfg, store, provider, project.ID, issue.ID, opts.IssueTitle, opts.Loops, allowlist, outputPath, run, runs)
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			_ = issues.UpdateStatus(issue.ID, "failed", phase)
-			return err
-		}
-		return issues.UpdateStatus(issue.ID, "done", phase)
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func runAgent(ctx context.Context, cfg *config.Config, store storage.Port, provider llm.Provider, projectID, issueID int64, input string, loops int, allowlist []string, outputPath string, run *sqlite.Run, runs *sqlite.RunRepo) error {
+	// Run the agent for n_loops, each loop in a fresh ADK session.
 	start := time.Now()
 	totalTokens := 0
+	lastOutput := ""
+	var runErr error
 
-	bt := &tools.BoundTools{
-		Storage:    store,
-		RootPath:   cfg.StorageRoot,
-		Allowlist:  allowlist,
-		OutputPath: outputPath,
-	}
-	registry := tools.NewResearcherRegistry(bt)
-	researcher := agents.NewResearcher(provider)
-
-	for i := 1; i <= loops; i++ {
+	for i := 1; i <= opts.Loops; i++ {
 		if err := ctx.Err(); err != nil {
-			_ = runs.UpdateStatus(run.ID, "failed", totalTokens, int(time.Since(start).Milliseconds()), i-1)
-			return err
+			runErr = err
+			break
 		}
-		usage, err := researcher.Run(ctx, input, registry)
+
+		outputWritten := false
+		bt := &tools.BoundTools{
+			Storage:       store,
+			RootPath:      cfg.StorageRoot,
+			Allowlist:     allowlist,
+			OutputPath:    outputPath,
+			OutputWritten: &outputWritten,
+		}
+		registry := tools.NewResearcherRegistry(bt)
+		agentInst, err := researcher.Build(llmModel, registry)
 		if err != nil {
-			_ = runs.UpdateStatus(run.ID, "failed", totalTokens, int(time.Since(start).Milliseconds()), i)
-			return fmt.Errorf("loop %d: %w", i, err)
+			runErr = fmt.Errorf("build researcher: %w", err)
+			break
 		}
-		totalTokens += usage.TotalTokens
+
+		sessionID := fmt.Sprintf("run-%d-loop-%d", run.ID, i)
+		r, err := runner.New(runner.Config{
+			AppName:           "gorchestrator",
+			Agent:             agentInst,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			runErr = fmt.Errorf("create runner: %w", err)
+			break
+		}
+
+		loopStart := time.Now()
+		loopTokens := 0
+		userContent := genai.NewContentFromText(opts.IssueTitle, genai.RoleUser)
+
+		var finalText string
+		for ev, err := range r.Run(ctx, "user", sessionID, userContent, agent.RunConfig{}) {
+			if err != nil {
+				runErr = fmt.Errorf("loop %d: %w", i, err)
+				break
+			}
+			if ev == nil || ev.Content == nil {
+				continue
+			}
+			if ev.UsageMetadata != nil {
+				loopTokens = int(ev.UsageMetadata.TotalTokenCount)
+			}
+			if ev.Content.Role == genai.RoleModel {
+				for _, p := range ev.Content.Parts {
+					if p != nil && p.Text != "" {
+						finalText = p.Text
+					}
+				}
+			}
+		}
+		if runErr != nil {
+			break
+		}
+
+		// If the agent did not use write_output, fall back to the final model text.
+		if !outputWritten {
+			if err := store.Write(ctx, outputPath, []byte(finalText)); err != nil {
+				runErr = fmt.Errorf("write fallback output: %w", err)
+				break
+			}
+		}
+
+		lastOutput = finalText
+		totalTokens += loopTokens
+		_ = loopStart
 	}
 
 	duration := time.Since(start).Milliseconds()
+
+	status := "done"
+	errMsg := ""
+	if runErr != nil {
+		status = "failed"
+		errMsg = runErr.Error()
+	}
+
 	result := Result{
-		Status:     "done",
-		LoopCount:  loops,
+		Status:     status,
+		Error:      errMsg,
+		LoopCount:  opts.Loops,
 		TokensUsed: totalTokens,
 		DurationMs: duration,
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 	}
+	if lastOutput != "" {
+		result.DoneRationale = lastOutput
+	}
+
 	resultData, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal result: %w", err)
 	}
-	if err := store.Write(ctx, storage.ResultPath(projectID, issueID, "research"), resultData); err != nil {
+	if err := store.Write(ctx, storage.ResultPath(project.ID, issue.ID, phase), resultData); err != nil {
 		return fmt.Errorf("write result.json: %w", err)
 	}
-	return runs.UpdateStatus(run.ID, "done", totalTokens, int(duration), loops)
+
+	if runErr != nil {
+		_ = issues.UpdateStatus(issue.ID, "failed", phase)
+		_ = runs.UpdateStatus(run.ID, "failed", totalTokens, int(duration), opts.Loops)
+		return runErr
+	}
+
+	_ = issues.UpdateStatus(issue.ID, "done", phase)
+	return runs.UpdateStatus(run.ID, "done", totalTokens, int(duration), opts.Loops)
 }
 
-func schemasFromRegistry(r *tools.Registry) []map[string]any {
-	llmTools := r.LLMTools()
-	out := make([]map[string]any, 0, len(llmTools))
-	for _, t := range llmTools {
+// schemasFromTools returns JSON-serializable tool schemas for task.json.
+// Because ADK infers schemas from Go struct types, we construct a minimal
+// declaration by reflecting over the function tool declarations.
+func schemasFromTools(toolList []tool.Tool) []map[string]any {
+	out := make([]map[string]any, 0, len(toolList))
+	for _, t := range toolList {
+		declarer, ok := t.(interface{ Declaration() *genai.FunctionDeclaration })
+		if !ok {
+			continue
+		}
+		decl := declarer.Declaration()
 		out = append(out, map[string]any{
-			"name":        t.Name,
-			"description": t.Description,
-			"parameters":  t.Parameters,
+			"name":        decl.Name,
+			"description": decl.Description,
+			"parameters":  schemaToMap(decl.Parameters),
 		})
 	}
 	return out
 }
 
-func buildProvider(cfg *config.Config, dryRun bool) (llm.Provider, error) {
-	if dryRun {
-		return llm.NewDryRunProvider(), nil
+func finishTaskResult(output any) string {
+	m, ok := output.(map[string]any)
+	if !ok {
+		return ""
 	}
-	switch cfg.DefaultModel.Provider {
-	case "openai":
-		return llm.NewOpenAIProvider(cfg.DefaultModel.Model, cfg.DefaultModel.APIKeyEnv, "", cfg.DefaultModel.TimeoutDur), nil
-	case "local":
-		return llm.NewLocalProvider(cfg.DefaultModel.Model, cfg.DefaultModel.APIKeyEnv, "", cfg.DefaultModel.TimeoutDur), nil
-	default:
-		return nil, fmt.Errorf("unknown provider: %s", cfg.DefaultModel.Provider)
+	v, ok := m["result"]
+	if !ok {
+		return ""
 	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+func schemaToMap(s *genai.Schema) map[string]any {
+	if s == nil {
+		return nil
+	}
+	m := map[string]any{
+		"type": s.Type,
+	}
+	if s.Description != "" {
+		m["description"] = s.Description
+	}
+	if s.Format != "" {
+		m["format"] = s.Format
+	}
+	if s.Nullable != nil && *s.Nullable {
+		m["nullable"] = true
+	}
+	if len(s.Enum) > 0 {
+		m["enum"] = s.Enum
+	}
+	if len(s.Required) > 0 {
+		m["required"] = s.Required
+	}
+	if s.Items != nil {
+		m["items"] = schemaToMap(s.Items)
+	}
+	if len(s.Properties) > 0 {
+		props := map[string]any{}
+		for k, v := range s.Properties {
+			props[k] = schemaToMap(v)
+		}
+		m["properties"] = props
+	}
+	return m
 }

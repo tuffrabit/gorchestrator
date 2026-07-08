@@ -3,20 +3,49 @@ package llm
 import (
 	"context"
 	"fmt"
+	"iter"
+
+	"google.golang.org/genai"
+	"google.golang.org/adk/v2/model"
 )
 
-// DryRunProvider returns a canned response without calling an LLM.
-type DryRunProvider struct{}
-
-// NewDryRunProvider creates a dry-run provider.
-func NewDryRunProvider() *DryRunProvider {
-	return &DryRunProvider{}
+// DryRunModel is a model.LLM that returns a canned response without calling an LLM.
+// It is used for tests and dry-run CLI mode.
+type DryRunModel struct {
+	modelName string
 }
 
-// Generate implements Provider.
-func (p *DryRunProvider) Generate(ctx context.Context, systemPrompt, userPrompt string, tools []Tool) (*Response, error) {
-	return &Response{
-		Content: fmt.Sprintf("## Dry-run response\n\n**System prompt:** %s\n\n**User prompt:** %s\n\nThis is a canned response for testing.", systemPrompt, userPrompt),
-		Usage:   Usage{},
-	}, nil
+// NewDryRunModel creates a dry-run model.
+func NewDryRunModel(modelName string) model.LLM {
+	if modelName == "" {
+		modelName = "dryrun"
+	}
+	return &DryRunModel{modelName: modelName}
+}
+
+// Name implements model.LLM.
+func (m *DryRunModel) Name() string {
+	return m.modelName
+}
+
+// GenerateContent implements model.LLM.
+func (m *DryRunModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		// Build a simple user prompt summary for the canned response.
+		var prompt string
+		for _, c := range req.Contents {
+			for _, p := range c.Parts {
+				prompt += p.Text
+			}
+		}
+		text := fmt.Sprintf("## Dry-run response\n\n**Prompt:** %s\n\nThis is a canned response for testing.", prompt)
+		resp := &model.LLMResponse{
+			Content: &genai.Content{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{Text: text}},
+			},
+			TurnComplete: true,
+		}
+		yield(resp, nil)
+	}
 }

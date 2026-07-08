@@ -14,6 +14,7 @@ type ModelConfig struct {
 	Provider    string `yaml:"provider"`
 	Model       string `yaml:"model"`
 	APIKeyEnv   string `yaml:"api_key_env"`
+	BaseURL     string `yaml:"base_url"`
 	Timeout     string `yaml:"timeout"`
 	TimeoutDur  time.Duration `yaml:"-"`
 }

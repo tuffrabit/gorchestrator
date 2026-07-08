@@ -2,7 +2,11 @@ storage_root: ~/.config/gorchestrator/storage
 adapters_dir: ~/.config/gorchestrator/adapters
 db_path: ~/.config/gorchestrator/gorchestrator.db
 default_model:
+  # Supported providers: openai, gemini, dryrun
+  # For OpenAI-compatible local endpoints (llama.cpp/Ollama), use provider: openai
+  # and set base_url to the local endpoint.
   provider: openai
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
+  # base_url: http://localhost:8080/v1
   timeout: 60s
