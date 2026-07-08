@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 1 Implementation Plan</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        .pipeline {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.95rem;
+            color: var(--accent);
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.92rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        .tag {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            margin-right: 6px;
+        }
+        .tag-go { background: #00add8; color: #000; }
+        .tag-core { background: var(--accent-soft); color: #fff; }
+        .tag-decision { background: var(--success); color: #000; }
+        .tag-phase { background: var(--warning); color: #000; }
+        .tag-port { background: #a371f7; color: #fff; }
+        .tag-adapter { background: #d2a8ff; color: #000; }
+        .tag-security { background: var(--danger); color: #fff; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-done { background: #238636; color: #fff; }
+        .status-progress { background: var(--warning); color: #000; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        .deliverable {
+            background: var(--code-bg);
+            border-left: 3px solid var(--accent);
+            padding: 12px 16px;
+            margin: 12px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            border-radius: 0 6px 6px 0;
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .principle {
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+            margin: 16px 0;
+            padding: 16px 20px;
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        .principle-icon {
+            font-size: 1.4rem;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .principle-text strong {
+            color: var(--text-bright);
+            display: block;
+            margin-bottom: 4px;
+        }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+        .tree {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            background: var(--code-bg);
+            padding: 16px 20px;
+            border-radius: 8px;
+            color: var(--text-muted);
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+        .tree .comment { color: var(--text-muted); font-style: italic; }
+        .tree .dir { color: var(--accent); }
+        .tree .file { color: var(--text-bright); }
+        .adapter-box {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        .adapter-box .label { color: var(--accent); font-weight: 600; }
+        .adapter-box .builtin { color: var(--success); }
+        .adapter-box .external { color: var(--warning); }
+        .adapter-box .deferred { color: var(--text-muted); font-style: italic; }
+        .security-box {
+            background: var(--code-bg);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+        }
+        .security-box .label { color: var(--danger); font-weight: 600; }
+        .check { color: var(--success); }
+        .cross { color: var(--danger); }
+    </style>
+</head>
+<body>
+
+<h1>gorchestrator</h1>
+<p class="subtitle">Phase 1 Implementation Plan — The Engine (CLI-Only)</p>
+
+<div class="meta">
+    <span>📅 July 8, 2026</span>
+    <span>📝 Status: <span class="status-badge status-progress">Ready to Implement</span></span>
+    <span>🎯 Scope: Single Researcher run from CLI</span>
+</div>
+
+<h2>Goal</h2>
+
+<p>Build a running system that accepts a manual trigger from the command line, runs a single <strong>Researcher</strong> agent, and writes the artifact triad to storage.</p>
+
+<div class="deliverable">
+$ go run . run --issue="add auth" --project=foo<br>
+→ Creates issue, runs researcher, writes artifacts, marks done in SQLite
+</div>
+
+<div class="highlight-box">
+    <p><strong>Design constraint:</strong> Everything is native Go. No CGO. The structure should assume the final product is a long-running app with a web interface and goroutine workers, but Phase 1 only exposes the CLI path.</p>
+</div>
+
+<h2>Locked-In Decisions</h2>
+
+<table>
+    <tr>
+        <th>Topic</th>
+        <th>Decision</th>
+    </tr>
+    <tr>
+        <td><span class="tag tag-go">Go</span> Entry point</td>
+        <td><code>main.go</code> at project root</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-go">Go</span> CLI library</td>
+        <td>stdlib <code>flag</code></td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-core">Core</span> Agent runtime</td>
+        <td><code>google.golang.org/adk/v2</code></td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> SQLite driver</td>
+        <td><code>modernc.org/sqlite</code> (pure Go, no CGO)</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Config</td>
+        <td>Global YAML in <code>~/.config/gorchestrator/config.yaml</code></td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> IDs</td>
+        <td>Auto-increment integers</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Handoff mode</td>
+        <td><code>n_loops</code> only; each loop overwrites <code>output.md</code></td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> Grep tool</td>
+        <td>Pure-Go file walker from <code>tuffrabit/flamingode/internal/tools/grep.go</code></td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> LLM adapters</td>
+        <td>OpenAI, local HTTP, and a <code>--dry-run</code> stub</td>
+    </tr>
+    <tr>
+        <td><span class="tag tag-decision">Decision</span> External adapters</td>
+        <td>Foundation only: manifest parsing + JSON-RPC stdio client</td>
+    </tr>
+</table>
+
+<h2>Dependencies</h2>
+
+<div class="adapter-box">
+<span class="label">go.mod</span><br>
+<span class="external">google.golang.org/adk/v2</span><br>
+<span class="external">modernc.org/sqlite</span><br>
+<span class="external">gopkg.in/yaml.v3</span><br>
+<span class="deferred">Everything else from the Go standard library.</span>
+</div>
+
+<h2>Package Layout</h2>
+
+<div class="tree">
+<span class="file">main.go</span>                  <span class="comment">← CLI entrypoint at project root</span><br>
+<span class="dir">internal/</span><br>
+├── <span class="dir">adapters/</span>            <span class="comment">← adapter manifest + JSON-RPC stdio client</span><br>
+├── <span class="dir">agents/</span>              <span class="comment">← Researcher agent definition</span><br>
+├── <span class="dir">config/</span>              <span class="comment">← ~/.config/gorchestrator/config.yaml loader</span><br>
+├── <span class="dir">llm/</span>                 <span class="comment">← LLMProviderPort + OpenAI/local/dry-run adapters</span><br>
+├── <span class="dir">orchestrator/</span>        <span class="comment">← run lifecycle, goroutines, n_loops handoff</span><br>
+├── <span class="dir">sqlite/</span>              <span class="comment">← schema + repositories</span><br>
+├── <span class="dir">storage/</span>             <span class="comment">← StoragePort + OS filesystem adapter</span><br>
+├── <span class="dir">tools/</span>               <span class="comment">← read_file, list_directory, grep_search, write_output</span><br>
+└── <span class="dir">trigger/</span>             <span class="comment">← TriggerPort + manual CLI trigger</span><br>
+<span class="dir">adapters/</span>                  <span class="comment">← external adapter binary directory (empty Phase 1)</span><br>
+<span class="dir">configs/</span>                   <span class="comment">← example config files</span>
+</div>
+
+<h2>Implementation Roadmap</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">1</div>
+        <div class="phase-title">Bootstrap</div>
+    </div>
+    <p>Initialize the module, root <code>main.go</code>, and a minimal stdlib <code>flag</code> CLI with placeholder <code>run</code> and <code>version</code> commands.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">2</div>
+        <div class="phase-title">Configuration</div>
+    </div>
+    <p>Load global YAML from <code>~/.config/gorchestrator/config.yaml</code>. Required fields:</p>
+    <ul>
+        <li><code>storage_root</code> — base directory for projects and workspaces</li>
+        <li><code>adapters_dir</code> — directory to scan for external adapters</li>
+        <li><code>default_model</code> — provider, model, API key env var, timeout</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">3</div>
+        <div class="phase-title">Storage Port</div>
+    </div>
+    <p>Define <code>StoragePort</code> and implement the OS filesystem adapter. Add artifact path helpers and constrain all paths under <code>storage_root</code>.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">4</div>
+        <div class="phase-title">SQLite Schema</div>
+    </div>
+    <p>Open <code>~/.config/gorchestrator/gorchestrator.db</code>. Create tables for <code>projects</code>, <code>issues</code>, and <code>runs</code> with repositories.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">5</div>
+        <div class="phase-title">Adapter Foundation</div>
+    </div>
+    <p>Scan <code>adapters_dir</code> for manifests, parse YAML, implement JSON-RPC 2.0 over stdio, and manage child-process lifecycle. Include a tiny no-op test adapter.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">6</div>
+        <div class="phase-title">LLM Provider Port</div>
+    </div>
+    <p>Build <code>LLMProviderPort</code> with OpenAI, local HTTP, and <code>--dry-run</code> stub adapters. The stub returns a canned markdown response so tests need no API key.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">7</div>
+        <div class="phase-title">Core Tools</div>
+    </div>
+    <p>Implement native Go tools scoped to the Researcher: <code>read_file</code>, <code>list_directory</code>, <code>grep_search</code>, and <code>write_output</code>. The orchestrator resolves paths before they reach storage.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">8</div>
+        <div class="phase-title">Researcher Agent</div>
+    </div>
+    <p>Define the <code>Researcher</code> struct, default system prompt, and tool bindings. Run it through ADK Go while keeping filesystem as the source of truth.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">9</div>
+        <div class="phase-title">Orchestrator Run Command</div>
+    </div>
+    <p>Implement <code>run</code>: load/create project &amp; issue, write <code>task.json</code>, spawn a goroutine, run <code>n_loops</code>, write <code>result.json</code>, and record the run in SQLite. Support clean context cancellation.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">10</div>
+        <div class="phase-title">Integration Test</div>
+    </div>
+    <p>Run the orchestrator with <code>--dry-run</code> against a temp storage root. Assert artifacts exist and SQLite records are correct.</p>
+</div>
+
+<h2>Filesystem Artifact Contract</h2>
+
+<p>Each Researcher run produces a single phase directory:</p>
+
+<div class="tree">
+<span class="dir">{storage_root}/projects/{project_id}/issues/{issue_id}/</span><br>
+└── <span class="dir">research/</span><br>
+    ├── <span class="file">task.json</span>      <span class="comment">← orchestrator writes: agent config, model, loop mode, input context</span><br>
+    ├── <span class="file">output.md</span>      <span class="comment">← agent writes: free-form result, overwritten each loop</span><br>
+    └── <span class="file">result.json</span>    <span class="comment">← orchestrator writes: status, tokens, duration, loop count</span>
+</div>
+
+<h2>Success Criteria</h2>
+
+<ul>
+    <li><code>go run . run --issue="add auth" --project=foo --dry-run</code> completes without error.</li>
+    <li>Artifacts exist under the correct issue directory.</li>
+    <li>SQLite contains project, issue, and run records.</li>
+    <li><code>go test ./...</code> passes.</li>
+    <li>No CGO dependencies are introduced.</li>
+</ul>
+
+<h2>Out of Scope</h2>
+
+<ul>
+    <li>Planner and Implementer agents</li>
+    <li><code>self_done</code> and <code>human_gate</code> handoff modes</li>
+    <li>Adjudicator port</li>
+    <li>Git workspace management</li>
+    <li>Web dashboard / HTTP server</li>
+    <li>MCP, SSO, notifications</li>
+    <li>Token budgets and guardrails</li>
+</ul>
+
+<div class="footer">
+    <p>Phase 1 plan ready for implementation.</p>
+</div>
+
+</body>
+</html>
