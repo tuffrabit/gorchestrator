@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 4 Implementation Plan</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        .security-box {
+            background: var(--code-bg);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+        }
+        .security-box .label { color: var(--danger); font-weight: 600; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-draft { background: var(--warning); color: #000; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .phase-number.sec { background: var(--danger); }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+<h1>gorchestrator</h1>
+<p class="subtitle">Phase 4 Implementation Plan — Extensibility</p>
+
+<div class="meta">
+    <span>📅 July 8, 2026</span>
+    <span>📝 Status: <span class="status-badge status-draft">Draft</span></span>
+    <span>🎯 Prerequisite: Phase 3 complete</span>
+</div>
+
+<h2>Goal</h2>
+
+<p>An issue filed in Jira flows into the daemon, the pipeline runs against a real git branch, the implementer iterates through container-sandboxed test-and-fix loops using an internal API exposed over MCP, and the resulting branch is pushed for human review.</p>
+
+<h2>Workstreams</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A</div>
+        <div class="phase-title">Git Workspace Model (replaces §6.6 snapshots)</div>
+    </div>
+    <ul>
+        <li>Project git config (spec §6.3): <code>repo_url</code>, <code>base_branch</code>, auth mode (<code>ssh_key</code> / <code>token</code> / <code>gh_cli</code>); environment prerequisites validated at project registration, not mid-run.</li>
+        <li>Clone cache per project; fetch before each run.</li>
+        <li>Branch per implementer run: <code>ai-implementer/{issue_id}-{run_id}</code>; workspace = checkout (replaces per-issue snapshot copies).</li>
+        <li>Post-run: stage, single structured commit (§17 Q13), optional push; human decides merge. Optional PR via <code>gh</code>.</li>
+        <li>Parallel implementers: branch + workspace per run, tracked in SQLite.</li>
+        <li>Symlink/containment hardening from cleanup assumed — real repos contain symlinks.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number sec">B</div>
+        <div class="phase-title">run_test — container sandbox is the acceptance criterion</div>
+    </div>
+    <div class="security-box">
+        <span class="label">Security posture (spec §6.5):</span> the command executes code the implementer just wrote — arbitrary code execution by proxy. Container required: no network, workspace-only mount, CPU/memory/time limits. <strong>No bare-subprocess fallback</strong> — without a container runtime, <code>run_test</code> refuses to run.
+    </div>
+    <ul>
+        <li>Size-capped stdout/stderr returned to the agent; test-and-fix loop covered by an integration test.</li>
+        <li>Secrets injected from maintainer-only config into the container env; never rendered into <code>task.json</code> or any agent-readable artifact (§17 Q15).</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C</div>
+        <div class="phase-title">MCP Client</div>
+    </div>
+    <ul>
+        <li>MCP over stdio; servers declared in project config; <strong>deny by default</strong>.</li>
+        <li><strong>Per-agent, per-server allowlists ship in this phase</strong> — required to land <em>with</em> external triggers, not after (spec §5.6). Per-tool granularity remains Phase 5.</li>
+        <li>Tools registered explicitly in agent config; MCP calls recorded in <code>events.jsonl</code> like core tools.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">D</div>
+        <div class="phase-title">Trigger Port + External Triggers</div>
+    </div>
+    <ul>
+        <li>Formalize <code>TriggerPort</code> (deferred from Phase 1); built-in webhook endpoint on the daemon.</li>
+        <li>External process adapters: GitHub Issues, Jira (JSON-RPC stdio, long-running listeners).</li>
+        <li><strong>Untrusted input posture (spec §5.6):</strong> externally-triggered issues default to <code>adjudicator: human</code> on the implementation boundary; overridable per project, but the default is the safe one.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">E</div>
+        <div class="phase-title">Storage &amp; Agent Config</div>
+    </div>
+    <ul>
+        <li>S3 external storage adapter — first real consumer of slash-canonical port keys and the <code>events.jsonl</code> write path.</li>
+        <li>Agent personality config (the casting thesis, realized): per-agent model/provider, temperature, prompt override, tool subsets — per-project defaults with per-issue overrides (settles §17 Q9).</li>
+        <li>Adapter authentication pattern (§17 Q12): adapters own their backend credentials via their own config/env — never through the core's agent-visible artifacts.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">F</div>
+        <div class="phase-title">JSON-RPC Client Completion</div>
+    </div>
+    <ul>
+        <li>Restart with exponential backoff on adapter death (deferred from cleanup).</li>
+        <li>Streaming notifications for long-running adapter events (trigger feeds).</li>
+    </ul>
+</div>
+
+<h2>Tests</h2>
+
+<ul>
+    <li>End-to-end: webhook-submitted issue → pipeline on a fixture git repo → branch with commit exists; push against a local bare repo.</li>
+    <li><code>run_test</code>: container enforced (refusal without runtime), timeout kill, no-network assertion, secrets absent from all artifacts.</li>
+    <li>MCP: fixture server; allowlisted agent sees tools, non-allowlisted does not; calls recorded in events.</li>
+    <li>Trigger adapter killed → restarted with backoff.</li>
+    <li>S3 adapter round-trip (e.g., MinIO) — keys identical across host platforms.</li>
+</ul>
+
+<h2>Success Criteria</h2>
+
+<ul>
+    <li>Jira/GitHub issue → reviewed branch, hands-free except configured human gates.</li>
+    <li>Implementer completes a test-and-fix loop inside the sandbox.</li>
+    <li>An internal API is used by an agent via MCP under a per-agent server allowlist.</li>
+    <li>Externally-triggered issues stop at a human gate before implementation by default.</li>
+</ul>
+
+<h2>Out of Scope</h2>
+
+<ul>
+    <li>Token budgets, effort estimation, scope detection → Phase 5</li>
+    <li>Per-tool MCP granularity → Phase 5</li>
+    <li>Azure Blob (follow-on once the S3 pattern is proven)</li>
+</ul>
+
+<div class="footer">
+    <p>Phase 4 draft — refine into session-sized parts before implementation. Canonical source: <code>phase_4.md</code></p>
+</div>
+
+</body>
+</html>

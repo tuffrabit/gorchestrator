@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 2 Project Cleanup Plan</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.92rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        .tag {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            margin-right: 6px;
+        }
+        .tag-security { background: var(--danger); color: #fff; }
+        .tag-decision { background: var(--success); color: #000; }
+        .tag-core { background: var(--accent-soft); color: #fff; }
+        .tag-phase { background: var(--warning); color: #000; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-done { background: #238636; color: #fff; }
+        .status-progress { background: var(--warning); color: #000; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+        .phase-number.sec { background: var(--danger); }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        .deliverable {
+            background: var(--code-bg);
+            border-left: 3px solid var(--accent);
+            padding: 12px 16px;
+            margin: 12px 0;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            border-radius: 0 6px 6px 0;
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+<h1>gorchestrator</h1>
+<p class="subtitle">Phase 2 Project Cleanup — Defect Fixes &amp; Spec Alignment</p>
+
+<div class="meta">
+    <span>📅 July 8, 2026</span>
+    <span>📝 Status: <span class="status-badge status-progress">Ready to Implement</span></span>
+    <span>🎯 Scope: No new pipeline features</span>
+</div>
+
+<h2>Goal</h2>
+
+<p>Fix the defects found in the post-Part-1 code review and align the implementation with the revised spec (2026-07-08). After this phase the system still runs a single Researcher, but on the revised artifact contract with the known defects closed.</p>
+
+<div class="deliverable">
+$ go run . run --issue="add auth" --project=foo --dry-run<br>
+→ Same behavior as today, except artifacts land in the revised layout<br>
+&nbsp;&nbsp;(attempts/1/output.md, events.jsonl, result.json at start + completion)
+</div>
+
+<div class="highlight-box">
+    <p><strong>Why a dedicated phase:</strong> Part 2 builds the phase machine directly on top of path containment, token accounting, the artifact layout, and the SQLite layer. Fixing these first means Part 2 is built on the final contract instead of churning it mid-build. Sequenced between Phase 2 Part 1 (✅ complete) and Phase 2 Part 2. <strong>Do not start Part 2 before this phase completes.</strong></p>
+</div>
+
+<h2>Group A — Security &amp; Correctness Fixes</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number sec">A1</div>
+        <div class="phase-title">Separator-aware path containment</div>
+    </div>
+    <p><code>internal/storage/fs.go</code> uses <code>strings.HasPrefix(realAbs, fs.root)</code>, so a root of <code>/data/gorch</code> admits <code>/data/gorch-evil</code>. Replace with a <code>filepath.Rel</code>-based check. Test: sibling directory whose name extends the root's is rejected.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number sec">A2</div>
+        <div class="phase-title">Symlink resolution policy</div>
+    </div>
+    <p><code>resolve()</code> never calls <code>EvalSymlinks</code>; a symlink inside the root pointing outside defeats containment. Workspaces copied from real repositories will contain symlinks (Part 2), so this must close now. Resolve symlinks on the deepest existing ancestor, re-check containment, reject escapes. Tests: escaping symlinked file and escaping intermediate directory.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A3</div>
+        <div class="phase-title">Per-call token accounting</div>
+    </div>
+    <p><code>loopTokens = int(ev.UsageMetadata.TotalTokenCount)</code> overwrites on each event — a multi-tool-call loop counts only the final model call. Accumulate per model call (trivial once events are recorded, see C2). Extend the dry-run model to a scripted multi-turn sequence and assert the total is the sum, not the last value.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A4</div>
+        <div class="phase-title">Truthful result.json</div>
+    </div>
+    <ul>
+        <li><code>LoopCount</code> reports the actual count reached, not the configured target, when a run fails mid-way.</li>
+        <li>Stop stuffing final output into <code>done_rationale</code> — reserved for self-adjudication (spec §7.2).</li>
+        <li>Ctrl-C produces <code>status: cancelled</code>, not <code>failed</code> (spec §7.3).</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A5</div>
+        <div class="phase-title">Empty output fails the loop</div>
+    </div>
+    <p>Today, an agent that neither calls <code>write_output</code> nor produces final text yields a zero-byte output marked <code>done</code>. Per revised spec §13.1: that is a failed loop. Keep the fallback for non-empty final text.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A6</div>
+        <div class="phase-title">read_file: two modes + configurable cap</div>
+    </div>
+    <p>Restructure as two explicit modes (spec §12.1):</p>
+    <ul>
+        <li><strong>Whole-file:</strong> no range args → full file, subject to a cap. On truncation the result carries an explicit marker plus the file's total line count, so the agent knows to switch modes.</li>
+        <li><strong>Surgical:</strong> <code>offset</code> (1-based line) + <code>limit</code> (line count) → exactly that range. The intended follow-up to <code>grep_search</code>, which already returns file + line numbers — grep to locate, then read the relevant region.</li>
+    </ul>
+    <p>Cap is <strong>configurable</strong> (<code>tools.read_file.max_bytes</code> / <code>max_lines</code>) with sane defaults: 64KB / ~2,000 lines, whichever first. The tool's description string teaches the grep → surgical-read workflow to the model.</p>
+</div>
+
+<h2>Group B — Robustness</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">B1</div>
+        <div class="phase-title">JSON-RPC client hardening</div>
+    </div>
+    <ul>
+        <li><code>bufio.Scanner</code> default 64KB line limit truncates large payloads — set a generous explicit buffer (~10MB); oversize is an error, not a silent skip.</li>
+        <li>Implement the <code>initialize</code> handshake from spec §4.3.</li>
+        <li><code>Close()</code> blocks forever on a child ignoring stdin closure — wait with timeout, then kill.</li>
+        <li>Capture child stderr into core logs; adapter failures are currently invisible.</li>
+        <li><em>Deferred to Phase 4:</em> restart with exponential backoff, streaming notifications.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">B2</div>
+        <div class="phase-title">Explicit adapter registry</div>
+    </div>
+    <p>Per revised spec §4.3: adapters declared in config (name + manifest path); remove directory scanning. Manifest gains an explicit <code>binary:</code> field verified as a <strong>regular executable file</strong> — today <code>os.Stat</code> accepts a directory, and the repo's own <code>adapters/noop.yaml</code> next to the <code>adapters/noop/</code> source directory passes discovery and would fail at exec. Remove the decorative <code>Discovery()</code> call from the orchestrator.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">B3</div>
+        <div class="phase-title">OpenAI adapter resilience</div>
+    </div>
+    <p>Retry with exponential backoff on 429/5xx (respect <code>Retry-After</code>) — a single rate-limit blip currently fails an entire phase. Fall back to <code>m.model</code> when <code>req.Model</code> is empty. Streaming remains deferred.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">B4</div>
+        <div class="phase-title">SQLite pragmas + versioned migrations</div>
+    </div>
+    <p>Open with <code>journal_mode=WAL</code>, <code>busy_timeout</code> (5s), <code>foreign_keys=ON</code> (silently unenforced without it). Replace accreting <code>CREATE TABLE IF NOT EXISTS</code> with a minimal versioned migration mechanism — Part 2's <code>decisions</code> table and Phase 3's tables arrive as migrations instead of schema drift.</p>
+</div>
+
+<h2>Group C — Artifact Contract Alignment (spec §7)</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C1</div>
+        <div class="phase-title">result.json at phase start</div>
+    </div>
+    <p>Write <code>{"status": "in_progress"}</code> before the agent runs; finalize on completion. This is the substrate for crash detection (spec §9.4) — recovery behavior itself lands in Part 2.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C2</div>
+        <div class="phase-title">events.jsonl transcripts</div>
+    </div>
+    <p>Append-only, one JSON object per line: model turns, tool calls and results (size-capped), per-call token usage, timestamps. Sourced from the ADK event stream the orchestrator already drains and currently discards. Written through the StoragePort so external storage adapters inherit it.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C3</div>
+        <div class="phase-title">attempts/ layout + feed-forward loops</div>
+    </div>
+    <p>Outputs move to <code>attempts/1/output.md</code>; <code>result.json</code> gains <code>attempt</code> and <code>latest_output</code> fields. Loop <em>i</em> receives loop <em>i−1</em>'s output in context (spec §8.3); intermediate loop states are visible in <code>events.jsonl</code>. The single-researcher flow always uses attempt 1 — multiple attempts arrive with adjudication in Part 2, but the layout must not churn then.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C4</div>
+        <div class="phase-title">Slash-canonical storage keys</div>
+    </div>
+    <p><code>path.Join</code> (forward slash) for port keys, not <code>filepath.Join</code>; the FS adapter translates to OS separators. Prevents separator leakage into future S3/Azure keys (spec §3.3).</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C5</div>
+        <div class="phase-title">.gitignore-aware grep</div>
+    </div>
+    <p>Honor <code>.gitignore</code> as the Phase 1 plan promised (in addition to existing <code>.git</code> and binary skips). Matters as soon as source snapshots arrive in Part 2 (<code>node_modules</code>, build dirs).</p>
+</div>
+
+<h2>Group D — Hygiene</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">D1</div>
+        <div class="phase-title">Dead code removal</div>
+    </div>
+    <p>Remove <code>finishTaskResult</code>, <code>MarshalTask</code>, <code>lastOutput</code> misuse, <code>_ = loopStart</code>. Consolidate the duplicated <code>schemaToMap</code> (orchestrator + llm packages) into one shared helper. <code>mustTool</code> panics — propagate errors to the CLI instead.</p>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">D2</div>
+        <div class="phase-title">README.md</div>
+    </div>
+    <p>What the project is, current status, how to run the dry-run demo, and the documentation convention (spec.md is living; phase docs freeze; markdown canonical).</p>
+</div>
+
+<h2>Tests Summary</h2>
+
+<table>
+    <tr><th>Area</th><th>Test</th></tr>
+    <tr><td>A1</td><td>Sibling-prefix root rejection</td></tr>
+    <tr><td>A2</td><td>Symlink escape rejection (file + directory)</td></tr>
+    <tr><td>A3</td><td>Multi-turn token accumulation vs. scripted dry-run</td></tr>
+    <tr><td>A4</td><td>Actual loop count on mid-run failure; <code>cancelled</code> on context cancel</td></tr>
+    <tr><td>A5</td><td>Empty-output attempt → failed</td></tr>
+    <tr><td>A6</td><td>Whole-file under/over cap (marker + total line count); surgical mid-file range; past-EOF; configurable cap override</td></tr>
+    <tr><td>B1</td><td>&gt;64KB JSON-RPC payload round-trip; close-with-timeout</td></tr>
+    <tr><td>B2</td><td>Manifest rejects directory/non-executable; registry loads only configured adapters</td></tr>
+    <tr><td>B3</td><td>429 → retry → success (httptest)</td></tr>
+    <tr><td>B4</td><td>Pragmas active; migrations idempotent</td></tr>
+    <tr><td>C1–C3</td><td>Integration test asserts in-progress-then-done result.json, events.jsonl contents, attempts/ layout</td></tr>
+</table>
+
+<h2>Success Criteria</h2>
+
+<ul>
+    <li><code>go run . run --issue="add auth" --project=foo --dry-run</code> completes; artifacts appear in the revised layout.</li>
+    <li>All tests above pass; <code>go vet ./...</code> clean; <code>go mod tidy</code> clean.</li>
+    <li>No dead code from the ADK migration remains; no duplicated schema helpers.</li>
+    <li>SQLite opens with WAL/busy_timeout/foreign_keys; schema is migration-versioned.</li>
+    <li>No behavioral feature additions — the pipeline is still a single Researcher run.</li>
+</ul>
+
+<h2>Out of Scope (→ Phase 2 Part 2)</h2>
+
+<ul>
+    <li>Planner/Implementer agents, adjudication, <code>resume</code>, decisions table</li>
+    <li>Source snapshot and workspace seeding (feature, not cleanup)</li>
+    <li><code>ModeChat</code> → <code>ModeTask</code> migration (tied to <code>finish_task</code> and self-adjudication)</li>
+    <li>Crash-recovery <em>behavior</em> (the in-progress result.json written here is its substrate)</li>
+    <li>Anthropic adapter</li>
+</ul>
+
+<div class="footer">
+    <p>Phase 2 Project Cleanup — canonical source: <code>phase_2_cleanup.md</code></p>
+</div>
+
+</body>
+</html>

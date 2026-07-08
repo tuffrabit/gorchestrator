@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 6 Implementation Plan</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-draft { background: var(--warning); color: #000; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+<h1>gorchestrator</h1>
+<p class="subtitle">Phase 6 Implementation Plan — Polish &amp; Ship</p>
+
+<div class="meta">
+    <span>📅 July 8, 2026</span>
+    <span>📝 Status: <span class="status-badge status-draft">Draft</span></span>
+    <span>🎯 Prerequisite: Phase 5 complete</span>
+</div>
+
+<h2>Goal</h2>
+
+<p>A team can deploy gorchestrator to production, operate it from the docs alone, audit every decision after the fact, and trust it under sustained load at the target scale (hundreds of users).</p>
+
+<h2>Workstreams</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A</div>
+        <div class="phase-title">Audit Completeness</div>
+    </div>
+    <ul>
+        <li>Every state-changing action writes an audit entry — <strong>verified by test, not by convention</strong>.</li>
+        <li>Dashboard audit views: per-issue timeline, per-user activity, exportable (JSONL/CSV).</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">B</div>
+        <div class="phase-title">Metrics Dashboard</div>
+    </div>
+    <ul>
+        <li>Token burn per project/agent/model over time; cycle time per phase; human intervention rate; failure/escalation rates.</li>
+        <li>Sourced from data already persisted (<code>events.jsonl</code>, runs, decisions, audit) — aggregation and display, not new collection.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C</div>
+        <div class="phase-title">Retention &amp; Cleanup (closes §17 Q14)</div>
+    </div>
+    <ul>
+        <li>Per-project retention: workspaces (largest artifacts) auto-deleted N days after terminal state; issue artifacts retained or archived — they are the audit substance.</li>
+        <li>Suggested defaults: delete workspaces after 30 days, archive issue artifacts after 180, never silently delete audit rows.</li>
+        <li>Storage-usage view; manual purge with confirmation + audit entry.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">D</div>
+        <div class="phase-title">Documentation</div>
+    </div>
+    <ul>
+        <li>Architecture doc generated from spec.md's living content — not a fork of it.</li>
+        <li>Admin guide (deployment, OIDC, project/git config, adapters, budgets, escalation); user guide (submitting, reading runs, <em>adjudicating well — feedback quality matters</em>); API reference.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">E</div>
+        <div class="phase-title">Deployment &amp; Operations</div>
+    </div>
+    <ul>
+        <li>Single static binary release, embedded dashboard assets; Dockerfile + Compose (volumes for SQLite + storage root; container-runtime socket documented for <code>run_test</code>).</li>
+        <li>Backup/restore: SQLite snapshot + storage-root sync; restore drill documented <em>and tested</em> — filesystem-authoritative reconciliation (§9.4) should make partial restores survivable; verify that claim.</li>
+        <li>Health/readiness endpoints; structured logging; optional OTel export (already transitively present via ADK).</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">F</div>
+        <div class="phase-title">Hardening</div>
+    </div>
+    <ul>
+        <li>CI: build, vet, race-detector tests, lint.</li>
+        <li>Fuzz tests on path containment and JSON-RPC framing — the two parsing surfaces exposed to untrusted-ish input.</li>
+        <li>Load smoke test at target scale: sustained parallel issues at the worker cap; SQLite contention, SSE fan-out, storage growth observed.</li>
+        <li>Versioning policy, CHANGELOG, release engineering.</li>
+    </ul>
+</div>
+
+<h2>Success Criteria</h2>
+
+<ul>
+    <li>Fresh machine → deployed, configured, first issue through the pipeline using only the docs.</li>
+    <li>Every decision in a month of simulated use is reconstructible from audit + artifacts.</li>
+    <li>Load smoke test passes at target scale with no lock errors or lost events.</li>
+    <li>Backup → destroy → restore drill succeeds.</li>
+</ul>
+
+<div class="footer">
+    <p>Phase 6 draft — refine into session-sized parts before implementation. Canonical source: <code>phase_6.md</code></p>
+</div>
+
+</body>
+</html>

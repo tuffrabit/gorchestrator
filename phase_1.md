@@ -1,8 +1,8 @@
 # Phase 1 Implementation Plan — The Engine (CLI-Only)
 
-> **Status:** Approved  
+> **Status:** ✅ Complete — frozen historical record (2026-07-08)  
 > **Scope:** End-to-end CLI path that creates an issue, runs a single Researcher agent, writes filesystem artifacts, and records state in SQLite.  
-> **Agent-facing source of truth for this phase.**
+> **Note:** Per the documentation convention in `spec.md`, this document is frozen as a changelog of what Phase 1 planned and built. Details superseded by later phases (e.g., the custom `LLMProviderPort`, directory-scan adapter discovery, the pre-ADK tool interface) are recorded as revisions in `spec.md`, not edited here. Two planned items did not ship as written: `internal/trigger/` was never created (TriggerPort formalization deferred to Phase 4), and the grep tool does not yet respect `.gitignore` (fixed in Phase 2 Project Cleanup).
 
 ---
 

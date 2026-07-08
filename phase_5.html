@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 5 Implementation Plan</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: var(--text-bright);
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+            margin-bottom: 32px;
+        }
+        .meta {
+            display: flex;
+            gap: 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 40px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        h2 {
+            font-size: 1.5rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+        .highlight-box p:last-child { margin-bottom: 0; }
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-draft { background: var(--warning); color: #000; }
+        .phase-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 16px 0;
+        }
+        .phase-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .phase-number {
+            background: var(--accent-soft);
+            color: #fff;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1rem;
+            flex-shrink: 0;
+        }
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        ul { margin: 12px 0 12px 24px; }
+        li { margin-bottom: 6px; }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        code {
+            font-family: 'SF Mono', Monaco, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+<h1>gorchestrator</h1>
+<p class="subtitle">Phase 5 Implementation Plan — Guardrails</p>
+
+<div class="meta">
+    <span>📅 July 8, 2026</span>
+    <span>📝 Status: <span class="status-badge status-draft">Draft</span></span>
+    <span>🎯 Prerequisite: Phase 4 complete</span>
+</div>
+
+<h2>Goal</h2>
+
+<p>The system asks <em>"are you sure?"</em> before burning budget, halts runaway work mid-flight, and gives admins configurable escalation instead of silent failure. With external triggers live, unattended volume is now possible — this phase makes it safe.</p>
+
+<h2>Workstreams</h2>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">A</div>
+        <div class="phase-title">Token Budget Enforcement</div>
+    </div>
+    <ul>
+        <li>Budgets per agent, per issue, per project, per provider (spec §13.2).</li>
+        <li><strong>Enforcement point:</strong> checked before each model call against accumulated per-call usage from <code>events.jsonl</code> — a hard mid-run stop, not a post-run report.</li>
+        <li>On breach: phase → <code>failed</code> with <code>budget_exceeded</code>; admin notified; issue paused, resumable after a human raises the budget.</li>
+        <li>Warning threshold (e.g., 80%) → admin notification via the Phase 3 path.</li>
+        <li>Optional cost mapping: maintainer-supplied per-model pricing table for dashboard currency display; tokens remain the enforced unit.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">B</div>
+        <div class="phase-title">Effort Estimation Gate</div>
+    </div>
+    <ul>
+        <li>Planner emits an effort tag (<code>high</code>/<code>medium</code>/<code>low</code>) as structured data via <code>finish_task</code> — not parsed out of free-form <code>output.*</code>, which the orchestrator never parses.</li>
+        <li><code>high</code> inserts a human confirmation gate before implementation, regardless of configured adjudicator.</li>
+        <li>Threshold behavior configurable per project.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">C</div>
+        <div class="phase-title">Scope Detection</div>
+    </div>
+    <ul>
+        <li>Cheap heuristics at submission: text vagueness signals, forbidden-phrase list ("refactor the entire…"), planner file-count estimates.</li>
+        <li>Flagged issues require human confirmation before research begins — the cheapest point to stop a runaway task.</li>
+        <li>Heuristics are advisory and logged; false-positive rate reviewed via audit data.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">D</div>
+        <div class="phase-title">Admin Escalation Rules</div>
+    </div>
+    <ul>
+        <li>Configurable thresholds → escalations: consecutive failures, retry counts, budget warnings, adapter restart loops, sandbox refusals.</li>
+        <li>Targets reuse Phase 3 notification adapters; rules in config with an admin dashboard page.</li>
+    </ul>
+</div>
+
+<div class="phase-card">
+    <div class="phase-header">
+        <div class="phase-number">E</div>
+        <div class="phase-title">MCP Per-Tool Granularity</div>
+    </div>
+    <ul>
+        <li>Per-agent, per-tool allowlists (tightening Phase 4's per-server grants).</li>
+        <li>Tool-level constraints where supported (e.g., <code>query_database</code> restricted to <code>SELECT</code>); endpoint restrictions for HTTP-ish tools.</li>
+        <li>Dashboard surface showing exactly which agent can touch what — auditable at a glance.</li>
+    </ul>
+</div>
+
+<h2>Tests</h2>
+
+<ul>
+    <li>Budget: scripted model with known usage → hard stop mid-phase; resumable after budget raise.</li>
+    <li>Effort gate: planner tags high → pipeline pauses pre-implementation; human confirm proceeds.</li>
+    <li>Scope flag: pathological issue text held at submission.</li>
+    <li>Escalation: N consecutive failures → one notification (no alert storm).</li>
+    <li>MCP: per-tool denial enforced at call time and absent from the agent's advertised toolset.</li>
+</ul>
+
+<h2>Success Criteria</h2>
+
+<div class="highlight-box">
+    <p>A deliberately runaway task (huge scope, low budget) is stopped <strong>three separate ways</strong>: at submission (scope), before implementation (effort), and mid-run (budget). No guardrail can be bypassed by agent output content — all enforcement is orchestrator-side.</p>
+</div>
+
+<h2>Out of Scope</h2>
+
+<ul>
+    <li>Metrics/reporting polish, deployment packaging → Phase 6</li>
+</ul>
+
+<div class="footer">
+    <p>Phase 5 draft — refine into session-sized parts before implementation. Canonical source: <code>phase_5.md</code></p>
+</div>
+
+</body>
+</html>

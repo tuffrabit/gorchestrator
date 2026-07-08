@@ -1,8 +1,17 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04  
-> **Status:** Planning Complete — Ready for Phase 1 Implementation  
-> **Purpose:** This document captures all architectural decisions, constraints, and phase definitions agreed upon during the planning session. Future implementation sessions should reference this document as the single source of truth.
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-08 (post Phase 2 Part 1 review)  
+> **Status:** Living document — single source of truth  
+> **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
+>
+> **Documentation convention:** This spec is the only *living* design document — it is updated whenever a decision changes. Phase plan documents (`phase_*.md`) are frozen once their phase completes and serve as historical changelogs. Each phase markdown has a companion `phase_*.html` rendering for human consumption, regenerated whenever its markdown changes materially. **Markdown is canonical** — on any conflict, the `.md` wins. `spec_summary.html` remains a frozen snapshot of the original planning session.
+
+### Revision Log
+
+| Date | Change |
+|------|--------|
+| 2026-07-04 | Initial spec from planning session. |
+| 2026-07-08 | Post-review revision. Recorded the ADK-native LLM integration decision (supersedes LLMProviderPort); unified handoff modes and adjudicators into a single axis (§9); specified crash-recovery semantics (§9.4); added per-phase `events.jsonl` transcripts and attempt versioning with adjudication feedback (§7); moved read-only project source access into Phase 2 (§6.6); named daemonization as Phase 3's first workstream (§11.0); hardened `run_test` sandbox requirements (§6.5); added untrusted-input/prompt-injection section (§5.6); switched adapter discovery to an explicit registry (§4.3); inserted a "Phase 2 Project Cleanup" phase (§14); converted resolved open questions into soft decisions (§17). |
 
 ---
 
@@ -20,7 +29,7 @@ This is **not** a generic "solve everything" agent orchestrator. It is specifica
 - **Agent casting matters.** The human's job is to min/max which LLM plays which role (e.g., deep research model vs. fast planner vs. competent coder).
 - **Filesystem is the agent's memory.** Agents share data through filesystem artifacts, not through shared memory or session state.
 - **Go concurrency is a feature.** Goroutines, in-process execution, SQLite, and filesystem storage are sufficient for the target scale (hundreds of users, not thousands).
-- **Crash resilience by design.** If the process crashes mid-execution, agents resume from filesystem state on restart.
+- **Crash resilience by design.** If the process crashes mid-execution, the orchestrator recovers from filesystem state on restart. Because agent reasoning state is ephemeral (in-memory ADK sessions), recovery means re-running the interrupted phase from its `task.json` — see §9.4 for the precise state machine.
 - **Adapters are external processes.** The core binary is static; extensibility is achieved through JSON-RPC over stdio with external adapter binaries. Common adapters are built-in.
 - **Secure by default.** Core tools are architecturally scoped by agent type. Agents do not get raw filesystem, shell, or git access.
 
@@ -40,11 +49,11 @@ Each handoff boundary is configurable. Adjudication is optional and pluggable.
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| **Orchestrator** | Pipeline state machine, handoff logic, goroutine lifecycle, git workspace management | Custom Go |
+| **Orchestrator** | Pipeline state machine, handoff logic, goroutine lifecycle, git workspace management. Built as an embeddable engine: the one-shot CLI (Phases 1–2) and the daemon (Phase 3+) are thin front-ends over the same core. | Custom Go |
 | **Agent Runtime** | Single-agent reasoning, tool calling, LLM interaction | Google ADK Go |
 | **Storage (App State)** | Projects, issues, users, run history, audit log | SQLite |
 | **Storage (Agent Memory)** | Agent outputs, shared artifacts, free-form content | Filesystem (hexagonal port) |
-| **LLM Provider** | Model-agnostic LLM API access | ADK Go + LiteLLM wrapper + custom adapters |
+| **LLM Provider** | Model-agnostic LLM API access | ADK `model.LLM` implementations, in-process (see §3.3 note — no longer a JSON-RPC port) |
 | **Tools** | Core capabilities + custom extensions | Native Go tools + MCP adapter port |
 | **Triggers** | How work enters the system | Hexagonal port with multiple adapters |
 | **Adjudication** | Quality gates between phases | Hexagonal port (null / self / human) |
@@ -52,12 +61,14 @@ Each handoff boundary is configurable. Adjudication is optional and pluggable.
 
 ### 3.3 Hexagonal Ports (Defined)
 
-1. **StoragePort** — Filesystem operations (read, write, list, watch)
+1. **StoragePort** — Filesystem operations (read, write, list; `watch` is deferred and not in the current interface)
+   - Port paths are canonical forward-slash relative keys; each adapter translates to its native form (OS separators, object keys). This keeps S3/Azure keys portable across host platforms.
    - Built-in adapters: OS filesystem (default)
    - External adapters: S3, Azure Blob (via JSON-RPC stdio)
-2. **LLMProviderPort** — LLM API abstraction
-   - Built-in adapters: OpenAI, Anthropic, Gemini, local llama.cpp
-   - External adapters: Enterprise gateways, custom providers (via JSON-RPC stdio)
+2. **LLM Integration** — *superseded as a port (2026-07-08).* Phase 2 adopted tight integration with ADK's `model.LLM` interface and deleted the custom LLMProviderPort. LLM extensibility now means:
+   - Built-in `model.LLM` implementations: OpenAI, Anthropic, Gemini
+   - OpenAI-compatible HTTP endpoints (llama.cpp, Ollama, enterprise gateways) via the OpenAI implementation with a custom `base_url`
+   - Exotic providers implement `model.LLM` in-process — **not** JSON-RPC stdio adapters
 3. **TriggerPort** — How issues enter the system
    - Built-in adapters: Manual CLI, webhook
    - External adapters: GitHub Issues, Jira, email, Slack/Teams bot (via JSON-RPC stdio)
@@ -95,7 +106,7 @@ Go is a compiled, statically-linked language. Runtime plugin loading via `plugin
 **Protocol:** JSON-RPC 2.0 over stdin/stdout (line-delimited JSON, aka JSON Lines).
 
 **Lifecycle:**
-1. Core discovers adapter binaries in a configured directory (e.g., `./adapters/`)
+1. Adapters are **declared explicitly in configuration** (name + manifest path). The core does not blind-scan a directory and spawn whatever executables it finds — running unlisted binaries is a supply-chain risk. *(Revised 2026-07-08; supersedes directory scanning.)*
 2. Core spawns the adapter as a child process, holding stdin/stdout pipes open
 3. Core sends `initialize` method with the port's expected interface schema
 4. All subsequent calls are JSON-RPC request/response pairs
@@ -109,8 +120,11 @@ name: s3
 version: "1.0.0"
 protocol: jsonrpc-stdio
 port: storage
-capabilities: [read, write, list, watch]
+binary: ./gorchestrator-adapter-s3   # explicit path, relative to the manifest; must be a regular executable file
+capabilities: [read, write, list]
 ```
+
+The `binary` field is explicit — the binary path is not inferred from `name`, and the core verifies it is a regular executable file (not a directory) before spawning.
 
 **Example Request/Response:**
 
@@ -131,7 +145,7 @@ JSON serialization is handled by Go's standard library `encoding/json` or `githu
 | Port | Built-in Adapters | External Adapters | Rationale |
 |------|-------------------|-------------------|-----------|
 | **StoragePort** | OS filesystem | S3, Azure Blob | Storage is high-frequency; external process overhead is acceptable for MVP. Built-in filesystem covers 80% of use cases. |
-| **LLMProviderPort** | OpenAI, Anthropic, Gemini, local HTTP (llama.cpp/Ollama) | Enterprise gateways, custom APIs | Common providers are built-in for zero-config setup. Exotic providers use external process. |
+| **LLM (`model.LLM`)** | OpenAI, Anthropic, Gemini; OpenAI-compatible endpoints for local/gateways | — (in-process `model.LLM` implementations only) | Superseded as a JSON-RPC port 2026-07-08; see §3.3. Common providers are built-in for zero-config setup. |
 | **TriggerPort** | Manual CLI, HTTP webhook | GitHub Issues, Jira, email IMAP, Slack bot | Triggers are naturally long-running listeners. External process is a good fit. |
 | **AdjudicatorPort** | Null, Self, Human | Custom AI reviewer | Core adjudication modes are built-in. Custom reviewers can be external. |
 | **MCPAdapterPort** | — | Any MCP server | MCP is natively an external process protocol (stdio or HTTP). Core implements MCP client. |
@@ -159,7 +173,7 @@ Security is not a permissions layer bolted on top — it is the architecture its
 
 | Tool | Researcher | Planner | Implementer | Description |
 |------|-----------|---------|-------------|-------------|
-| `read_file` | ✅ | ✅ | ✅ | Read full or partial content of a file. Path resolved by orchestrator against allowlist. |
+| `read_file` | ✅ | ✅ | ✅ | Two modes: whole-file (subject to a configurable cap) or surgical line-range read. Path resolved by orchestrator against allowlist. See §12.1. |
 | `list_directory` | ✅ | ✅ | ✅ | List contents of a directory. |
 | `grep_search` | ✅ | ✅ | ✅ | Search file contents via pattern matching. |
 | `write_output` | ✅ | ✅ | ❌ | Write to the agent's designated `output.*` file in the issue directory. Orchestrator resolves path; agent does not know the filesystem layout. |
@@ -174,13 +188,21 @@ Security is not a permissions layer bolted on top — it is the architecture its
 
 Core agents do not have `bash` or `shell_exec` tools. All operations are mediated through typed tool calls. The only exception is `run_test`, which executes a **pre-configured, immutable command** defined in project configuration. The agent sees stdout/stderr output but cannot modify the command.
 
+Note that command immutability alone is *not* a security boundary — the command executes code the implementer just wrote. See §6.5 for why `run_test` must be treated as arbitrary code execution and container-isolated accordingly.
+
 ### 5.4 Path Resolution & Allowlist
 
 The orchestrator maintains an allowlist of readable paths for each agent run:
-- **Researcher/Planner:** Can read from the issue's agent output directories (previous phases) and any paths explicitly provided in `task.json`.
-- **Implementer:** Can read from its workspace directory and the issue's previous agent output directories.
+- **Researcher/Planner:** the issue's read-only source snapshot (§6.6), the issue's agent output directories (previous phases), and any paths explicitly provided in `task.json`.
+- **Implementer:** its workspace directory, the source snapshot, and the issue's previous agent output directories.
+
+Source access matters: without it, the researcher has nothing to research and produces hallucinated findings. It is part of Phase 2 (§6.6), not deferred to the Phase 4 git model.
 
 All tool paths provided by the agent are resolved by the orchestrator against this allowlist. Attempts to access paths outside the allowlist are rejected by the orchestrator before reaching the StoragePort.
+
+**Containment rules (revised 2026-07-08):**
+- Prefix checks are separator-aware: an allowed root of `/data/gorch` must not admit `/data/gorch-evil`.
+- Symlinks are resolved (`EvalSymlinks`) before the containment check; a symlink that escapes the allowed roots is rejected. This matters once workspaces are copies of real repositories, which routinely contain symlinks.
 
 ### 5.5 MCP Permission Model
 
@@ -192,10 +214,28 @@ MCP servers are the real permission surface because they expose arbitrary capabi
 - The human maintainer decides which MCP servers to connect
 - **Default: deny** — no MCP servers are connected unless explicitly configured
 
-**Future (Phase 4+):**
-- Per-agent, per-tool allowlists
+**Phase 4 (must land *with* external triggers, not after):**
+- Per-agent, per-**server** allowlists — an agent only sees tools from MCP servers explicitly granted to it
+
+**Phase 5:**
+- Per-agent, per-**tool** allowlists
 - Tool-level permission granularity (e.g., `query_database` only allows `SELECT`)
 - Endpoint restrictions for API tools
+
+The MVP "all tools to all agents" posture is acceptable only while all pipeline input is human-authored. It must tighten before external triggers (GitHub/Jira) land — see §5.6.
+
+### 5.6 Untrusted Input & Prompt Injection
+
+The pipeline consumes untrusted text: issue titles/bodies arriving via external triggers (GitHub, Jira, email) and the contents of repository files the agents read. Any of it can contain instructions crafted to manipulate an agent. Combined with capable tools — especially MCP servers exposing database or API access — this is an exfiltration and abuse vector.
+
+Mitigations, by architecture and by phase:
+- Core tools are scoped by construction (§5.2) — a hijacked researcher can still only write to its own output file.
+- Adjudication gates are the primary human backstop. Human review before implementation is the recommended posture for externally-triggered issues; Phase 4 makes this the default for external trigger sources.
+- Per-agent MCP server allowlists ship in Phase 4 alongside external triggers — not after.
+- `run_test` container isolation (§6.5) bounds what a hijacked implementer can execute.
+- Secrets are never rendered into agent-visible artifacts (`task.json` is agent-readable; see §17 Q15).
+
+This does not make the system injection-proof — no LLM pipeline is. The spec's position: scope every capability so the blast radius of a hijacked agent is the smallest the workflow allows.
 
 ---
 
@@ -261,10 +301,24 @@ project:
 
 **Properties:**
 - Command is **immutable** — defined in project config, not modifiable by the agent
-- Executed in the implementer's workspace directory
-- Sandboxed subprocess with timeout and output capture
-- Agent receives stdout/stderr but cannot modify the command
+- Executed against the implementer's workspace
+- Agent receives stdout/stderr (size-capped) but cannot modify the command
 - Enables implementer test-and-fix loops without opening arbitrary shell access
+
+**Security posture (revised 2026-07-08).** An immutable command is *not* a security boundary: the command executes code the implementer just wrote, so a hostile or hijacked agent can put anything in a test file — read env vars, hit the network, escape the workspace. `run_test` is arbitrary code execution by proxy and must be treated as such:
+
+- Execution **must** be container-isolated (Docker/Podman): no network, workspace-only mount, CPU/memory/time limits. This is a Phase 4 acceptance criterion, not an optimization.
+- A bare subprocess with a timeout is **not** an acceptable fallback on shared or credentialed hosts. If no container runtime is available, `run_test` refuses to run rather than degrading.
+- Test-environment secrets are injected from maintainer-only configuration into the container environment and are never written to any agent-readable artifact (see §17 Q15).
+
+### 6.6 Phase 2 Interim: Read-Only Source Snapshot
+
+The full git workspace model above lands in Phase 4. From Phase 2 onward, the orchestrator provides read-only source access so research, planning, and implementation operate on the real codebase instead of a vacuum:
+
+- Per project, configuration points at a local source directory (or a repository to clone once).
+- On issue creation, the orchestrator copies it to `projects/{pid}/issues/{iid}/source/` (excluding `.git`) as an immutable snapshot.
+- The snapshot is in every agent's read allowlist. The implementer's `workspace/` is seeded as a **copy of the snapshot**, so implementation edits real code.
+- Phase 4 replaces snapshot copies with git-managed branch checkouts (and eliminates the per-issue copy overhead).
 
 ---
 
@@ -274,31 +328,36 @@ project:
 
 ```
 projects/{project_id}/issues/{issue_id}/
+├── source/                  ← read-only project source snapshot (orchestrator-created; §6.6)
 ├── research/
-│   ├── task.json          ← Orchestrator writes: instructions, model config, loop config
-│   ├── result.json          ← Orchestrator writes: status, error, tokens_used, done_rationale
-│   └── output.*             ← Agent writes free-form content: .md, .json, .py, .xlsx, etc.
+│   ├── task.json            ← orchestrator writes: instructions, model config, loop/adjudication config
+│   ├── result.json          ← orchestrator writes: status envelope (at phase START and completion; §9.4)
+│   ├── events.jsonl         ← orchestrator writes: append-only run transcript (model turns, tool calls, usage)
+│   └── attempts/
+│       ├── 1/
+│       │   ├── output.*     ← agent writes free-form content: .md, .json, .py, .xlsx, etc.
+│       │   └── feedback.md  ← orchestrator writes adjudicator feedback if this attempt was rejected
+│       └── 2/ ...           ← one directory per adjudication attempt; retries never overwrite
 ├── plan/
-│   ├── task.json
-│   ├── result.json
-│   └── output.*
-├── adjudication/
-│   ├── task.json
-│   ├── result.json
-│   └── output.*
+│   └── (same structure)
 └── implementation/
-    ├── task.json
-    ├── result.json
-│   └── output.*
+    ├── (same structure)
+    └── workspace/           ← implementer's mutable copy of source (Phase 2); git checkout (Phase 4)
 ```
+
+*(Revised 2026-07-08: added `source/`, `events.jsonl`, and the `attempts/` layout; removed the separate `adjudication/` phase directory — adjudication is a boundary evaluation (§9), not a phase, and its record lives in `feedback.md` + SQLite decisions.)*
 
 ### 7.2 The Minimal Contract
 
-- **task.json** — Orchestrator writes. Contains: agent type, system prompt reference, model config, tool list, loop mode, handoff config, input context (path to previous agent's output), readable path allowlist.
-- **result.json** — Orchestrator writes after agent completes. Contains: status (`in_progress`, `done`, `failed`), error message (if any), tokens consumed, duration, done_rationale (for self_done mode), loop count, timestamp.
-- **output.*** — Agent writes. **Completely free-form.** Content is determined by the agent's system prompt and the underlying LLM. The orchestrator never parses this file. The next agent receives the content of this file as its input context.
+- **task.json** — Orchestrator writes. Contains: agent type, system prompt reference, model config, tool list, adjudication/loop config, input context (paths to issue text and previous accepted outputs), readable path allowlist. **Never contains secrets** — it is agent-readable.
+- **result.json** — Orchestrator writes **at phase start** (`status: in_progress`) and again on completion. Contains: status, error message (if any), attempt count, loop count, tokens consumed, duration, done_rationale (self adjudication only), pointer to the latest attempt, timestamp. Writing it at phase start is what makes crash detection possible (§9.4).
+- **events.jsonl** — Orchestrator writes, append-only, one JSON object per line: model turns, tool calls and results (size-capped), and per-call token usage. This is the substrate for the Phase 3 activity stream, token accounting, debugging, and the audit trail. Without it, agent runs are black boxes.
+- **output.*** — Agent writes, into the current attempt directory. **Completely free-form.** Content is determined by the agent's system prompt and the underlying LLM. The orchestrator never parses this file. The next agent receives the content of the accepted attempt's output as input context.
+- **feedback.md** — Orchestrator writes into an attempt directory when an adjudicator rejects it: the decision and the feedback/rationale. The next attempt receives this content in its input context (§8.3).
 
-**Critical rule:** No agent reads or parses `result.json`. Only the orchestrator manages status. Agents only read their `task.json` and write their `output.*`.
+**Critical rule:** No agent reads or parses `result.json` or `events.jsonl`. Only the orchestrator manages status. Agents only read their `task.json` inputs and write their `output.*`.
+
+**Authority rule:** where filesystem and SQLite disagree, **the filesystem is authoritative**. SQLite is a queryable index over filesystem truth, reconciled at startup (§9.4, §10.3).
 
 ### 7.3 Status Values
 
@@ -308,8 +367,9 @@ projects/{project_id}/issues/{issue_id}/
 | `done` | Agent completed successfully, ready for handoff evaluation |
 | `failed` | Agent encountered an error, timeout, or exception |
 | `waiting_human` | HumanAdjudicator gate triggered, goroutine exited, awaiting human decision |
-| `retry` | Human or self-adjudicator rejected output, agent should re-run |
+| `retry` | Adjudicator rejected the attempt; a new attempt is starting with the rejection feedback in context |
 | `skipped` | Phase was skipped (e.g., adjudication configured as null) |
+| `cancelled` | Run was cancelled by the user (Ctrl-C / shutdown) before completion — distinct from `failed` |
 
 ---
 
@@ -332,40 +392,73 @@ Per-project or per-issue YAML overrides:
 - Temperature, max tokens, token budget
 - System prompt override or extension
 - Tool subset (enable/disable specific tools)
-- Loop mode and parameters
-- Handoff configuration
+- Boundary configuration: `adjudicator`, `max_attempts`, `loops` (§9.1)
 
 ### 8.3 Context Flow
 
-Agent N+1 receives the **entire content** of Agent N's `output.*` file as its prompt context. The human's job is to configure agents such that Agent N's output is useful as Agent N+1's input. No automatic summarization or distillation by the orchestrator.
+The default context recipe for each phase is: **the original issue title/body, plus the entire content of the immediately-previous phase's accepted `output.*`**. (The first phase receives only the issue.) Per-agent config may add further inputs — e.g., give the implementer the research output as well as the plan. No automatic summarization or distillation by the orchestrator — the human's job is to configure agents such that Agent N's output is useful as Agent N+1's input.
+
+Two additional context rules (revised 2026-07-08):
+
+- **Refinement loops feed forward.** When an agent runs multiple loops within an attempt, loop *i* receives loop *i−1*'s output as context. Fresh-context loops that overwrite each other are pure token burn; the loop mechanism exists for iterative refinement.
+- **Retries see why they failed.** When an adjudicator rejects an attempt, the next attempt's context includes the rejected `output.*` and the adjudicator's `feedback.md`. A blind retry discards the most valuable signal a human gate produces.
 
 ---
 
-## 9. Handoff & Loop Configuration
+## 9. Handoff & Adjudication (Unified Model)
 
-### 9.1 Handoff Boundary Modes (Per-Agent Configurable)
+*(Revised 2026-07-08: the previously separate "handoff modes" — `n_loops` / `self_done` / `human_gate` — and "adjudicators" — null / self / human — overlapped almost 1:1 and produced ambiguous configurations ("`loop_mode: self_done` with `adjudicator: human` — what happens?"). They are merged into a single axis.)*
 
-| Mode | Description |
-|------|-------------|
-| **n_loops** | Agent runs exactly N times. Orchestrator tracks loop count in `result.json`. After N loops, status becomes `done` regardless of output quality. |
-| **self_done** | Agent evaluates itself against an English rubric (defined in config). Agent writes its assessment to `output.*` (free-form). Orchestrator reads `result.json` status. If agent reports itself done, status becomes `done`. |
-| **human_gate** | Agent completes, status becomes `waiting_human`. Goroutine **exits**. Orchestrator writes to SQLite notification queue. Human reviews via dashboard and clicks pass/fail/retry. New goroutine spawned on decision. |
+### 9.1 The Boundary Model
 
-### 9.2 Adjudication Port
+Every phase boundary is configured with exactly three settings:
+
+| Setting | Meaning | Default |
+|---------|---------|---------|
+| `adjudicator` | Who decides whether the phase output is accepted: `null`, `self`, `human` *(future: `agent`)* | `null` |
+| `max_attempts` | Maximum adjudication attempts before the phase is marked `failed` | 1 |
+| `loops` | Refinement iterations *within* one attempt; loop *i* receives loop *i−1*'s output (§8.3) | 1 |
+
+The legacy modes map cleanly: `n_loops` ≡ `adjudicator: null` + `loops: N`; `self_done` ≡ `adjudicator: self`; `human_gate` ≡ `adjudicator: human`. One concept, one config axis, simpler phase machine — and the future AgentAdjudicator drops in without a new mode.
+
+### 9.2 Adjudicators
 
 Adjudication is a **handoff boundary evaluation**, not an agent type. The system does not care WHO adjudicates.
 
-- **NullAdjudicator** — Auto-pass. No evaluation.
-- **SelfAdjudicator** — Agent evaluates itself (used with `self_done` mode).
-- **HumanAdjudicator** — Pauses pipeline, notifies human, waits for dashboard interaction.
+- **NullAdjudicator** — Auto-pass after the configured loops complete.
+- **SelfAdjudicator** — The agent evaluates itself against an English rubric (defined in config) and reports done/not-done with a rationale via its `finish_task` call.
+- **HumanAdjudicator** — Pauses the pipeline, notifies a human, waits for a decision (dashboard in Phase 3; `resume` CLI before that).
 - *(Future)* **AgentAdjudicator** — Dedicated AI reviewer agent (external process adapter).
+
+Every adjudicator returns a **decision** (`pass` / `fail` / `retry`) **and feedback text**. Feedback is stored twice — in SQLite (`decisions.feedback`) and in the rejected attempt's `feedback.md` — and injected into the retry context (§8.3). The human adjudication UI must make feedback entry first-class: pass/fail buttons without a "why" field throw away the point of the gate.
 
 ### 9.3 Goroutine Lifecycle
 
 - Agents run as goroutines spawned by the orchestrator.
-- On `human_gate`, the goroutine writes `waiting_human` status and **dies**. No long-running sleep/poll loops.
-- On restart, the orchestrator reads SQLite for `in_progress` and `waiting_human` states, checks filesystem `result.json`, and resumes or re-spawns goroutines as needed.
-- Humans can pass/fail/retry any agent output at any time via dashboard, regardless of whether the handoff was configured for human gate.
+- On a human gate, the goroutine writes `waiting_human` status and **dies**. No long-running sleep/poll loops.
+- On a human decision, a new goroutine is spawned (in-process in daemon mode; via `resume` in CLI mode).
+- Humans can pass/fail/retry any agent output at any time via dashboard, regardless of the boundary's configured adjudicator.
+
+### 9.4 Crash Recovery Semantics
+
+Crash resilience is a headline claim; these are its exact semantics.
+
+**What survives a crash:** everything on disk (`task.json`, `result.json`, `events.jsonl`, attempt outputs, workspaces) and everything in SQLite. **What does not:** in-flight agent reasoning — ADK sessions are in-memory and ephemeral.
+
+**Therefore, recovery = re-running the interrupted phase from its `task.json`.** There is no mid-phase resume. Tokens already spent on the interrupted attempt are lost; this is accepted, and the loss should be visible in run history.
+
+**Detection state machine** (evaluated at daemon startup, and before any command touches an issue):
+
+| Observed state | Interpretation | Action |
+|----------------|----------------|--------|
+| `task.json` exists; `result.json` says `in_progress`; no live goroutine | Crashed mid-phase | Re-run the phase: new attempt, fresh workspace copy where applicable, partial output discarded |
+| `result.json` says `waiting_human` | Awaiting decision | Leave in place; surface in the decision queue |
+| `result.json` says `done` / `failed` / `cancelled` | Terminal | Reconcile the SQLite index if it disagrees |
+| `task.json` missing but SQLite says in-progress | SQLite ahead of filesystem | Trust the filesystem: reset the issue to the last phase with a terminal `result.json` |
+
+To make detection possible, the orchestrator **writes `result.json` with `status: in_progress` at phase start**, not only at completion.
+
+Recovery behavior must be covered by a kill-mid-phase → restart → verify-recovery test (Phase 2 Part 2 test list).
 
 ---
 
@@ -379,20 +472,32 @@ Adjudication is a **handoff boundary evaluation**, not an agent type. The system
 - User/team accounts, roles, SSO mappings
 - Audit log (user_id, action, target_issue, timestamp, details)
 - Notification queue (notification_id, issue_id, agent_type, status, recipient, sent_at)
-- Human decision queue (decision_id, issue_id, phase, requested_at, decided_at, decision, decided_by)
+- Human decision queue (decision_id, issue_id, phase, requested_at, decided_at, decision, **feedback**, decided_by)
 
 ### 10.2 Filesystem (Agent Memory & Artifacts)
 
-- Agent output directories (`research/`, `plan/`, `adjudication/`, `implementation/`)
-- Agent free-form outputs (`output.*` files)
+- Agent output directories (`research/`, `plan/`, `implementation/`)
+- Agent free-form outputs (`attempts/N/output.*` files) and adjudication feedback (`attempts/N/feedback.md`)
+- Read-only source snapshots (`source/`, §6.6)
 - Workspace directories (`workspaces/{issue_id}/implementer-{run_id}/`)
+- Per-phase run transcripts (`events.jsonl`)
 - Configuration files (YAML)
 - Logs (optional, per-project)
 - Dashboard static assets
 
+### 10.3 Authority & Concurrency (added 2026-07-08)
+
+- **Filesystem is authoritative** for phase/agent state. SQLite is a queryable index over filesystem truth, reconciled at startup (§9.4). When they disagree, the filesystem wins. (Both store status; a crash between the two writes can make them diverge — this rule resolves it.)
+- SQLite is opened with `PRAGMA journal_mode=WAL`, a `busy_timeout`, and `PRAGMA foreign_keys=ON`. Foreign keys are silently unenforced in SQLite without the pragma, and WAL + busy timeout are prerequisites for the multi-goroutine daemon.
+- Schema changes use **versioned migrations**, not accreting `CREATE TABLE IF NOT EXISTS` statements — `IF NOT EXISTS` cannot evolve existing tables.
+
 ---
 
 ## 11. Human Interface (Dashboard)
+
+### 11.0 Process Model (added 2026-07-08)
+
+Phases 1–2 are one-shot CLI invocations. Everything below — webhook triggers, real-time views, human gates that respawn goroutines, parallel issues — presumes a **long-running daemon** (`gorchestrator serve`) with an issue queue and a worker pool. Daemonization is therefore the *first* workstream of Phase 3, named explicitly rather than left as an implied side effect. The orchestrator core is built as an embeddable engine from Phase 2 onward so the CLI and the daemon are thin front-ends over the same code.
 
 ### 11.1 Phase 1-2: CLI Only
 
@@ -400,11 +505,11 @@ Configuration and operation via YAML files and CLI commands. No web interface.
 
 ### 11.3 Phase 3: Web Dashboard (Observation + Adjudication)
 
-- **Real-time status view:** Issue list, current phase, agent status, progress indicators
+- **Real-time status view:** Issue list, current phase, agent status, progress indicators (Server-Sent Events; soft decision §17 Q4)
 - **Artifact viewer:** Rendered Markdown, file tree, code/syntax highlighting, diff viewer
-- **Adjudication UI:** Pass/fail/retry buttons available at any handoff boundary, regardless of configuration
-- **Agent activity log:** Stream of agent actions, tool calls, outputs
-- **Token burn display:** Per-run and cumulative token usage
+- **Adjudication UI:** Pass/fail/retry buttons **plus a first-class feedback text field** available at any handoff boundary, regardless of configuration (§9.2)
+- **Agent activity log:** Stream of agent actions, tool calls, outputs — backed by the per-phase `events.jsonl` (§7.2)
+- **Token burn display:** Per-run and cumulative token usage — backed by usage records in `events.jsonl`
 - **Notification center:** Human gate alerts, admin alerts on failures
 
 ### 11.4 Admin Features
@@ -422,9 +527,9 @@ Small, native Go toolset available to agents based on agent type:
 
 | Tool | Availability | Description |
 |------|-------------|-------------|
-| `read_file` | Researcher, Planner, Implementer | Read file content (full or partial). Paths resolved against orchestrator allowlist. |
+| `read_file` | Researcher, Planner, Implementer | Two explicit modes. **(1) Whole-file:** no range args — returns the full file, subject to a **configurable cap** (default 64KB / ~2,000 lines, whichever first) with an explicit truncation marker and total line count so the agent knows to switch modes. **(2) Surgical:** line-number range (offset + limit) — the intended follow-up to `grep_search`, which returns file + line numbers precisely so agents can read just the relevant region instead of whole files. The tool description teaches this grep → targeted-read workflow to the model. Paths resolved against orchestrator allowlist. |
 | `list_directory` | Researcher, Planner, Implementer | List directory contents. |
-| `grep_search` | Researcher, Planner, Implementer | Pattern search across files. |
+| `grep_search` | Researcher, Planner, Implementer | Pattern search across files. Respects `.gitignore`, skips binaries, caps result count. |
 | `write_output` | Researcher, Planner | Write to the agent's designated `output.*` file. Orchestrator resolves path. |
 | `write_file` | Implementer only | Write a file within the implementer's workspace. |
 | `update_file` | Implementer only | Update/patch a file within the implementer's workspace. |
@@ -448,7 +553,7 @@ Small, native Go toolset available to agents based on agent type:
 - LLM API errors or timeouts
 - Agent exceptions during tool execution
 - Configuration errors or missing required config
-- Empty output files (heuristic: output.* has zero bytes)
+- Empty output: an attempt that produces neither a `write_output` call nor final model text is a **failed loop**, enforced at the orchestrator — not a silent success flagged later by heuristic
 
 ### 13.2 Token Budgets
 
@@ -471,73 +576,96 @@ Small, native Go toolset available to agents based on agent type:
 
 ## 14. Implementation Phases
 
-### Phase 1: The Engine (CLI-Only)
+*(Revised 2026-07-08: Phase 2 is restructured into three sub-phases — Part 1 (ADK migration, complete), Project Cleanup (bug fixes + spec alignment), and Part 2 (pipeline). Read-only source access moved into Phase 2. Daemonization named as Phase 3's first workstream. Webhook/email example adapters moved out of Phase 2 to the phases where they are actually wired. Each phase has a detailed plan document: `phase_1.md`, `phase_2.md`, `phase_2_cleanup.md`, `phase_3.md` … `phase_6.md`.)*
+
+### Phase 1: The Engine (CLI-Only) — ✅ Complete
 **Goal:** A running system that can accept a trigger, run a no-op agent, and write artifacts to storage.
 
 - StoragePort interface + OS filesystem adapter (built-in)
 - Minimal artifact contract: `task.json` + `result.json` + free-form `output.*`
-- Trigger: manual CLI adapter (built-in)
-- LLM Port: OpenAI + local llama.cpp adapters (built-in) via ADK Go
+- Trigger: manual CLI (TriggerPort formalization deferred to Phase 4)
+- LLM: OpenAI + OpenAI-compatible local endpoints, dry-run stub
 - Orchestrator: goroutine-based agent runner with context cancellation
 - One agent type: Researcher (basic)
 - Handoff: `n_loops` mode only
 - SQLite: project and issue registry, run history
-- Adapter discovery framework: scan `./adapters/`, load manifests, spawn external processes
-- JSON-RPC stdio protocol foundation
-- **Deliverable:** `cli run --issue="add auth" --project=foo` creates issue, runs researcher, writes to filesystem, marks done in SQLite
+- Adapter manifest parsing + JSON-RPC stdio client foundation
+- **Deliverable (met):** `run --issue="add auth" --project=foo` creates issue, runs researcher, writes to filesystem, marks done in SQLite
 
-### Phase 2: The Pipeline (Still CLI)
-**Goal:** Full Research → Plan → Implement pipeline with configurable handoffs.
+### Phase 2 Part 1: ADK Migration — ✅ Complete
+**Goal:** Replace the custom agent loop and LLM port with tight ADK Go v2 integration.
 
-- Agent types: Researcher, Planner, Implementer (Go structs)
+- Tools rebuilt as ADK function tools; Researcher rebuilt as ADK LLMAgent
+- `model.LLM` implementations: OpenAI (custom), Gemini (ADK built-in), dry-run
+- Orchestrator drives the ADK runner; filesystem remains source of truth
+- **Deliverable (met):** same Phase 1 artifacts, produced through the ADK runtime
+
+### Phase 2 Project Cleanup — next up (see `phase_2_cleanup.md`)
+**Goal:** Pay down the defects and spec drift found in the post-Part-1 review before building the pipeline on top of them. No new pipeline features.
+
+- Security fixes: separator-aware path containment, symlink resolution, manifest binary validation
+- Correctness fixes: per-call token accounting, accurate loop counts, `cancelled` status, empty-output = failed loop, `read_file` size cap
+- Robustness: JSON-RPC client hardening (scanner buffer, initialize handshake, close semantics, stderr capture), OpenAI retry/backoff, SQLite pragmas (WAL, busy_timeout, foreign_keys), versioned migrations
+- Contract alignment: `result.json` written at phase start, `events.jsonl` transcripts, `attempts/` layout, feed-forward loops, slash-canonical storage keys, `.gitignore`-aware grep, explicit adapter registry
+- Hygiene: dead code removal, shared schema helpers, README
+- **Deliverable:** same single-researcher behavior, on the revised artifact contract, with the known defects closed
+
+### Phase 2 Part 2: The Pipeline (Still CLI)
+**Goal:** Full Research → Plan → Implement pipeline with unified adjudication, operating on real project source.
+
+- Read-only source snapshot per issue (§6.6); implementer workspace seeded from it
+- Agent types: Researcher, Planner, Implementer (Go structs), running in ADK task mode (`finish_task`)
 - Core toolset: `read_file`, `list_directory`, `grep_search`, `write_output`, `write_file`, `update_file`
-- Handoff modes: `n_loops`, `self_done`, `human_gate`
-- Adjudication port: NullAdjudicator, SelfAdjudicator (built-in)
-- Context chaining: Agent N+1 receives Agent N's `output.*` as context
+- Unified adjudication boundaries (§9.1): adjudicator + max_attempts + loops; Null and Self adjudicators built-in; human gate via `waiting_human` + `resume` command
+- Adjudicator feedback stored and injected into retries; attempt versioning
+- Context chaining per §8.3 recipe (issue + previous accepted output; feed-forward loops)
+- Anthropic `model.LLM` implementation (casting needs the strongest coding models available)
+- Crash recovery per §9.4, with a kill-mid-phase test
 - Token tracking per run, SQLite logging
-- External process adapter examples: webhook trigger, email notification
-- **Deliverable:** Full automated pipeline from issue to code, configurable per-agent via YAML
+- **Deliverable:** Full pipeline from issue to code changes against a real codebase, configurable per-agent via YAML, recoverable after a crash
 
-### Phase 3: Human Interface (Dashboard + Auth)
-**Goal:** Humans can see what's happening and intervene.
+### Phase 3: Human Interface (Daemon + Dashboard + Auth)
+**Goal:** Humans can see what's happening and intervene. (See `phase_3.md`.)
 
-- Web dashboard: Go HTTP server + lightweight frontend (HTMX or minimal React)
-- Real-time view: issue list, current phase, agent status, artifact viewer
-- Adjudication UI: pass/fail/retry at any handoff boundary
-- HumanAdjudicator adapter (built-in): pauses, writes to SQLite notification queue, dashboard polls
-- User/team model: SQLite-backed, roles (admin, member, viewer)
-- SSO: OIDC adapter (built-in)
-- Admin notifications: email/Slack webhook (external process adapters)
-- **Deliverable:** Team can log in, watch agents work, click retry, get Slack alerts
+- **Daemonization first:** `gorchestrator serve` — embeddable engine, issue queue, worker pool, graceful shutdown, startup recovery scan (§9.4). This is a named workstream, not an implied side effect of the dashboard.
+- Web dashboard: Go HTTP server + HTMX server-rendered frontend (soft decision §17 Q1)
+- Real-time view via SSE: issue list, current phase, agent status, artifact viewer, `events.jsonl` activity stream, token burn
+- Adjudication UI: pass/fail/retry **with feedback field** at any handoff boundary
+- HumanAdjudicator: pauses, notifies, respawns worker goroutine on decision (in-process; no CLI resume needed in daemon mode)
+- User/team model: SQLite-backed roles (admin, member, viewer); OIDC (built-in)
+- Notifications wired: console (built-in) + email/Slack webhook (external process adapters — moved here from Phase 2)
+- **Deliverable:** Team can log in, watch agents work live, click retry with a reason, get Slack alerts
 
 ### Phase 4: Extensibility
-**Goal:** Users can plug in their own world.
+**Goal:** Users can plug in their own world. (See `phase_4.md`.)
 
-- MCP adapter port: custom tools via MCP servers
-- Trigger adapters: GitHub Issues, Jira, Linear (external process)
+- Git workspace model: branch creation, workspace isolation, commit/push (replaces §6.6 snapshot copies)
+- `run_test` core tool — **container-isolated (acceptance criterion, §6.5)**, secrets injection per §17 Q15
+- MCP client: custom tools via MCP servers, **with per-agent server allowlists (§5.6)**
+- Trigger port formalized + adapters: GitHub Issues, Jira (external process); externally-triggered issues default to human adjudication before implementation
 - Storage adapters: S3, Azure Blob (external process)
-- Agent personality config: system prompts, temperature, tool subsets
-- Git workspace model: branch creation, workspace isolation, commit/push
-- `run_test` core tool with project-configured command
-- **Deliverable:** Users can connect Jira, plug in internal APIs via MCP, store artifacts in cloud, run test-and-fix loops
+- Agent personality config: system prompts, temperature, tool subsets (the casting thesis, realized)
+- JSON-RPC client: restart with exponential backoff, streaming notifications
+- **Deliverable:** Users can connect Jira, plug in internal APIs via MCP, store artifacts in cloud, run test-and-fix loops safely
 
 ### Phase 5: Guardrails
-**Goal:** The system protects itself and the user's wallet.
+**Goal:** The system protects itself and the user's wallet. (See `phase_5.md`.)
 
+- Token budget enforcement: hard stop + notification, checked per model call against `events.jsonl` usage
 - Effort estimation: Planner tags high/med/low, high requires human confirmation
-- Token budget enforcement: hard stop + notification
 - Scope detection: basic heuristics to catch overly broad issues
 - Admin escalation rules: configurable thresholds
-- MCP permission granularity: per-agent, per-tool allowlists
+- MCP permission granularity: per-agent, per-**tool** allowlists (tightening Phase 4's per-server grants)
 - **Deliverable:** System asks "are you sure?" before burning API budget
 
 ### Phase 6: Polish
-**Goal:** Shippable product.
+**Goal:** Shippable product. (See `phase_6.md`.)
 
 - Complete audit logging
 - Metrics dashboard: token burn per project, cycle time, human intervention rate
 - Documentation: architecture docs, admin guide, user guide, API reference
-- Deployment: single binary + Docker Compose (SQLite + filesystem volume)
+- Deployment: single binary + Docker Compose (SQLite + filesystem volume); backup/restore guidance
+- Retention: workspace/artifact cleanup policies (closes §17 Q14)
 - **Deliverable:** Team can deploy to production and audit every decision
 
 ---
@@ -547,10 +675,12 @@ Small, native Go toolset available to agents based on agent type:
 | Component | Choice |
 |-----------|--------|
 | Language | Go |
-| Agent Runtime | Google ADK Go (v2) |
-| App Database | SQLite |
-| Storage | Filesystem (hexagonal port, built-in + external adapters) |
-| Web Framework | Standard library `net/http` + lightweight frontend (HTMX or minimal React) |
+| Agent Runtime | Google ADK Go (v2) — tight integration; no wrapper port |
+| LLM Integration | ADK `model.LLM` implementations: OpenAI, Anthropic, Gemini built-in; OpenAI-compatible endpoints for local models and gateways |
+| App Database | SQLite (WAL, busy_timeout, foreign_keys pragmas; versioned migrations) |
+| Storage | Filesystem (hexagonal port, built-in + external adapters); port keys are forward-slash canonical |
+| Process Model | One-shot CLI (Phases 1–2) → long-running `serve` daemon with queue + worker pool (Phase 3+) |
+| Web Framework | Standard library `net/http` + HTMX server-rendered frontend (soft decision §17 Q1) |
 | Auth | OIDC (built-in), SAML (external adapter) |
 | Deployment | Single binary + Docker Compose |
 | Config | YAML |
@@ -585,25 +715,55 @@ Small, native Go toolset available to agents based on agent type:
 | `run_test` as core tool | Pre-configured project command in sandboxed subprocess. Enables test-and-fix loops without arbitrary shell access. |
 | MCP deny-by-default | MCP servers only connected if explicitly configured. All tools from enabled servers available to all agents in MVP. |
 
+**Added 2026-07-08 (post Phase 2 Part 1 review):**
+
+| Decision | Rationale |
+|----------|-----------|
+| ADK-native LLM integration (recorded) | Phase 2 deleted the custom LLMProviderPort in favor of tight ADK `model.LLM` integration. Recorded here because it supersedes the original port design; external LLM gateways plug in via OpenAI-compatible endpoints or in-process `model.LLM` implementations, not JSON-RPC adapters. |
+| Unified adjudication axis | Handoff modes and adjudicators were two names for one mechanism and produced ambiguous configs. Every boundary = adjudicator (null/self/human) + max_attempts + loops. |
+| Loops are refinement | Loop *i* receives loop *i−1*'s output. Fresh-context loops that overwrite each other are pure token burn. |
+| Attempt versioning + feedback on retry | Retries never overwrite; each attempt gets a directory; adjudicator feedback is stored (`decisions.feedback` + `feedback.md`) and injected into the retry context. A blind retry wastes the human gate. |
+| `events.jsonl` transcripts | Tool calls, model turns, and per-call usage are persisted per phase. Substrate for the dashboard activity stream, token accounting, debugging, and audit — without it, agent runs are black boxes and Phase 3 has nothing to display. |
+| Read-only source access in Phase 2 | A research pipeline that cannot read the codebase until Phase 4 produces hallucinated research. Orchestrator snapshots project source per issue (§6.6); full git workspace model still lands in Phase 4. |
+| Filesystem is authoritative | `result.json` wins over SQLite on divergence; SQLite is a reconciled index. `result.json` is written at phase start (`in_progress`) to make crash detection possible (§9.4). |
+| Container sandbox required for `run_test` | An immutable command is not a security boundary when the agent writes the code the command runs. Container isolation is a Phase 4 acceptance criterion; no bare-subprocess fallback. |
+| Explicit adapter registry | Adapters are declared in config, not discovered by scanning a directory for executables. Manifest declares `binary` explicitly; core verifies it is a regular executable file. |
+| Storage keys are slash-canonical | Port paths are forward-slash relative keys; adapters translate. Prevents OS-separator leakage into S3/Azure object keys. |
+| Daemonization is a named workstream | Phase 3 begins by converting the one-shot CLI into a `serve` daemon with queue + workers; the engine is embeddable from Phase 2 onward so this is a front-end change, not a rewrite. |
+| `cancelled` is a distinct status | Ctrl-C / shutdown is not a failure; it must not be reported as one. |
+| Empty output fails the loop | An attempt with neither a `write_output` call nor final model text fails immediately rather than being marked done and flagged later. |
+| Markdown docs are canonical | The spec is the living document; phase docs freeze at completion; HTML renderings are unmaintained presentation artifacts. |
+
 ---
 
-## 17. Open Questions for Future Sessions
+## 17. Open Questions & Soft Decisions
 
-1. **Frontend technology:** HTMX vs. minimal React vs. pure server-rendered HTML?
-2. **Shell execution sandbox:** Docker container, restricted user, or simple command timeout?
-3. **Codebase search tool:** Tree-sitter, ripgrep, or vector semantic search?
-4. **Dashboard real-time updates:** Server-Sent Events, WebSockets, or polling?
-5. **Notification delivery:** Email (SMTP), Slack webhook, or both?
-6. **SSO scope:** OIDC only for MVP, or SAML too?
-7. **Agent output versioning:** Overwrite or append? How to handle retries?
-8. **Project/issue ID scheme:** UUID, auto-increment, or human-readable?
-9. **YAML config schema:** Per-project, per-issue, or per-agent-type defaults with overrides?
-10. **Local LLM integration:** llama.cpp server, Ollama, or direct llama.cpp embedding?
-11. **Adapter binary discovery:** Static directory scan, PATH search, or configurable registry?
-12. **Adapter authentication:** How do external adapters authenticate to their backends (AWS credentials for S3, API keys for Jira)?
-13. **Git commit strategy:** Single commit per implementer run, or granular commits per file change?
-14. **Workspace cleanup:** Auto-delete old workspaces, or archive for audit?
-15. **Test command environment:** How to inject secrets/env vars into test subprocess without exposing them to the agent?
+*(Revised 2026-07-08: questions with a defensible default are recorded as **soft decisions** — adopted unless new evidence overturns them; a few are closed outright because working code already decided them. Genuinely open items remain at the bottom.)*
+
+### 17.1 Soft Decisions
+
+| # | Question | Decision | Rationale |
+|---|----------|----------|-----------|
+| 1 | Frontend technology | **HTMX + server-rendered HTML** *(soft)* | Matches the stdlib-only philosophy; React drags in a build pipeline the project will resent. |
+| 2 | Shell execution sandbox | **Containers (Docker/Podman)** — *hard requirement, not soft* | See §6.5. A subprocess timeout is not a sandbox; `run_test` executes agent-authored code. |
+| 4 | Dashboard real-time updates | **Server-Sent Events** *(soft)* | One-way updates fit the need; stdlib-friendly; no websocket dependency. Polling as degraded fallback. |
+| 7 | Agent output versioning | **Append `attempts/N/` directories; never overwrite** *(soft)* | Preserves retry history and gives adjudication feedback a home (§7.1). |
+| 8 | Project/issue ID scheme | **Auto-increment integers** — *closed* | Decided de facto by Phase 1 code. |
+| 10 | Local LLM integration | **OpenAI-compatible endpoint** (`base_url` on the OpenAI implementation) — *closed* | Decided de facto by Phase 2 code; covers llama.cpp, Ollama, and most gateways. |
+| 11 | Adapter binary discovery | **Explicit registry in config** *(soft)* | Scanning a directory and spawning whatever executables appear there is a supply-chain risk. See §4.3. |
+| 13 | Git commit strategy | **Single commit per implementer run** *(soft)* | Granular commits are dashboard polish, not MVP. Revisit if review workflows demand it. |
+| 15 | Test command secrets | **Maintainer-only secrets config, injected into the test container environment, never rendered into any agent-readable artifact** *(soft)* | `task.json` is agent-readable; secrets must never flow through it. See §6.5. |
+
+### 17.2 Still Open
+
+| # | Question | Notes |
+|---|----------|-------|
+| 3 | Codebase search tool | Pure-Go grep is implemented; tree-sitter / vector semantic search remain candidates for Phase 4+. |
+| 5 | Notification delivery | Email (SMTP), Slack webhook, or both — decide when Phase 3 wires notifications. |
+| 6 | SSO scope | OIDC-only MVP vs. SAML too — decide in Phase 3. |
+| 9 | YAML config schema | Per-project vs. per-issue vs. per-agent-type defaults with overrides — firm up in Phase 2 Part 2 when per-agent config lands. |
+| 12 | Adapter authentication | How external adapters authenticate to their backends (AWS credentials for S3, API keys for Jira) — decide in Phase 4. |
+| 14 | Workspace cleanup / retention | Auto-delete vs. archive for audit — decide by Phase 6. |
 
 ---
 
