@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -27,24 +28,28 @@ func newWriteFileTool(bt *BoundTools) (tool.Tool, error) {
 		Name:        "write_file",
 		Description: "Write a file within the implementer's workspace.",
 	}, func(ctx agent.Context, args WriteFileArgs) (WriteFileResult, error) {
-		if bt.WorkspacePath == "" {
-			return WriteFileResult{}, fmt.Errorf("workspace path not configured")
-		}
-		if args.Path == "" {
-			return WriteFileResult{}, fmt.Errorf("path is required")
-		}
-		fullPath := filepath.Join(bt.WorkspacePath, args.Path)
-		resolved, ok := resolveAllowedPath(fullPath, []string{bt.WorkspacePath})
-		if !ok {
-			return WriteFileResult{}, fmt.Errorf("path escapes workspace: %s", args.Path)
-		}
-		if err := bt.Storage.Write(ctx, resolved, []byte(args.Content)); err != nil {
-			return WriteFileResult{}, err
-		}
-		return WriteFileResult{
-			Path:   args.Path,
-			Size:   len(args.Content),
-			Status: "written",
-		}, nil
+		return writeFile(ctx, bt, args)
 	})
+}
+
+func writeFile(ctx context.Context, bt *BoundTools, args WriteFileArgs) (WriteFileResult, error) {
+	if bt.WorkspacePath == "" {
+		return WriteFileResult{}, fmt.Errorf("workspace path not configured")
+	}
+	if args.Path == "" {
+		return WriteFileResult{}, fmt.Errorf("path is required")
+	}
+	fullPath := filepath.Join(bt.WorkspacePath, args.Path)
+	resolved, ok := resolveAllowedPath(fullPath, []string{bt.WorkspacePath})
+	if !ok {
+		return WriteFileResult{}, fmt.Errorf("path escapes workspace: %s", args.Path)
+	}
+	if err := bt.Storage.Write(ctx, resolved, []byte(args.Content)); err != nil {
+		return WriteFileResult{}, err
+	}
+	return WriteFileResult{
+		Path:   args.Path,
+		Size:   len(args.Content),
+		Status: "written",
+	}, nil
 }

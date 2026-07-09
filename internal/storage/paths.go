@@ -50,3 +50,13 @@ func FeedbackPath(projectID, issueID int64, phase string, attempt int) string {
 func OutputPath(projectID, issueID int64, phase string) string {
 	return AttemptOutputPath(projectID, issueID, phase, 1)
 }
+
+// SourcePath returns the relative path to the read-only source snapshot for an issue.
+func SourcePath(projectID, issueID int64) string {
+	return path.Join(IssueDir(projectID, issueID), "source")
+}
+
+// WorkspacePath returns the relative path to the implementer's workspace for an issue.
+func WorkspacePath(projectID, issueID int64) string {
+	return path.Join(PhaseDir(projectID, issueID, "implementation"), "workspace")
+}

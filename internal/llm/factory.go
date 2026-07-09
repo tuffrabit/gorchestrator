@@ -31,6 +31,8 @@ func New(ctx context.Context, cfg Config) (model.LLM, error) {
 		return NewGeminiModel(ctx, cfg.Model, apiKey, cfg.Timeout)
 	case "openai":
 		return NewOpenAIModel(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout), nil
+	case "anthropic":
+		return NewAnthropicModel(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout), nil
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", cfg.Provider)
 	}

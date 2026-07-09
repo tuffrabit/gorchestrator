@@ -11,7 +11,9 @@ import (
 )
 
 // DryRunModel is a model.LLM that returns a canned response without calling an LLM.
-// It is used for tests and dry-run CLI mode.
+// It is used for tests and dry-run CLI mode. In task mode it simulates a real
+// agent: it emits a work tool (write_output/write_file/read_file) on the first
+// turn and a finish_task call on the second turn.
 type DryRunModel struct {
 	modelName string
 }
@@ -32,22 +34,10 @@ func (m *DryRunModel) Name() string {
 // GenerateContent implements model.LLM.
 func (m *DryRunModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		// Build a simple user prompt summary for the canned response.
-		var prompt string
-		for _, c := range req.Contents {
-			for _, p := range c.Parts {
-				if p != nil {
-					prompt += p.Text
-				}
-			}
-		}
+		prompt := extractPrompt(req)
 
-		if strings.Contains(prompt, "[multiturn]") {
-			m.generateMultiTurn(ctx, req, yield)
-			return
-		}
 		if strings.Contains(prompt, "[empty]") {
-			// Simulate a loop that produces neither a tool call nor final text.
+			// Simulate a loop that produces neither a tool call nor finish_task.
 			yield(&model.LLMResponse{
 				Content: &genai.Content{
 					Role:  genai.RoleModel,
@@ -63,62 +53,131 @@ func (m *DryRunModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 			return
 		}
 
-		text := fmt.Sprintf("## Dry-run response\n\n**Prompt:** %s\n\nThis is a canned response for testing.", prompt)
-		resp := &model.LLMResponse{
-			Content: &genai.Content{
-				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{Text: text}},
-			},
-			TurnComplete: true,
-			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-				PromptTokenCount:     5,
-				CandidatesTokenCount: 5,
-				TotalTokenCount:      10,
-			},
+		if strings.Contains(prompt, "[block]") {
+			// Block until context cancellation. Used by crash-recovery tests.
+			select {
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+			}
+			return
 		}
-		yield(resp, nil)
+
+		hasFuncResponse := hasFunctionResponse(req)
+		if hasFuncResponse {
+			// Second turn: finish the task.
+			if strings.Contains(prompt, "[reject]") && !strings.Contains(prompt, "Adjudicator feedback:") {
+				yield(m.finishTaskResponseWithDone(false, "missing tests"), nil)
+				return
+			}
+			yield(m.finishTaskResponse("dry-run self-check passed"), nil)
+			return
+		}
+
+		// First turn: emit a work tool call if one is available.
+		tools := functionDeclarations(req.Config)
+		if hasTool(tools, "write_output") {
+			yield(m.writeOutputCall(prompt), nil)
+			return
+		}
+		if hasTool(tools, "write_file") {
+			yield(m.writeFileCall(), nil)
+			return
+		}
+		if strings.Contains(prompt, "[multiturn]") {
+			yield(m.readFileCall(), nil)
+			return
+		}
+
+		// No work tool available: finish immediately.
+		yield(m.finishTaskResponse("dry-run self-check passed"), nil)
 	}
 }
 
-// generateMultiTurn simulates a tool-call loop: model calls read_file, then
-// returns final text. Each model call reports token usage so token accounting
-// can be verified.
-func (m *DryRunModel) generateMultiTurn(ctx context.Context, req *model.LLMRequest, yield func(*model.LLMResponse, error) bool) {
-	// If the conversation already contains a function response, return the
-	// final text turn.
-	hasFunctionResponse := false
+func extractPrompt(req *model.LLMRequest) string {
+	var prompt string
 	for _, c := range req.Contents {
 		for _, p := range c.Parts {
-			if p != nil && p.FunctionResponse != nil {
-				hasFunctionResponse = true
-				break
+			if p != nil && p.Text != "" {
+				prompt += p.Text
 			}
 		}
 	}
+	return prompt
+}
 
-	if hasFunctionResponse {
-		yield(&model.LLMResponse{
-			Content: &genai.Content{
-				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{Text: "Final answer after tool use."}},
-			},
-			TurnComplete: true,
-			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
-				PromptTokenCount:     7,
-				CandidatesTokenCount: 8,
-				TotalTokenCount:      15,
-			},
-		}, nil)
-		return
+func hasFunctionResponse(req *model.LLMRequest) bool {
+	for _, c := range req.Contents {
+		for _, p := range c.Parts {
+			if p != nil && p.FunctionResponse != nil {
+				return true
+			}
+		}
 	}
+	return false
+}
 
-	// First turn: emit a function call.
-	yield(&model.LLMResponse{
+func hasTool(tools []*genai.FunctionDeclaration, name string) bool {
+	for _, d := range tools {
+		if d != nil && d.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *DryRunModel) writeOutputCall(prompt string) *model.LLMResponse {
+	content := fmt.Sprintf("## Dry-run output\n\nPrompt summary: %s\n\nThis is a canned phase output for testing.", truncate(prompt, 200))
+	return &model.LLMResponse{
 		Content: &genai.Content{
 			Role: genai.RoleModel,
 			Parts: []*genai.Part{{
 				FunctionCall: &genai.FunctionCall{
-					ID:   "call_1",
+					ID:   "call_write_output",
+					Name: "write_output",
+					Args: map[string]any{"content": content},
+				},
+			}},
+		},
+		TurnComplete: true,
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     5,
+			CandidatesTokenCount: 5,
+			TotalTokenCount:      10,
+		},
+	}
+}
+
+func (m *DryRunModel) writeFileCall() *model.LLMResponse {
+	return &model.LLMResponse{
+		Content: &genai.Content{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					ID:   "call_write_file",
+					Name: "write_file",
+					Args: map[string]any{
+						"path":    "dryrun.go",
+						"content": "package dryrun\n\n// Canned implementation output.\n",
+					},
+				},
+			}},
+		},
+		TurnComplete: true,
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     5,
+			CandidatesTokenCount: 5,
+			TotalTokenCount:      10,
+		},
+	}
+}
+
+func (m *DryRunModel) readFileCall() *model.LLMResponse {
+	return &model.LLMResponse{
+		Content: &genai.Content{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					ID:   "call_read_file",
 					Name: "read_file",
 					Args: map[string]any{"path": "test.txt"},
 				},
@@ -130,5 +189,40 @@ func (m *DryRunModel) generateMultiTurn(ctx context.Context, req *model.LLMReque
 			CandidatesTokenCount: 6,
 			TotalTokenCount:      10,
 		},
-	}, nil)
+	}
+}
+
+func (m *DryRunModel) finishTaskResponse(rationale string) *model.LLMResponse {
+	return m.finishTaskResponseWithDone(true, rationale)
+}
+
+func (m *DryRunModel) finishTaskResponseWithDone(done bool, rationale string) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content: &genai.Content{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					ID:   "call_finish_task",
+					Name: "finish_task",
+					Args: map[string]any{
+						"done":      done,
+						"rationale": rationale,
+					},
+				},
+			}},
+		},
+		TurnComplete: true,
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     7,
+			CandidatesTokenCount: 8,
+			TotalTokenCount:      15,
+		},
+	}
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

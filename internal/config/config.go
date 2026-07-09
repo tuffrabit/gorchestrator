@@ -36,13 +36,25 @@ type AdapterConfig struct {
 	ManifestPath string `yaml:"manifest_path"`
 }
 
+// AgentConfig overrides the orchestrator's defaults for a specific agent type.
+// Supported keys: "researcher", "planner", "implementer".
+type AgentConfig struct {
+	Model         ModelConfig `yaml:"model"`
+	SystemPrompt  string      `yaml:"system_prompt"`
+	Adjudicator   string      `yaml:"adjudicator"`
+	MaxAttempts   int         `yaml:"max_attempts"`
+	Loops         int         `yaml:"loops"`
+	Rubric        string      `yaml:"rubric"`
+}
+
 // Config is the top-level user configuration.
 type Config struct {
-	StorageRoot  string            `yaml:"storage_root"`
-	DBPath       string            `yaml:"db_path"`
-	DefaultModel ModelConfig       `yaml:"default_model"`
-	Tools        ToolsConfig       `yaml:"tools"`
-	Adapters     []AdapterConfig   `yaml:"adapters"`
+	StorageRoot  string                  `yaml:"storage_root"`
+	DBPath       string                  `yaml:"db_path"`
+	DefaultModel ModelConfig             `yaml:"default_model"`
+	Tools        ToolsConfig             `yaml:"tools"`
+	Adapters     []AdapterConfig         `yaml:"adapters"`
+	Agents       map[string]AgentConfig  `yaml:"agents"`
 }
 
 // HomeDir returns the user's home directory.
@@ -123,4 +135,119 @@ func expandTilde(path, home string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// Agent returns the configuration for the named agent type, merging user
+// overrides with built-in defaults and global default_model. Unknown agent
+// names receive the defaults.
+func (c *Config) Agent(name string) AgentConfig {
+	def := defaultAgentConfig(name, c.DefaultModel)
+	ovr, ok := c.Agents[name]
+	if !ok {
+		return def
+	}
+	if ovr.Model.Provider != "" {
+		def.Model.Provider = ovr.Model.Provider
+	}
+	if ovr.Model.Model != "" {
+		def.Model.Model = ovr.Model.Model
+	}
+	if ovr.Model.APIKeyEnv != "" {
+		def.Model.APIKeyEnv = ovr.Model.APIKeyEnv
+	}
+	if ovr.Model.BaseURL != "" {
+		def.Model.BaseURL = ovr.Model.BaseURL
+	}
+	if ovr.Model.Timeout != "" {
+		def.Model.Timeout = ovr.Model.Timeout
+	}
+	if ovr.SystemPrompt != "" {
+		def.SystemPrompt = ovr.SystemPrompt
+	}
+	if ovr.Adjudicator != "" {
+		def.Adjudicator = ovr.Adjudicator
+	}
+	if ovr.MaxAttempts > 0 {
+		def.MaxAttempts = ovr.MaxAttempts
+	}
+	if ovr.Loops > 0 {
+		def.Loops = ovr.Loops
+	}
+	if ovr.Rubric != "" {
+		def.Rubric = ovr.Rubric
+	}
+	return def
+}
+
+func defaultAgentConfig(name string, defaultModel ModelConfig) AgentConfig {
+	cfg := AgentConfig{
+		Model: ModelConfig{
+			Provider:  defaultModel.Provider,
+			Model:     defaultModel.Model,
+			APIKeyEnv: defaultModel.APIKeyEnv,
+			BaseURL:   defaultModel.BaseURL,
+			Timeout:   defaultModel.Timeout,
+		},
+		Adjudicator: "self",
+		MaxAttempts: 3,
+		Loops:       1,
+		Rubric:      "The output is complete, accurate, and ready for the next phase.",
+	}
+	switch name {
+	case "researcher":
+		cfg.SystemPrompt = defaultResearcherPrompt()
+	case "planner":
+		cfg.SystemPrompt = defaultPlannerPrompt()
+	case "implementer":
+		cfg.SystemPrompt = defaultImplementerPrompt()
+	}
+	return cfg
+}
+
+func defaultResearcherPrompt() string {
+	return `You are a Researcher agent. Investigate the issue, read the project source snapshot, and produce concise findings in the designated output file.
+
+Core tools:
+- read_file: read source files (whole-file or surgical line range)
+- list_directory: explore the source tree
+- grep_search: locate relevant code, then use surgical read_file
+- write_output: write your final findings to the orchestrator-designated output file
+
+Rules:
+1. Gather context from the allowed paths.
+2. Write your findings using write_output.
+3. Be concise and actionable for the Planner.
+4. When finished, call finish_task with done=true and a brief rationale evaluating your work against the rubric.`
+}
+
+func defaultPlannerPrompt() string {
+	return `You are a Planner agent. Read the issue and the Researcher's findings, then produce a concrete implementation plan in the designated output file.
+
+Core tools:
+- read_file: read source files and previous phase outputs
+- list_directory: explore the source tree
+- grep_search: locate relevant code
+- write_output: write the implementation plan
+
+Rules:
+1. Base the plan on the issue and the accepted research output.
+2. Include specific files to change and tests to add.
+3. Write the plan using write_output.
+4. When finished, call finish_task with done=true and a brief rationale evaluating the plan.`
+}
+
+func defaultImplementerPrompt() string {
+	return `You are an Implementer agent. Read the issue, the accepted research findings, and the accepted plan, then edit the workspace to implement the changes.
+
+Core tools:
+- read_file: read files in the workspace or source snapshot
+- list_directory: explore the workspace
+- grep_search: locate relevant code
+- write_file: create new files in the workspace
+- update_file: overwrite existing files in the workspace
+
+Rules:
+1. Edit only within the implementer's workspace.
+2. Write clean, testable code matching the existing style.
+3. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.`
 }

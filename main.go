@@ -11,7 +11,7 @@ import (
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: gorchestrator <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: run, version")
+		fmt.Fprintln(os.Stderr, "Commands: run, resume, version")
 		os.Exit(1)
 	}
 
@@ -20,6 +20,12 @@ func main() {
 		runCmd := flag.NewFlagSet("run", flag.ExitOnError)
 		if err := cli.Run(runCmd, os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "run failed: %v\n", err)
+			os.Exit(1)
+		}
+	case "resume":
+		resumeCmd := flag.NewFlagSet("resume", flag.ExitOnError)
+		if err := cli.Resume(resumeCmd, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "resume failed: %v\n", err)
 			os.Exit(1)
 		}
 	case "version":

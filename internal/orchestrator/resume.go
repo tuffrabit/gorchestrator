@@ -7,13 +7,13 @@ import (
 	"github.com/tuffrabit/gorchestrator/internal/config"
 )
 
-// Run executes the full pipeline using the engine.
-func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
+// Resume continues an existing issue using the engine.
+func Resume(ctx context.Context, cfg *config.Config, opts ResumeOptions) error {
 	eng, err := NewEngine(cfg)
 	if err != nil {
 		return fmt.Errorf("init engine: %w", err)
 	}
 	defer eng.Close()
 
-	return eng.Run(ctx, opts)
+	return eng.Resume(ctx, opts)
 }

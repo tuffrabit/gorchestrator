@@ -4,7 +4,7 @@ gorchestrator is a tight human + AI agent collaboration platform for software en
 
 ## Current status
 
-Phase 2 Part 1 (ADK migration) is complete. Phase 2 Project Cleanup is in progress: the single-Researcher dry-run flow works on the revised artifact contract (`attempts/1/output.md`, `events.jsonl`, `result.json` written at start and completion), and the known post-migration defects are being closed.
+Phase 2 Part 2 (the multi-agent pipeline) is complete. `gorchestrator run` executes the full Research → Plan → Implement pipeline against a project source snapshot, with unified adjudication (null/self/human), human gates resumable via `gorchestrator resume`, crash recovery, and an Anthropic `model.LLM` adapter.
 
 ## Quick start
 
@@ -16,11 +16,14 @@ go build .
 mkdir -p ~/.config/gorchestrator
 cp configs/config.example.yaml ~/.config/gorchestrator/config.yaml
 
-# Run a single Researcher phase in dry-run mode
-./gorchestrator run --issue="add auth" --project=foo --dry-run
+# Run the full pipeline against a project source directory in dry-run mode
+./gorchestrator run --issue="add auth" --project=foo --source=/path/to/repo --dry-run
+
+# Resume a phase waiting for human adjudication
+./gorchestrator resume --project=foo --issue=1 --decision=pass --feedback="looks good"
 ```
 
-Dry-run artifacts are written to `~/.config/gorchestrator/storage/projects/{project_id}/issues/{issue_id}/research/`.
+Artifacts are written to `~/.config/gorchestrator/storage/projects/{project_id}/issues/{issue_id}/`, including `source/`, per-phase `task.json`, `result.json`, `events.jsonl`, and `attempts/`.
 
 ## Documentation convention
 

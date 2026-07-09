@@ -57,6 +57,25 @@ CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_issue ON runs(issue_id);
 `,
 	},
+	{
+		version: 2,
+		name:    "decisions",
+		sql: `
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    decided_at DATETIME,
+    decision TEXT,
+    feedback TEXT,
+    decided_by TEXT,
+    FOREIGN KEY (issue_id) REFERENCES issues(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_decisions_issue ON decisions(issue_id);
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

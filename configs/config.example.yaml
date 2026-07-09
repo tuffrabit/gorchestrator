@@ -15,6 +15,24 @@ tools:
     max_bytes: 65536
     max_lines: 2000
 
+# Per-agent configuration. Keys: researcher, planner, implementer.
+# agents:
+#   researcher:
+#     adjudicator: self
+#     max_attempts: 3
+#     loops: 1
+#     model:
+#       provider: openai
+#       model: o3-mini
+#   planner:
+#     adjudicator: self
+#     max_attempts: 3
+#     loops: 1
+#   implementer:
+#     adjudicator: self
+#     max_attempts: 3
+#     loops: 1
+
 # External adapters are declared explicitly by name + manifest path.
 # The core does not scan directories for adapters.
 # adapters:
