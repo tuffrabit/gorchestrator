@@ -6,6 +6,8 @@
 package tools
 
 import (
+	"fmt"
+
 	"google.golang.org/adk/v2/tool"
 
 	"github.com/tuffrabit/gorchestrator/internal/storage"
@@ -13,11 +15,13 @@ import (
 
 // BoundTools carries the storage port and resolved paths for a single agent run.
 type BoundTools struct {
-	Storage       storage.Port
-	RootPath      string
-	Allowlist     []string
-	OutputPath    string
-	WorkspacePath string
+	Storage          storage.Port
+	RootPath         string
+	Allowlist        []string
+	OutputPath       string
+	WorkspacePath    string
+	ReadFileMaxBytes int
+	ReadFileMaxLines int
 	// OutputWritten is set to true by the write_output tool when it executes.
 	// The orchestrator uses this to decide whether to fall back to the model's
 	// final text response as the phase output.
@@ -25,30 +29,47 @@ type BoundTools struct {
 }
 
 // NewResearcherRegistry creates the core toolset for the Researcher and Planner agents.
-func NewResearcherRegistry(bt *BoundTools) []tool.Tool {
-	return []tool.Tool{
-		mustTool(newReadFileTool(bt)),
-		mustTool(newListDirectoryTool(bt)),
-		mustTool(newGrepTool(bt)),
-		mustTool(newWriteOutputTool(bt)),
+func NewResearcherRegistry(bt *BoundTools) ([]tool.Tool, error) {
+	readFile, err := newReadFileTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("read_file tool: %w", err)
 	}
+	listDir, err := newListDirectoryTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("list_directory tool: %w", err)
+	}
+	grep, err := newGrepTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("grep_search tool: %w", err)
+	}
+	writeOutput, err := newWriteOutputTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("write_output tool: %w", err)
+	}
+	return []tool.Tool{readFile, listDir, grep, writeOutput}, nil
 }
 
 // NewImplementerRegistry creates the core toolset for the Implementer agent.
-func NewImplementerRegistry(bt *BoundTools) []tool.Tool {
-	return []tool.Tool{
-		mustTool(newReadFileTool(bt)),
-		mustTool(newListDirectoryTool(bt)),
-		mustTool(newGrepTool(bt)),
-		mustTool(newWriteFileTool(bt)),
-		mustTool(newUpdateFileTool(bt)),
-	}
-}
-
-func mustTool(t tool.Tool, err error) tool.Tool {
+func NewImplementerRegistry(bt *BoundTools) ([]tool.Tool, error) {
+	readFile, err := newReadFileTool(bt)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("read_file tool: %w", err)
 	}
-	return t
+	listDir, err := newListDirectoryTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("list_directory tool: %w", err)
+	}
+	grep, err := newGrepTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("grep_search tool: %w", err)
+	}
+	writeFile, err := newWriteFileTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("write_file tool: %w", err)
+	}
+	updateFile, err := newUpdateFileTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("update_file tool: %w", err)
+	}
+	return []tool.Tool{readFile, listDir, grep, writeFile, updateFile}, nil
 }
-

@@ -3,8 +3,8 @@ package tools
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,81 +43,144 @@ type GrepResult struct {
 func newGrepTool(bt *BoundTools) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "grep_search",
-		Description: "Search file contents for a pattern. Returns matching lines with file paths.",
+		Description: "Search file contents for a pattern. Returns matching lines with file paths. Honors .gitignore, skips .git and binary files.",
 	}, func(ctx agent.Context, args GrepArgs) (GrepResult, error) {
-		path := args.Path
-		if path == "" {
-			path = "."
+		return grepSearch(ctx, bt, args)
+	})
+}
+
+func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult, error) {
+	path := args.Path
+	if path == "" {
+		path = "."
+	}
+	if args.Pattern == "" {
+		return GrepResult{}, fmt.Errorf("pattern is required")
+	}
+
+	resolved, ok := resolveAllowedPath(path, bt.Allowlist)
+	if !ok {
+		return GrepResult{}, fmt.Errorf("path not allowed: %s", path)
+	}
+
+	var matcher func(line string) bool
+	var re *regexp.Regexp
+	if args.Regex {
+		var err error
+		re, err = regexp.Compile(args.Pattern)
+		if err != nil {
+			return GrepResult{}, fmt.Errorf("invalid regex: %w", err)
 		}
-		if args.Pattern == "" {
-			return GrepResult{}, fmt.Errorf("pattern is required")
+		matcher = re.MatchString
+	} else {
+		matcher = func(line string) bool { return strings.Contains(line, args.Pattern) }
+	}
+
+	absRoot := filepath.Join(bt.RootPath, resolved)
+
+	var matches []GrepMatch
+	var stack []gitignoreFrame
+
+	// Load root .gitignore if present.
+	if m, err := loadGitignore(filepath.Join(absRoot, ".gitignore")); err == nil && m != nil {
+		stack = append(stack, gitignoreFrame{dir: absRoot, matcher: m})
+	}
+
+	err := filepath.Walk(absRoot, func(filePath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable
 		}
 
-		resolved, ok := resolveAllowedPath(path, bt.Allowlist)
-		if !ok {
-			return GrepResult{}, fmt.Errorf("path not allowed: %s", path)
+		rel, err := filepath.Rel(absRoot, filePath)
+		if err != nil {
+			return nil
+		}
+		if rel == "." {
+			return nil
 		}
 
-		var matcher func(line string) bool
-		var re *regexp.Regexp
-		if args.Regex {
-			var err error
-			re, err = regexp.Compile(args.Pattern)
-			if err != nil {
-				return GrepResult{}, fmt.Errorf("invalid regex: %w", err)
-			}
-			matcher = re.MatchString
-		} else {
-			matcher = func(line string) bool { return strings.Contains(line, args.Pattern) }
+		// Pop frames when leaving their directories.
+		for len(stack) > 0 && !strings.HasPrefix(filePath, stack[len(stack)-1].dir+string(filepath.Separator)) {
+			stack = stack[:len(stack)-1]
 		}
 
-		var matches []GrepMatch
-		absRoot := filepath.Join(bt.RootPath, resolved)
+		isDir := info.IsDir()
 
-		err := filepath.Walk(absRoot, func(filePath string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil // skip unreadable
+		// Load nested .gitignore when entering a directory.
+		if isDir {
+			if m, err := loadGitignore(filepath.Join(filePath, ".gitignore")); err == nil && m != nil {
+				stack = append(stack, gitignoreFrame{dir: filePath, matcher: m})
 			}
-			if info.IsDir() {
-				if info.Name() == ".git" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			rel, err := filepath.Rel(absRoot, filePath)
-			if err != nil {
-				return nil
-			}
-			if isBinary(filePath) {
-				return nil
-			}
-			fileMatches, err := grepFile(filePath, rel, matcher)
-			if err != nil {
-				return nil
-			}
-			matches = append(matches, fileMatches...)
-			if len(matches) >= maxGrepResults {
-				return io.EOF
+		}
+
+		// Honor .gitignore.
+		if ignoredByGitignore(stack, rel, isDir) {
+			if isDir {
+				return filepath.SkipDir
 			}
 			return nil
-		})
-		if err != nil && err != io.EOF {
-			return GrepResult{}, err
 		}
 
-		truncated := len(matches) >= maxGrepResults
-		if truncated {
-			matches = matches[:maxGrepResults]
+		if isDir {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
-		return GrepResult{
-			Path:      path,
-			Pattern:   args.Pattern,
-			Regex:     args.Regex,
-			Matches:   matches,
-			Truncated: truncated,
-		}, nil
+		if isBinary(filePath) {
+			return nil
+		}
+		fileMatches, err := grepFile(filePath, rel, matcher)
+		if err != nil {
+			return nil
+		}
+		matches = append(matches, fileMatches...)
+		if len(matches) >= maxGrepResults {
+			return stopWalk{}
+		}
+		return nil
 	})
+
+	truncated := false
+	if _, ok := err.(stopWalk); ok {
+		truncated = true
+		err = nil
+	}
+	if err != nil {
+		return GrepResult{}, err
+	}
+	if len(matches) > maxGrepResults {
+		matches = matches[:maxGrepResults]
+		truncated = true
+	}
+
+	return GrepResult{
+		Path:      path,
+		Pattern:   args.Pattern,
+		Regex:     args.Regex,
+		Matches:   matches,
+		Truncated: truncated,
+	}, nil
+}
+
+// stopWalk is a sentinel error used to stop walking once the result cap is hit.
+type stopWalk struct{}
+
+func (stopWalk) Error() string { return "max results reached" }
+
+type gitignoreFrame struct {
+	dir     string
+	matcher *gitignoreMatcher
+}
+
+func ignoredByGitignore(stack []gitignoreFrame, rel string, isDir bool) bool {
+	for _, frame := range stack {
+		if frame.matcher.match(rel, isDir) {
+			return true
+		}
+	}
+	return false
 }
 
 func grepFile(absPath, relPath string, matcher func(string) bool) ([]GrepMatch, error) {

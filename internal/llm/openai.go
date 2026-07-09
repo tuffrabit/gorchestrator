@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"google.golang.org/genai"
@@ -73,36 +75,82 @@ func (m *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 		return nil, fmt.Errorf("marshal openai request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", m.baseURL+"/chat/completions", bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("create openai request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+m.apiKey)
+	const maxRetries = 3
+	var lastErr error
+	backoff := time.Second
 
-	httpResp, err := m.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openai request: %w", err)
-	}
-	defer httpResp.Body.Close()
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", m.baseURL+"/chat/completions", bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("create openai request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+m.apiKey)
 
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read openai response: %w", err)
-	}
-	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai status %d: %s", httpResp.StatusCode, string(respBody))
+		httpResp, err := m.client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("openai request: %w", err)
+		}
+
+		respBody, err := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read openai response: %w", err)
+		}
+
+		if httpResp.StatusCode == http.StatusOK {
+			var apiResp openAIChatResponse
+			if err := json.Unmarshal(respBody, &apiResp); err != nil {
+				return nil, fmt.Errorf("parse openai response: %w", err)
+			}
+			if len(apiResp.Choices) == 0 {
+				return nil, fmt.Errorf("openai returned no choices")
+			}
+			return m.convertResponse(&apiResp), nil
+		}
+
+		lastErr = fmt.Errorf("openai status %d: %s", httpResp.StatusCode, string(respBody))
+		if !isRetryableStatus(httpResp.StatusCode) {
+			break
+		}
+
+		if attempt < maxRetries {
+			wait := retryAfter(httpResp.Header.Get("Retry-After"), backoff)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			backoff = addJitter(backoff * 2)
+		}
 	}
 
-	var apiResp openAIChatResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("parse openai response: %w", err)
-	}
-	if len(apiResp.Choices) == 0 {
-		return nil, fmt.Errorf("openai returned no choices")
-	}
+	return nil, lastErr
+}
 
-	return m.convertResponse(&apiResp), nil
+func isRetryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
+}
+
+func retryAfter(header string, fallback time.Duration) time.Duration {
+	if header == "" {
+		return fallback
+	}
+	if seconds, err := strconv.Atoi(header); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		return time.Until(t)
+	}
+	return fallback
+}
+
+func addJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	jitter := time.Duration(rand.Int63n(int64(d)))
+	return d + jitter/2
 }
 
 func (m *OpenAIModel) buildRequestBody(req *model.LLMRequest) (map[string]any, error) {
@@ -111,8 +159,13 @@ func (m *OpenAIModel) buildRequestBody(req *model.LLMRequest) (map[string]any, e
 		return nil, err
 	}
 
+	modelName := req.Model
+	if modelName == "" {
+		modelName = m.model
+	}
+
 	body := map[string]any{
-		"model":    req.Model,
+		"model":    modelName,
 		"messages": messages,
 	}
 
@@ -222,7 +275,7 @@ func functionDeclarations(cfg *genai.GenerateContentConfig) []*genai.FunctionDec
 func (m *OpenAIModel) convertTools(decls []*genai.FunctionDeclaration) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(decls))
 	for _, d := range decls {
-		params := schemaToMap(d.Parameters)
+		params := SchemaToMap(d.Parameters)
 		if params == nil {
 			params = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
@@ -303,59 +356,34 @@ func joinStrings(parts []string, sep string) string {
 	return out
 }
 
-func schemaToMap(s *genai.Schema) map[string]any {
-	if s == nil {
-		return nil
-	}
-	m := map[string]any{
-		"type": s.Type,
-	}
-	if s.Description != "" {
-		m["description"] = s.Description
-	}
-	if s.Format != "" {
-		m["format"] = s.Format
-	}
-	if s.Nullable != nil && *s.Nullable {
-		m["nullable"] = true
-	}
-	if len(s.Enum) > 0 {
-		m["enum"] = s.Enum
-	}
-	if len(s.Required) > 0 {
-		m["required"] = s.Required
-	}
-	if s.Items != nil {
-		m["items"] = schemaToMap(s.Items)
-	}
-	if len(s.Properties) > 0 {
-		props := map[string]any{}
-		for k, v := range s.Properties {
-			props[k] = schemaToMap(v)
-		}
-		m["properties"] = props
-	}
-	return m
+type openAIChatResponse struct {
+	Choices []choice `json:"choices"`
+	Usage   usage    `json:"usage"`
 }
 
-type openAIChatResponse struct {
-	Choices []struct {
-		Message struct {
-			Role      string `json:"role"`
-			Content   string `json:"content"`
-			ToolCalls []struct {
-				ID       string `json:"id"`
-				Type     string `json:"type"`
-				Function struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
-				} `json:"function"`
-			} `json:"tool_calls"`
-		} `json:"message"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+type choice struct {
+	Message message `json:"message"`
+}
+
+type message struct {
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []toolCall `json:"tool_calls"`
+}
+
+type toolCall struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Function function `json:"function"`
+}
+
+type function struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"google.golang.org/genai"
@@ -31,13 +32,15 @@ type RunOptions struct {
 
 // Result is the orchestrator-written status envelope.
 type Result struct {
-	Status        string `json:"status"`
-	Error         string `json:"error"`
-	LoopCount     int    `json:"loop_count"`
-	TokensUsed    int    `json:"tokens_used"`
-	DurationMs    int64  `json:"duration_ms"`
+	Status       string `json:"status"`
+	Error        string `json:"error"`
+	Attempt      int    `json:"attempt"`
+	LoopCount    int    `json:"loop_count"`
+	TokensUsed   int    `json:"tokens_used"`
+	DurationMs   int64  `json:"duration_ms"`
+	LatestOutput string `json:"latest_output"`
 	DoneRationale string `json:"done_rationale"`
-	Timestamp     string `json:"timestamp"`
+	Timestamp    string `json:"timestamp"`
 }
 
 // Task is the orchestrator-written instructions/config file.
@@ -50,6 +53,18 @@ type Task struct {
 	Input        string            `json:"input"`
 	Allowlist    []string          `json:"allowlist"`
 	Tools        []map[string]any  `json:"tools"`
+}
+
+// eventRecord is a single line in events.jsonl.
+type eventRecord struct {
+	Type      string         `json:"type"`
+	Timestamp string         `json:"timestamp"`
+	Loop      int            `json:"loop"`
+	Role      string         `json:"role,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	ToolCall  map[string]any `json:"tool_call,omitempty"`
+	Tokens    int            `json:"tokens,omitempty"`
+	Error     string         `json:"error,omitempty"`
 }
 
 // Run executes the full researcher run lifecycle.
@@ -84,8 +99,8 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 		return fmt.Errorf("create issue: %w", err)
 	}
 
-	// Discover external adapters (best-effort).
-	_, _ = adapters.Discovery(cfg.AdaptersDir)
+	// Load configured adapters (explicit registry).
+	loadAdapters(cfg)
 
 	// Select model.
 	modelCfg := llm.Config{
@@ -106,13 +121,19 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 
 	// Prepare paths.
 	phase := "research"
+	attempt := 1
 	issueDir := storage.IssueDir(project.ID, issue.ID)
 	allowlist := []string{issueDir}
-	outputPath := storage.OutputPath(project.ID, issue.ID, phase)
+	outputPath := storage.AttemptOutputPath(project.ID, issue.ID, phase, attempt)
+	eventsPath := storage.EventsPath(project.ID, issue.ID, phase)
+	resultPath := storage.ResultPath(project.ID, issue.ID, phase)
 
 	// Build agent and capture tool schemas for task.json.
 	researcher := agents.NewResearcher()
-	toolSchemas := schemasFromTools(tools.NewResearcherRegistry(&tools.BoundTools{}))
+	toolSchemas, err := schemasFromTools(tools.NewResearcherRegistry(&tools.BoundTools{}))
+	if err != nil {
+		return fmt.Errorf("build tool schemas: %w", err)
+	}
 	task := Task{
 		AgentType:    "researcher",
 		SystemPrompt: researcher.SystemPrompt,
@@ -134,16 +155,25 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 		return fmt.Errorf("write task.json: %w", err)
 	}
 
+	// Write in-progress result.json at phase start.
+	start := time.Now()
+	if err := writeResult(ctx, store, resultPath, Result{
+		Status:    "in_progress",
+		Attempt:   attempt,
+		LoopCount: 0,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return fmt.Errorf("write in-progress result: %w", err)
+	}
+
 	// Create run record.
 	run, err := runs.Create(issue.ID, "researcher", cfg.DefaultModel.Model, "in_progress")
 	if err != nil {
 		return fmt.Errorf("create run: %w", err)
 	}
 
-	// Run the agent for n_loops, each loop in a fresh ADK session.
-	start := time.Now()
 	totalTokens := 0
-	lastOutput := ""
+	loopCount := 0
 	var runErr error
 
 	for i := 1; i <= opts.Loops; i++ {
@@ -154,13 +184,19 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 
 		outputWritten := false
 		bt := &tools.BoundTools{
-			Storage:       store,
-			RootPath:      cfg.StorageRoot,
-			Allowlist:     allowlist,
-			OutputPath:    outputPath,
-			OutputWritten: &outputWritten,
+			Storage:          store,
+			RootPath:         cfg.StorageRoot,
+			Allowlist:        allowlist,
+			OutputPath:       outputPath,
+			ReadFileMaxBytes: cfg.Tools.ReadFile.MaxBytes,
+			ReadFileMaxLines: cfg.Tools.ReadFile.MaxLines,
+			OutputWritten:    &outputWritten,
 		}
-		registry := tools.NewResearcherRegistry(bt)
+		registry, err := tools.NewResearcherRegistry(bt)
+		if err != nil {
+			runErr = fmt.Errorf("build researcher registry: %w", err)
+			break
+		}
 		agentInst, err := researcher.Build(llmModel, registry)
 		if err != nil {
 			runErr = fmt.Errorf("build researcher: %w", err)
@@ -179,9 +215,8 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 			break
 		}
 
-		loopStart := time.Now()
 		loopTokens := 0
-		userContent := genai.NewContentFromText(opts.IssueTitle, genai.RoleUser)
+		userContent := buildLoopUserContent(ctx, store, opts.IssueTitle, outputPath, i)
 
 		var finalText string
 		for ev, err := range r.Run(ctx, "user", sessionID, userContent, agent.RunConfig{}) {
@@ -193,31 +228,65 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 				continue
 			}
 			if ev.UsageMetadata != nil {
-				loopTokens = int(ev.UsageMetadata.TotalTokenCount)
+				loopTokens += int(ev.UsageMetadata.TotalTokenCount)
 			}
 			if ev.Content.Role == genai.RoleModel {
 				for _, p := range ev.Content.Parts {
-					if p != nil && p.Text != "" {
+					if p == nil {
+						continue
+					}
+					if p.Text != "" {
 						finalText = p.Text
+					}
+					if p.FunctionCall != nil {
+						recordEvent(ctx, store, eventsPath, eventRecord{
+							Type:      "tool_call",
+							Timestamp: time.Now().UTC().Format(time.RFC3339),
+							Loop:      i,
+							ToolCall: map[string]any{
+								"id":   p.FunctionCall.ID,
+								"name": p.FunctionCall.Name,
+								"args": p.FunctionCall.Args,
+							},
+						})
 					}
 				}
 			}
+			recordEvent(ctx, store, eventsPath, eventRecord{
+				Type:      "model_turn",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Loop:      i,
+				Role:      string(ev.Content.Role),
+				Content:   cappedText(finalText),
+			})
 		}
 		if runErr != nil {
+			loopCount = i
 			break
 		}
 
 		// If the agent did not use write_output, fall back to the final model text.
 		if !outputWritten {
+			if finalText == "" {
+				runErr = fmt.Errorf("loop %d produced empty output", i)
+				loopCount = i
+				break
+			}
 			if err := store.Write(ctx, outputPath, []byte(finalText)); err != nil {
 				runErr = fmt.Errorf("write fallback output: %w", err)
+				loopCount = i
 				break
 			}
 		}
 
-		lastOutput = finalText
+		loopCount = i
 		totalTokens += loopTokens
-		_ = loopStart
+		recordEvent(ctx, store, eventsPath, eventRecord{
+			Type:      "usage",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Loop:      i,
+			Tokens:    loopTokens,
+		})
 	}
 
 	duration := time.Since(start).Milliseconds()
@@ -225,44 +294,109 @@ func Run(ctx context.Context, cfg *config.Config, opts RunOptions) error {
 	status := "done"
 	errMsg := ""
 	if runErr != nil {
-		status = "failed"
+		if ctx.Err() == context.Canceled {
+			status = "cancelled"
+		} else {
+			status = "failed"
+		}
 		errMsg = runErr.Error()
 	}
 
-	result := Result{
-		Status:     status,
-		Error:      errMsg,
-		LoopCount:  opts.Loops,
-		TokensUsed: totalTokens,
-		DurationMs: duration,
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-	}
-	if lastOutput != "" {
-		result.DoneRationale = lastOutput
+	latestOutput := ""
+	if exists, _ := store.Exists(ctx, outputPath); exists {
+		latestOutput = outputPath
 	}
 
-	resultData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal result: %w", err)
+	result := Result{
+		Status:       status,
+		Error:        errMsg,
+		Attempt:      attempt,
+		LoopCount:    loopCount,
+		TokensUsed:   totalTokens,
+		DurationMs:   duration,
+		LatestOutput: latestOutput,
+		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	}
-	if err := store.Write(ctx, storage.ResultPath(project.ID, issue.ID, phase), resultData); err != nil {
+	if err := writeResult(ctx, store, resultPath, result); err != nil {
 		return fmt.Errorf("write result.json: %w", err)
 	}
 
 	if runErr != nil {
-		_ = issues.UpdateStatus(issue.ID, "failed", phase)
-		_ = runs.UpdateStatus(run.ID, "failed", totalTokens, int(duration), opts.Loops)
+		_ = issues.UpdateStatus(issue.ID, status, phase)
+		_ = runs.UpdateStatus(run.ID, status, totalTokens, int(duration), loopCount)
 		return runErr
 	}
 
 	_ = issues.UpdateStatus(issue.ID, "done", phase)
-	return runs.UpdateStatus(run.ID, "done", totalTokens, int(duration), opts.Loops)
+	return runs.UpdateStatus(run.ID, "done", totalTokens, int(duration), loopCount)
+}
+
+func writeResult(ctx context.Context, store storage.Port, path string, result Result) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	return store.Write(ctx, path, data)
+}
+
+func buildLoopUserContent(ctx context.Context, store storage.Port, issueTitle, outputPath string, loop int) *genai.Content {
+	var text string
+	if loop > 1 {
+		prev, err := store.Read(ctx, outputPath)
+		if err == nil && len(prev) > 0 {
+			text = fmt.Sprintf("Issue: %s\n\nPrevious loop output:\n%s", issueTitle, string(prev))
+		}
+	}
+	if text == "" {
+		text = issueTitle
+	}
+	return genai.NewContentFromText(text, genai.RoleUser)
+}
+
+func recordEvent(ctx context.Context, store storage.Port, path string, ev eventRecord) {
+	line, err := json.Marshal(ev)
+	if err != nil {
+		log.Printf("failed to marshal event: %v", err)
+		return
+	}
+	line = append(line, '\n')
+
+	existing, _ := store.Read(ctx, path)
+	data := append(existing, line...)
+	if err := store.Write(ctx, path, data); err != nil {
+		log.Printf("failed to write event: %v", err)
+	}
+}
+
+func cappedText(s string) string {
+	const maxEventBytes = 4096
+	if len(s) <= maxEventBytes {
+		return s
+	}
+	return s[:maxEventBytes] + "\n... [truncated]"
+}
+
+func loadAdapters(cfg *config.Config) map[string]*adapters.Manifest {
+	loaded := make(map[string]*adapters.Manifest)
+	for _, ac := range cfg.Adapters {
+		m, err := adapters.LoadManifest(ac.ManifestPath)
+		if err != nil {
+			log.Printf("failed to load adapter %q: %v", ac.Name, err)
+			continue
+		}
+		loaded[ac.Name] = m
+		log.Printf("loaded adapter %q (%s) from %s", m.Name, m.Port, ac.ManifestPath)
+	}
+	return loaded
 }
 
 // schemasFromTools returns JSON-serializable tool schemas for task.json.
 // Because ADK infers schemas from Go struct types, we construct a minimal
 // declaration by reflecting over the function tool declarations.
-func schemasFromTools(toolList []tool.Tool) []map[string]any {
+func schemasFromTools(toolList []tool.Tool, err error) ([]map[string]any, error) {
+	if err != nil {
+		return nil, err
+	}
 	out := make([]map[string]any, 0, len(toolList))
 	for _, t := range toolList {
 		declarer, ok := t.(interface{ Declaration() *genai.FunctionDeclaration })
@@ -273,59 +407,8 @@ func schemasFromTools(toolList []tool.Tool) []map[string]any {
 		out = append(out, map[string]any{
 			"name":        decl.Name,
 			"description": decl.Description,
-			"parameters":  schemaToMap(decl.Parameters),
+			"parameters":  llm.SchemaToMap(decl.Parameters),
 		})
 	}
-	return out
-}
-
-func finishTaskResult(output any) string {
-	m, ok := output.(map[string]any)
-	if !ok {
-		return ""
-	}
-	v, ok := m["result"]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
-}
-
-func schemaToMap(s *genai.Schema) map[string]any {
-	if s == nil {
-		return nil
-	}
-	m := map[string]any{
-		"type": s.Type,
-	}
-	if s.Description != "" {
-		m["description"] = s.Description
-	}
-	if s.Format != "" {
-		m["format"] = s.Format
-	}
-	if s.Nullable != nil && *s.Nullable {
-		m["nullable"] = true
-	}
-	if len(s.Enum) > 0 {
-		m["enum"] = s.Enum
-	}
-	if len(s.Required) > 0 {
-		m["required"] = s.Required
-	}
-	if s.Items != nil {
-		m["items"] = schemaToMap(s.Items)
-	}
-	if len(s.Properties) > 0 {
-		props := map[string]any{}
-		for k, v := range s.Properties {
-			props[k] = schemaToMap(v)
-		}
-		m["properties"] = props
-	}
-	return m
+	return out, nil
 }

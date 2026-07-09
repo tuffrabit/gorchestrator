@@ -1,5 +1,4 @@
 storage_root: ~/.config/gorchestrator/storage
-adapters_dir: ~/.config/gorchestrator/adapters
 db_path: ~/.config/gorchestrator/gorchestrator.db
 default_model:
   # Supported providers: openai, gemini, dryrun
@@ -10,3 +9,14 @@ default_model:
   api_key_env: OPENAI_API_KEY
   # base_url: http://localhost:8080/v1
   timeout: 60s
+
+tools:
+  read_file:
+    max_bytes: 65536
+    max_lines: 2000
+
+# External adapters are declared explicitly by name + manifest path.
+# The core does not scan directories for adapters.
+# adapters:
+#   - name: s3
+#     manifest_path: ~/.config/gorchestrator/adapters/s3.yaml

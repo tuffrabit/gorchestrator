@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
@@ -33,50 +35,16 @@ func TestOpenAIModel_GenerateContent(t *testing.T) {
 		}
 
 		resp := openAIChatResponse{
-			Choices: []struct {
-				Message struct {
-					Role      string `json:"role"`
-					Content   string `json:"content"`
-					ToolCalls []struct {
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"message"`
-			}{
+			Choices: []choice{
 				{
-					Message: struct {
-						Role      string `json:"role"`
-						Content   string `json:"content"`
-						ToolCalls []struct {
-							ID       string `json:"id"`
-							Type     string `json:"type"`
-							Function struct {
-								Name      string `json:"name"`
-								Arguments string `json:"arguments"`
-							} `json:"function"`
-						} `json:"tool_calls"`
-					}{
+					Message: message{
 						Role:    "assistant",
 						Content: "Hello from OpenAI",
-						ToolCalls: []struct {
-							ID       string `json:"id"`
-							Type     string `json:"type"`
-							Function struct {
-								Name      string `json:"name"`
-								Arguments string `json:"arguments"`
-							} `json:"function"`
-						}{
+						ToolCalls: []toolCall{
 							{
 								ID:   "call_1",
 								Type: "function",
-								Function: struct {
-									Name      string `json:"name"`
-									Arguments string `json:"arguments"`
-								}{
+								Function: function{
 									Name:      "read_file",
 									Arguments: `{"path":"test.go"}`,
 								},
@@ -85,11 +53,7 @@ func TestOpenAIModel_GenerateContent(t *testing.T) {
 					},
 				},
 			},
-			Usage: struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
-			}{
+			Usage: usage{
 				PromptTokens:     10,
 				CompletionTokens: 5,
 				TotalTokens:      15,
@@ -153,5 +117,59 @@ func TestOpenAIModel_GenerateContent(t *testing.T) {
 	}
 	if resp.UsageMetadata.TotalTokenCount != 15 {
 		t.Fatalf("total tokens = %d, want 15", resp.UsageMetadata.TotalTokenCount)
+	}
+}
+
+func TestOpenAIModel_GenerateContent_RetryAfter429(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := calls.Add(1)
+		if count == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "rate limited"})
+			return
+		}
+
+		resp := openAIChatResponse{
+			Choices: []choice{
+				{
+					Message: message{
+						Role:    "assistant",
+						Content: "Retry succeeded",
+					},
+				},
+			},
+			Usage: usage{
+				TotalTokens: 5,
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	m := NewOpenAIModel("gpt-4o-mini", "", server.URL, 30*time.Second)
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("Hi", genai.RoleUser),
+		},
+	}
+
+	var responses []*model.LLMResponse
+	for resp, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent error: %v", err)
+		}
+		responses = append(responses, resp)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("calls = %d, want 2", calls.Load())
+	}
+	if len(responses) != 1 {
+		t.Fatalf("responses = %d, want 1", len(responses))
+	}
+	if responses[0].Content.Parts[0].Text != "Retry succeeded" {
+		t.Fatalf("text = %q, want Retry succeeded", responses[0].Content.Parts[0].Text)
 	}
 }

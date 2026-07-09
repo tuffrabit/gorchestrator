@@ -40,6 +40,8 @@ func main() {
 			resp.Result = json.RawMessage(`{"ok":true}`)
 		case "storage.read":
 			resp.Result = json.RawMessage(`{"content":"noop","exists":true,"size":4}`)
+		case "echo":
+			resp.Result = req.Params
 		default:
 			resp.Error = &rpcError{Code: -32601, Message: "method not found"}
 		}

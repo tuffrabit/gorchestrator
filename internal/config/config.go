@@ -11,20 +11,38 @@ import (
 
 // ModelConfig describes the default LLM model to use.
 type ModelConfig struct {
-	Provider    string `yaml:"provider"`
-	Model       string `yaml:"model"`
-	APIKeyEnv   string `yaml:"api_key_env"`
-	BaseURL     string `yaml:"base_url"`
-	Timeout     string `yaml:"timeout"`
-	TimeoutDur  time.Duration `yaml:"-"`
+	Provider   string        `yaml:"provider"`
+	Model      string        `yaml:"model"`
+	APIKeyEnv  string        `yaml:"api_key_env"`
+	BaseURL    string        `yaml:"base_url"`
+	Timeout    string        `yaml:"timeout"`
+	TimeoutDur time.Duration `yaml:"-"`
+}
+
+// ReadFileConfig configures the read_file tool.
+type ReadFileConfig struct {
+	MaxBytes int `yaml:"max_bytes"`
+	MaxLines int `yaml:"max_lines"`
+}
+
+// ToolsConfig configures the core toolset.
+type ToolsConfig struct {
+	ReadFile ReadFileConfig `yaml:"read_file"`
+}
+
+// AdapterConfig declares an external adapter by name and manifest path.
+type AdapterConfig struct {
+	Name         string `yaml:"name"`
+	ManifestPath string `yaml:"manifest_path"`
 }
 
 // Config is the top-level user configuration.
 type Config struct {
-	StorageRoot string      `yaml:"storage_root"`
-	AdaptersDir string      `yaml:"adapters_dir"`
-	DBPath      string      `yaml:"db_path"`
-	DefaultModel ModelConfig `yaml:"default_model"`
+	StorageRoot  string            `yaml:"storage_root"`
+	DBPath       string            `yaml:"db_path"`
+	DefaultModel ModelConfig       `yaml:"default_model"`
+	Tools        ToolsConfig       `yaml:"tools"`
+	Adapters     []AdapterConfig   `yaml:"adapters"`
 }
 
 // HomeDir returns the user's home directory.
@@ -65,11 +83,6 @@ func LoadFrom(path string) (*Config, error) {
 	}
 	cfg.StorageRoot = expandTilde(cfg.StorageRoot, home)
 
-	if cfg.AdaptersDir == "" {
-		cfg.AdaptersDir = filepath.Join(home, ".config", "gorchestrator", "adapters")
-	}
-	cfg.AdaptersDir = expandTilde(cfg.AdaptersDir, home)
-
 	if cfg.DBPath == "" {
 		cfg.DBPath = filepath.Join(home, ".config", "gorchestrator", "gorchestrator.db")
 	}
@@ -90,6 +103,13 @@ func LoadFrom(path string) (*Config, error) {
 	cfg.DefaultModel.TimeoutDur, err = time.ParseDuration(cfg.DefaultModel.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("parse default_model.timeout: %w", err)
+	}
+
+	if cfg.Tools.ReadFile.MaxBytes == 0 {
+		cfg.Tools.ReadFile.MaxBytes = 64 * 1024
+	}
+	if cfg.Tools.ReadFile.MaxLines == 0 {
+		cfg.Tools.ReadFile.MaxLines = 2000
 	}
 
 	return &cfg, nil

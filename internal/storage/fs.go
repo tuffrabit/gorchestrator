@@ -24,20 +24,67 @@ func NewFS(root string) (*FS, error) {
 }
 
 func (fs *FS) resolve(path string) (string, error) {
-	path = filepath.Clean(path)
-	if strings.HasPrefix(path, "..") || strings.Contains(path, ".."+string(filepath.Separator)) {
+	// Treat the key as relative to the root. Leading slashes or ".." are
+	// normalized by Clean so that the resolved path stays inside the root
+	// unless an explicit escape is present.
+	path = filepath.Clean("/" + path)
+	if strings.HasPrefix(path, "..") {
 		return "", fmt.Errorf("path escapes root: %s", path)
 	}
+
 	abs := filepath.Join(fs.root, path)
-	// Double-check after clean/join.
-	realAbs, err := filepath.Abs(abs)
+
+	// Resolve symlinks on the deepest existing ancestor, then re-check
+	// containment. This prevents a symlink inside the root from pointing
+	// outside the root.
+	existing, err := fs.deepestExistingAncestor(abs)
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	if !strings.HasPrefix(realAbs, fs.root) && realAbs != fs.root {
+
+	resolved := abs
+	if _, err := os.Lstat(existing); err == nil {
+		resolvedExisting, err := filepath.EvalSymlinks(existing)
+		if err != nil {
+			return "", fmt.Errorf("resolve symlinks: %w", err)
+		}
+		remaining, err := filepath.Rel(existing, abs)
+		if err != nil {
+			return "", fmt.Errorf("resolve remaining path: %w", err)
+		}
+		resolved = filepath.Join(resolvedExisting, remaining)
+	}
+
+	// Final separator-aware containment check.
+	rel, err := filepath.Rel(fs.root, resolved)
+	if err != nil {
+		return "", fmt.Errorf("containment check: %w", err)
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("path escapes root: %s", path)
 	}
-	return realAbs, nil
+
+	return resolved, nil
+}
+
+// deepestExistingAncestor walks up from abs until it finds a path that exists
+// or until it can go no further.
+func (fs *FS) deepestExistingAncestor(abs string) (string, error) {
+	for {
+		_, err := os.Lstat(abs)
+		if err == nil {
+			return abs, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			// Reached the filesystem root; return it and let the caller decide.
+			return abs, nil
+		}
+		abs = parent
+	}
 }
 
 // Read implements Port.
@@ -80,7 +127,7 @@ func (fs *FS) List(ctx context.Context, path string) ([]DirEntry, error) {
 	for _, e := range entries {
 		info, err := e.Info()
 		if err != nil {
-			continue
+			return nil, err
 		}
 		out = append(out, DirEntry{
 			Name:  e.Name(),

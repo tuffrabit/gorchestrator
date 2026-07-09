@@ -14,11 +14,11 @@ type Manifest struct {
 	Version      string   `yaml:"version"`
 	Protocol     string   `yaml:"protocol"`
 	Port         string   `yaml:"port"`
+	Binary       string   `yaml:"binary"`
 	Capabilities []string `yaml:"capabilities"`
-	Binary       string   `yaml:"-"`
 }
 
-// LoadManifest reads a manifest from path.
+// LoadManifest reads a manifest from path and verifies its binary.
 func LoadManifest(path string) (*Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -28,36 +28,29 @@ func LoadManifest(path string) (*Manifest, error) {
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse manifest %s: %w", path, err)
 	}
-	m.Binary = filepath.Join(filepath.Dir(path), m.Name)
-	if _, err := os.Stat(m.Binary); err != nil {
-		return nil, fmt.Errorf("manifest binary missing: %s", m.Binary)
+	if m.Binary == "" {
+		return nil, fmt.Errorf("manifest %s missing binary field", path)
+	}
+	if !filepath.IsAbs(m.Binary) {
+		m.Binary = filepath.Join(filepath.Dir(path), m.Binary)
+	}
+	if err := verifyExecutable(m.Binary); err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", path, err)
 	}
 	return &m, nil
 }
 
-// Discovery scans dir for adapter manifests.
-func Discovery(dir string) ([]*Manifest, error) {
-	entries, err := os.ReadDir(dir)
+// verifyExecutable reports whether path is a regular executable file.
+func verifyExecutable(path string) error {
+	info, err := os.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+		return fmt.Errorf("binary %s: %w", path, err)
 	}
-	var manifests []*Manifest
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if filepath.Ext(e.Name()) != ".yaml" && filepath.Ext(e.Name()) != ".yml" {
-			continue
-		}
-		m, err := LoadManifest(filepath.Join(dir, e.Name()))
-		if err != nil {
-			// Skip invalid manifests rather than failing discovery.
-			continue
-		}
-		manifests = append(manifests, m)
+	if info.IsDir() {
+		return fmt.Errorf("binary %s is a directory", path)
 	}
-	return manifests, nil
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("binary %s is not executable", path)
+	}
+	return nil
 }

@@ -2,4 +2,5 @@ name: noop
 version: "1.0.0"
 protocol: jsonrpc-stdio
 port: storage
+binary: ./noop/noop
 capabilities: [read]

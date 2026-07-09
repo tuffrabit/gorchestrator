@@ -23,7 +23,7 @@ type WriteOutputResult struct {
 func newWriteOutputTool(bt *BoundTools) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "write_output",
-		Description: "Write the agent's final output to the designated output file for this phase.",
+		Description: "Write the agent's final output to the orchestrator-designated output file for this phase (e.g., attempts/1/output.md).",
 	}, func(ctx agent.Context, args WriteOutputArgs) (WriteOutputResult, error) {
 		if bt.OutputPath == "" {
 			return WriteOutputResult{}, fmt.Errorf("output path not configured")

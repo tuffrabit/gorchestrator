@@ -1,8 +1,6 @@
 package agents
 
 import (
-	"encoding/json"
-
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
@@ -31,11 +29,6 @@ func (r *Researcher) Build(model model.LLM, tools []tool.Tool) (agent.Agent, err
 		Tools:       tools,
 		Mode:        llmagent.ModeChat,
 	})
-}
-
-// MarshalTask serializes a task.json payload.
-func MarshalTask(task any) ([]byte, error) {
-	return json.MarshalIndent(task, "", "  ")
 }
 
 func defaultSystemPrompt() string {

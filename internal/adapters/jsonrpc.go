@@ -6,9 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
+)
+
+const (
+	maxScanTokenSize = 10 * 1024 * 1024 // 10MB
+	closeTimeout     = 5 * time.Second
 )
 
 // Request is a JSON-RPC 2.0 request.
@@ -40,16 +47,18 @@ func (e *RPCError) Error() string {
 
 // Client manages a JSON-RPC stdio adapter process.
 type Client struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Scanner
-	nextID int64
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Scanner
+	stderr  io.Reader
+	nextID  int64
 	pending map[int64]chan *Response
 	mu      sync.Mutex
 	done    chan struct{}
+	scanErr atomic.Value
 }
 
-// NewClient spawns an external adapter binary.
+// NewClient spawns an external adapter binary and performs the initialize handshake.
 func NewClient(binary string) (*Client, error) {
 	cmd := exec.Command(binary)
 	stdin, err := cmd.StdinPipe()
@@ -60,17 +69,38 @@ func NewClient(binary string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start adapter: %w", err)
 	}
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), maxScanTokenSize)
+
 	c := &Client{
 		cmd:     cmd,
 		stdin:   stdin,
-		stdout:  bufio.NewScanner(stdout),
+		stdout:  scanner,
+		stderr:  stderr,
 		pending: make(map[int64]chan *Response),
 		done:    make(chan struct{}),
 	}
+
+	// Capture stderr in the background.
+	go c.logStderr()
 	go c.readLoop()
+
+	// Perform initialize handshake.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.Call(ctx, "initialize", map[string]any{}); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("initialize handshake: %w", err)
+	}
+
 	return c, nil
 }
 
@@ -80,6 +110,7 @@ func (c *Client) readLoop() {
 		line := c.stdout.Bytes()
 		var resp Response
 		if err := json.Unmarshal(line, &resp); err != nil {
+			log.Printf("jsonrpc: dropping malformed response: %v", err)
 			continue
 		}
 		c.mu.Lock()
@@ -92,6 +123,24 @@ func (c *Client) readLoop() {
 			ch <- &resp
 		}
 	}
+	if err := c.stdout.Err(); err != nil {
+		c.scanErr.Store(err)
+	}
+}
+
+func (c *Client) logStderr() {
+	scanner := bufio.NewScanner(c.stderr)
+	for scanner.Scan() {
+		log.Printf("adapter[%d] stderr: %s", c.cmd.Process.Pid, scanner.Text())
+	}
+}
+
+// ScanError returns the scanner error, if any, after the read loop exits.
+func (c *Client) ScanError() error {
+	if v := c.scanErr.Load(); v != nil {
+		return v.(error)
+	}
+	return nil
 }
 
 // Call sends a JSON-RPC request and waits for a response.
@@ -143,5 +192,21 @@ func (c *Client) Call(ctx context.Context, method string, params any) (*Response
 // Close terminates the adapter process.
 func (c *Client) Close() error {
 	_ = c.stdin.Close()
-	return c.cmd.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		_ = c.cmd.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(closeTimeout):
+		if err := c.cmd.Process.Kill(); err != nil {
+			return fmt.Errorf("kill adapter: %w", err)
+		}
+		<-done
+		return nil
+	}
 }
