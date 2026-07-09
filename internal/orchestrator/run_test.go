@@ -520,8 +520,9 @@ func TestResume_Fail(t *testing.T) {
 		Decision:    "fail",
 		Feedback:    "irrelevant research",
 	}
-	if err := Resume(ctx, cfg, resumeOpts); err == nil {
-		t.Fatal("expected error for fail decision")
+	// Fail is a clean terminal decision — Resume returns nil after applying it.
+	if err := Resume(ctx, cfg, resumeOpts); err != nil {
+		t.Fatalf("Resume fail: %v", err)
 	}
 
 	store, err := storage.NewFS(tmp)
@@ -540,6 +541,19 @@ func TestResume_Fail(t *testing.T) {
 	}
 	if result.Status != "failed" {
 		t.Fatalf("research result status = %q, want failed", result.Status)
+	}
+
+	db, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	issue, err := sqlite.NewIssueRepo(db).Get(1)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if issue.Status != "failed" {
+		t.Fatalf("issue status = %q, want failed", issue.Status)
 	}
 }
 

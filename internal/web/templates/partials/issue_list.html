@@ -1,0 +1,9 @@
+{{define "partials/issue_list.html"}}
+{{if .Issues}}
+  {{range .Issues}}
+    {{template "issue_card_inner" (expandCard . $.CSRF $.CanWrite false)}}
+  {{end}}
+{{else}}
+  <div class="empty"><p>No issues match this filter.</p></div>
+{{end}}
+{{end}}

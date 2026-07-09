@@ -1,6 +1,6 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-09 (Phase 3 plan solidification)  
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-09 (Phase 3 complete)  
 > **Status:** Living document — single source of truth  
 > **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
 >
@@ -14,6 +14,7 @@
 | 2026-07-08 | Post-review revision. Recorded the ADK-native LLM integration decision (supersedes LLMProviderPort); unified handoff modes and adjudicators into a single axis (§9); specified crash-recovery semantics (§9.4); added per-phase `events.jsonl` transcripts and attempt versioning with adjudication feedback (§7); moved read-only project source access into Phase 2 (§6.6); named daemonization as Phase 3's first workstream (§11.0); hardened `run_test` sandbox requirements (§6.5); added untrusted-input/prompt-injection section (§5.6); switched adapter discovery to an explicit registry (§4.3); inserted a "Phase 2 Project Cleanup" phase (§14); converted resolved open questions into soft decisions (§17). |
 | 2026-07-09 | Phase 3 plan solidification. Closed §17 Q5 (notifications: console + Slack webhook + SMTP email) and Q6 (OIDC-only MVP; SAML deferred). Recorded local auth mode for dev/test, issue-row queue model, and HTMX/SSE promoted hard for Phase 3. |
 | 2026-07-09 | Dashboard UX: vertical expandable status-tinted issue cards (not kanban); dark-only theme (greys/blues + neon pink); multi-expand; adjudication on expanded card; artifact slide-out drawer; submit from top-bar drawer. See §11.5. |
+| 2026-07-09 | Phase 3 complete: `serve` daemon, HTMX dashboard, local+OIDC auth, SSE, notifications (console/Slack/email), human retry on failed/cancelled, OpenAI-compatible tool schema normalization for llama.cpp-class servers. |
 
 ---
 
@@ -724,7 +725,7 @@ Small, native Go toolset available to agents based on agent type:
 - Orchestrator drives the ADK runner; filesystem remains source of truth
 - **Deliverable (met):** same Phase 1 artifacts, produced through the ADK runtime
 
-### Phase 2 Project Cleanup — next up (see `phase_2_cleanup.md`)
+### Phase 2 Project Cleanup — ✅ Complete (see `phase_2_cleanup.md`)
 **Goal:** Pay down the defects and spec drift found in the post-Part-1 review before building the pipeline on top of them. No new pipeline features.
 
 - Security fixes: separator-aware path containment, symlink resolution, manifest binary validation
@@ -734,7 +735,7 @@ Small, native Go toolset available to agents based on agent type:
 - Hygiene: dead code removal, shared schema helpers, README
 - **Deliverable:** same single-researcher behavior, on the revised artifact contract, with the known defects closed
 
-### Phase 2 Part 2: The Pipeline (Still CLI)
+### Phase 2 Part 2: The Pipeline (Still CLI) — ✅ Complete
 **Goal:** Full Research → Plan → Implement pipeline with unified adjudication, operating on real project source.
 
 - Read-only source snapshot per issue (§6.6); implementer workspace seeded from it
@@ -748,17 +749,17 @@ Small, native Go toolset available to agents based on agent type:
 - Token tracking per run, SQLite logging
 - **Deliverable:** Full pipeline from issue to code changes against a real codebase, configurable per-agent via YAML, recoverable after a crash
 
-### Phase 3: Human Interface (Daemon + Dashboard + Auth)
-**Goal:** Humans can see what's happening and intervene. (See `phase_3.md` — ready to implement.)
+### Phase 3: Human Interface (Daemon + Dashboard + Auth) — ✅ Complete
+**Goal:** Humans can see what's happening and intervene. (See `phase_3.md`.)
 
 - **Daemonization first:** `gorchestrator serve` — embeddable engine, issue-row queue + worker pool, graceful shutdown, startup recovery scan (§9.4). This is a named workstream, not an implied side effect of the dashboard.
 - Web dashboard: Go HTTP server + HTMX; **vertical expandable status-tinted issue cards** (not kanban); **dark-only** blue-grey + neon pink theme (§11.5, §17 Q1)
 - Real-time feed via SSE: card re-tint/chips; full artifacts in a **right slide-out drawer** (`result.json`, output, `events.jsonl`, diff) (§17 Q4)
-- Adjudication UI on the **expanded card**: pass/fail/retry **with feedback field** at any handoff boundary
+- Adjudication UI on the **expanded card**: pass/fail/retry **with feedback field** at waiting/failed/cancelled boundaries
 - HumanAdjudicator: pauses, notifies, worker exits; decision re-queues and a new worker runs (in-process; CLI `resume` remains for headless)
 - User/team model: SQLite-backed roles (admin, member, viewer); OIDC built-in; **local auth mode for dev/test** (not production)
 - Notifications wired: console (built-in) + Slack webhook + SMTP email (external process adapters — §17 Q5); SAML out of scope (§17 Q6)
-- **Deliverable:** Team can log in, watch agents work live, click retry with a reason, get Slack/email alerts
+- **Deliverable (met):** Team can log in, watch agents work live, click retry with a reason, get Slack/email/console alerts
 
 ### Phase 4: Extensibility
 **Goal:** Users can plug in their own world. (See `phase_4.md`.)

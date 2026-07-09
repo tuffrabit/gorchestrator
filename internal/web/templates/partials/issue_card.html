@@ -1,0 +1,82 @@
+{{define "partials/issue_card.html"}}
+{{template "issue_card_inner" .}}
+{{end}}
+
+{{define "issue_card_inner"}}
+{{$issue := .Issue.Issue}}
+{{$expanded := .Expanded}}
+<article id="issue-{{$issue.ID}}"
+  class="issue-card {{statusClass $issue.Status}}"
+  data-issue-id="{{$issue.ID}}">
+  <button type="button" class="card-header"
+    aria-expanded="{{if $expanded}}true{{else}}false{{end}}"
+    hx-get="/partials/issues/{{$issue.ID}}?expanded={{if $expanded}}0{{else}}1{{end}}"
+    hx-target="#issue-{{$issue.ID}}"
+    hx-swap="outerHTML">
+    <span class="card-id">#{{$issue.ID}}</span>
+    <span class="card-title">{{if .Issue.ProjectName}}{{.Issue.ProjectName}} · {{end}}{{$issue.Title}}</span>
+    <span class="card-meta">
+      <span class="status-chip">{{statusLabel $issue.Status}}</span>
+      <span>{{$issue.CurrentPhase}}</span>
+      {{if .Issue.Attempt}}<span>attempt {{.Issue.Attempt}}</span>{{end}}
+      <span class="mono">{{.Issue.TokenTotal}} tok</span>
+    </span>
+  </button>
+  {{if $expanded}}
+  <div class="card-body">
+    <div class="phase-strip">
+      <span class="{{if eq $issue.CurrentPhase "research"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "plan") (eq $issue.CurrentPhase "implementation")}}done{{end}}">research</span>
+      <span>—</span>
+      <span class="{{if eq $issue.CurrentPhase "plan"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "implementation")}}done{{end}}">plan</span>
+      <span>—</span>
+      <span class="{{if eq $issue.CurrentPhase "implementation"}}current{{else if eq $issue.Status "done"}}done{{end}}">implementation</span>
+    </div>
+    <div class="card-meta" style="margin-bottom:0.75rem">
+      <span>status={{$issue.Status}}</span>
+      <span>tokens={{.Issue.TokenTotal}}</span>
+      <span>updated={{$issue.UpdatedAt}}</span>
+    </div>
+    <div class="artifact-actions">
+      <button class="btn" type="button"
+        onclick="openArtifactDrawer({{$issue.ID}}, 'result')">result.json</button>
+      <button class="btn" type="button"
+        onclick="openArtifactDrawer({{$issue.ID}}, 'output')">output</button>
+      <button class="btn" type="button"
+        onclick="openArtifactDrawer({{$issue.ID}}, 'activity')">activity</button>
+      <button class="btn" type="button"
+        onclick="openArtifactDrawer({{$issue.ID}}, 'diff')">diff</button>
+    </div>
+    {{if .CanWrite}}
+      {{if or (eq $issue.Status "waiting_human") (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
+    <form class="adjudicate"
+      hx-post="/partials/issues/{{$issue.ID}}/decisions"
+      hx-target="#issue-{{$issue.ID}}"
+      hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      {{/* Single named field: FormData omits submit buttons, so decision must live here. */}}
+      <input type="hidden" name="decision" value="">
+      <textarea name="feedback" placeholder="why? (context for fail/retry — injected into the next attempt)"></textarea>
+      <div class="adjudicate-actions">
+        <button class="btn btn-pass" type="submit"
+          onclick="this.form.decision.value='pass'">Pass</button>
+        <button class="btn btn-fail" type="submit"
+          onclick="this.form.decision.value='fail'; return warnEmptyFeedback(this.form)">Fail</button>
+        <button class="btn btn-retry" type="submit"
+          onclick="this.form.decision.value='retry'; return warnEmptyFeedback(this.form)">Retry</button>
+      </div>
+      {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
+      <p class="card-meta">Failed/cancelled issues can be retried with better feedback.</p>
+      {{end}}
+    </form>
+      {{else if eq $issue.Status "done"}}
+    <p class="card-meta">Issue complete.</p>
+      {{else}}
+    <p class="card-meta">Pipeline active ({{$issue.Status}}). Intervene when it pauses or fails.</p>
+      {{end}}
+    {{else}}
+    <p class="card-meta">Adjudication requires member role.</p>
+    {{end}}
+  </div>
+  {{end}}
+</article>
+{{end}}

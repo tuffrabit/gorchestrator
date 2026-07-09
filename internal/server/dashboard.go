@@ -1,0 +1,309 @@
+package server
+
+import (
+	"fmt"
+	"html/template"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/tuffrabit/gorchestrator/internal/auth"
+	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
+	"github.com/tuffrabit/gorchestrator/internal/sqlite"
+	"github.com/tuffrabit/gorchestrator/internal/web"
+)
+
+func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
+	s.renderFeed(w, r, 0, "")
+}
+
+func (s *Server) handleFeedIssue(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	drawer := r.URL.Query().Get("drawer")
+	s.renderFeed(w, r, id, drawer)
+}
+
+func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, expandID int64, drawer string) {
+	f := s.listFilterFromRequest(r)
+	views, err := s.eng.ListIssues(r.Context(), f)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	projects, _ := s.eng.ListProjects(r.Context())
+	pending, _ := s.eng.Notifications().CountPendingHumanGates()
+	u := auth.UserFromContext(r.Context())
+
+	data := map[string]any{
+		"User":          u,
+		"CSRF":          auth.CSRFToken(r),
+		"Issues":        views,
+		"Projects":      projects,
+		"PendingGates":  pending,
+		"ExpandID":      expandID,
+		"Drawer":        drawer,
+		"FilterStatus":  f.Status,
+		"FilterProject": r.URL.Query().Get("project"),
+		"CanWrite":      u != nil && roleAtLeast(u.Role, auth.RoleMember),
+	}
+	if err := render(w, "feed.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.eng.Notifications().ListRecent(50)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Also list waiting_human issues as pending gates.
+	gates, _ := s.eng.ListIssues(r.Context(), sqlite.IssueListFilter{Status: sqlite.StatusWaitingHuman, Limit: 50})
+	pending, _ := s.eng.Notifications().CountPendingHumanGates()
+	u := auth.UserFromContext(r.Context())
+	data := map[string]any{
+		"User":          u,
+		"CSRF":          auth.CSRFToken(r),
+		"Notifications": rows,
+		"Gates":         gates,
+		"PendingGates":  pending,
+		"CanWrite":      u != nil && roleAtLeast(u.Role, auth.RoleMember),
+	}
+	if err := render(w, "notifications.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialsIssues(w http.ResponseWriter, r *http.Request) {
+	f := s.listFilterFromRequest(r)
+	views, err := s.eng.ListIssues(r.Context(), f)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	data := map[string]any{
+		"Issues":   views,
+		"ExpandID": int64(0),
+		"CSRF":     auth.CSRFToken(r),
+		"CanWrite": u != nil && roleAtLeast(u.Role, auth.RoleMember),
+	}
+	if err := render(w, "partials/issue_list.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialIssue(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	view, err := s.eng.GetIssue(r.Context(), id)
+	if err != nil || view == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	expanded := r.URL.Query().Get("expanded") == "1"
+	u := auth.UserFromContext(r.Context())
+	data := map[string]any{
+		"Issue":    view,
+		"Expanded": expanded,
+		"CSRF":     auth.CSRFToken(r),
+		"CanWrite": u != nil && roleAtLeast(u.Role, auth.RoleMember),
+	}
+	if err := render(w, "partials/issue_card.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialDrawer(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	tab := r.URL.Query().Get("tab")
+	if tab == "" {
+		tab = "result"
+	}
+	view, err := s.eng.GetIssue(r.Context(), id)
+	if err != nil || view == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	content, contentHTML, err := s.drawerContent(r, view, tab)
+	if err != nil {
+		content = err.Error()
+	}
+	data := map[string]any{
+		"Issue":       view,
+		"Tab":         tab,
+		"Content":     content,
+		"ContentHTML": contentHTML,
+		"CSRF":        auth.CSRFToken(r),
+	}
+	if err := render(w, "partials/drawer_artifact.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialSubmit(w http.ResponseWriter, r *http.Request) {
+	projects, _ := s.eng.ListProjects(r.Context())
+	data := map[string]any{
+		"Projects": projects,
+		"CSRF":     auth.CSRFToken(r),
+	}
+	if err := render(w, "partials/drawer_submit.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request) {
+	if err := parseRequestForm(r); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	project := r.FormValue("project")
+	title := r.FormValue("title")
+	source := r.FormValue("source")
+	dryRun := r.FormValue("dry_run") == "on" || r.FormValue("dry_run") == "1" || r.FormValue("dry_run") == "true"
+	if project == "" || title == "" {
+		http.Error(w, "project and title required", http.StatusUnprocessableEntity)
+		return
+	}
+	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
+		ProjectName: project,
+		IssueTitle:  title,
+		SourcePath:  source,
+		DryRun:      dryRun,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	var uid *int64
+	if u != nil {
+		uid = &u.ID
+	}
+	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
+		"project": project, "title": title, "dry_run": dryRun,
+	})
+	view, _ := s.eng.GetIssue(r.Context(), issue.ID)
+	// Return the new card partial; HTMX can prepend it.
+	w.Header().Set("HX-Trigger", "close-drawer")
+	data := map[string]any{
+		"Issue":    view,
+		"Expanded": false,
+		"CSRF":     auth.CSRFToken(r),
+		"CanWrite": true,
+	}
+	if err := render(w, "partials/issue_card.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialDecide(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	if err := parseRequestForm(r); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	decision := strings.ToLower(strings.TrimSpace(r.FormValue("decision")))
+	feedback := r.FormValue("feedback")
+	if decision != "pass" && decision != "fail" && decision != "retry" {
+		http.Error(w, "decision must be pass|fail|retry (got empty or invalid — check submit button)", http.StatusUnprocessableEntity)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	decidedBy := "dashboard"
+	var uid *int64
+	if u != nil {
+		decidedBy = u.Email
+		uid = &u.ID
+	}
+	if err := s.eng.Decide(r.Context(), orchestrator.DecideOptions{
+		IssueID:   id,
+		Decision:  decision,
+		Feedback:  feedback,
+		DecidedBy: decidedBy,
+		UserID:    uid,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	_ = s.eng.Audit().Record(uid, "decide", "issue", orchestrator.IssueIDString(id), map[string]any{
+		"decision": decision, "feedback": truncate(feedback, 200),
+	})
+	view, _ := s.eng.GetIssue(r.Context(), id)
+	data := map[string]any{
+		"Issue":    view,
+		"Expanded": true,
+		"CSRF":     auth.CSRFToken(r),
+		"CanWrite": true,
+	}
+	if err := render(w, "partials/issue_card.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) listFilterFromRequest(r *http.Request) sqlite.IssueListFilter {
+	f := sqlite.IssueListFilter{Limit: 100}
+	if st := r.URL.Query().Get("status"); st != "" {
+		if st == "needs_you" {
+			f.Status = sqlite.StatusWaitingHuman
+		} else {
+			f.Status = st
+		}
+	}
+	if name := r.URL.Query().Get("project"); name != "" {
+		projects, err := s.eng.ListProjects(r.Context())
+		if err == nil {
+			for _, p := range projects {
+				if p.Name == name {
+					f.ProjectID = p.ID
+					break
+				}
+			}
+		}
+	}
+	return f
+}
+
+func roleAtLeast(have, need string) bool {
+	rank := map[string]int{auth.RoleViewer: 1, auth.RoleMember: 2, auth.RoleAdmin: 3}
+	return rank[have] >= rank[need]
+}
+
+func render(w http.ResponseWriter, name string, data any) error {
+	tmpl, err := web.Templates()
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// layout executes named template
+	if strings.HasPrefix(name, "partials/") {
+		return tmpl.ExecuteTemplate(w, name, data)
+	}
+	// pages use layout
+	return tmpl.ExecuteTemplate(w, name, data)
+}
+
+func staticFS() http.FileSystem {
+	return http.FS(web.Static())
+}
+
+// compile-time check: FileServer needs http.FileSystem
+var _ http.FileSystem = staticFS()
+
+// Ensure template.HTML is available for drawer content.
+var _ = template.HTML("")
+
+func fmtIssue(id int64) string {
+	return fmt.Sprintf("#%d", id)
+}

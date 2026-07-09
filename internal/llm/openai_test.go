@@ -120,6 +120,71 @@ func TestOpenAIModel_GenerateContent(t *testing.T) {
 	}
 }
 
+func TestOpenAIModel_ToolSchemaUsesJSONSchemaTypes(t *testing.T) {
+	// llama.cpp and strict OpenAI-compatible servers reject Google-style
+	// uppercase types (BOOLEAN/STRING) in tool parameters.
+	var sawTools atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("parse body: %v", err)
+		}
+		tools, _ := req["tools"].([]any)
+		if len(tools) == 0 {
+			t.Fatal("expected tools in request")
+		}
+		tool := tools[0].(map[string]any)
+		fn := tool["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		if params["type"] != "object" {
+			t.Fatalf("parameters.type = %v, want object", params["type"])
+		}
+		props := params["properties"].(map[string]any)
+		done := props["done"].(map[string]any)
+		if done["type"] != "boolean" {
+			t.Fatalf("done.type = %v, want boolean", done["type"])
+		}
+		rat := props["rationale"].(map[string]any)
+		if rat["type"] != "string" {
+			t.Fatalf("rationale.type = %v, want string", rat["type"])
+		}
+		sawTools.Store(true)
+
+		_ = json.NewEncoder(w).Encode(openAIChatResponse{
+			Choices: []choice{{Message: message{Role: "assistant", Content: "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	m := NewOpenAIModel("local-model", "", server.URL, 0)
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{
+					Name: "finish_task",
+					Parameters: &genai.Schema{
+						Type: genai.TypeObject,
+						Properties: map[string]*genai.Schema{
+							"done":      {Type: genai.TypeBoolean, Description: "done?"},
+							"rationale": {Type: genai.TypeString, Description: "why"},
+						},
+					},
+				}},
+			}},
+		},
+	}
+	for _, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !sawTools.Load() {
+		t.Fatal("server did not receive tools")
+	}
+}
+
 func TestOpenAIModel_GenerateContent_RetryAfter429(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

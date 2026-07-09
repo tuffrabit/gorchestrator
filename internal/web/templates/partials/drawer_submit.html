@@ -1,0 +1,29 @@
+{{define "partials/drawer_submit.html"}}
+<form hx-post="/partials/submit"
+  hx-target="#issue-feed"
+  hx-swap="afterbegin settle:0s"
+  hx-on::after-request="if(event.detail.successful){ closeDrawer(); }">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <div class="form-row">
+    <label for="project">Project</label>
+    <input id="project" name="project" list="project-list" required placeholder="acme">
+    <datalist id="project-list">
+      {{range .Projects}}
+      <option value="{{.Name}}"></option>
+      {{end}}
+    </datalist>
+  </div>
+  <div class="form-row">
+    <label for="title">Title</label>
+    <input id="title" name="title" required placeholder="Add OIDC login">
+  </div>
+  <div class="form-row">
+    <label for="source">Source path (optional)</label>
+    <input id="source" name="source" placeholder="/path/to/repo">
+  </div>
+  <div class="form-row">
+    <label><input type="checkbox" name="dry_run" value="1"> Dry run</label>
+  </div>
+  <button class="btn btn-primary" type="submit">Submit issue</button>
+</form>
+{{end}}

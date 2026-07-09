@@ -70,3 +70,22 @@ func (r *ProjectRepo) GetOrCreate(name string) (*Project, error) {
 	}
 	return r.Create(name)
 }
+
+// List returns all projects ordered by name.
+func (r *ProjectRepo) List() ([]*Project, error) {
+	rows, err := r.db.Query(`SELECT id, name, config_json, created_at FROM projects ORDER BY name ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Project
+	for rows.Next() {
+		p := &Project{}
+		if err := rows.Scan(&p.ID, &p.Name, &p.ConfigJSON, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

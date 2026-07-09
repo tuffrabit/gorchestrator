@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"path"
+	"strings"
 )
 
 // IssueDir returns the relative path for an issue directory.
@@ -59,4 +60,41 @@ func SourcePath(projectID, issueID int64) string {
 // WorkspacePath returns the relative path to the implementer's workspace for an issue.
 func WorkspacePath(projectID, issueID int64) string {
 	return path.Join(PhaseDir(projectID, issueID, "implementation"), "workspace")
+}
+
+// ValidateRelativePath rejects absolute paths and parent-directory segments.
+func ValidateRelativePath(rel string) error {
+	if rel == "" {
+		return fmt.Errorf("path is empty")
+	}
+	if path.IsAbs(rel) || strings.HasPrefix(rel, "/") || strings.Contains(rel, `\`) {
+		return fmt.Errorf("absolute paths are not allowed")
+	}
+	// Reject ".." before Clean, which would resolve them away and hide escapes.
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".." {
+			return fmt.Errorf("path traversal is not allowed")
+		}
+	}
+	clean := path.Clean(rel)
+	if clean == "." || clean == "" {
+		return fmt.Errorf("path is empty")
+	}
+	if strings.HasPrefix(clean, "../") || clean == ".." {
+		return fmt.Errorf("path traversal is not allowed")
+	}
+	return nil
+}
+
+// JoinContained joins base and rel after validating rel, using forward-slash keys.
+func JoinContained(base, rel string) (string, error) {
+	if err := ValidateRelativePath(rel); err != nil {
+		return "", err
+	}
+	clean := path.Clean(path.Join(base, rel))
+	// Ensure clean stays under base (separator-aware).
+	if clean != base && !strings.HasPrefix(clean, base+"/") {
+		return "", fmt.Errorf("path escapes issue directory")
+	}
+	return clean, nil
 }

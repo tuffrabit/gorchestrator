@@ -150,10 +150,12 @@
 <div class="canon-banner">Companion rendering of <code>phase_3.md</code>. <strong>Markdown is canonical</strong> — on any conflict, the <code>.md</code> wins.</div>
 <h1>Phase 3 Implementation Plan — Daemon, Dashboard &amp; Auth</h1>
 <blockquote>
-<p><strong>Status:</strong> Ready to implement<br />
+<p><strong>Status:</strong> ✅ Complete<br />
+<strong>Completed:</strong> 2026-07-09<br />
 <strong>Prerequisite:</strong> Phase 2 complete (full pipeline, unified adjudication, crash recovery, revised artifact contract).<br />
 <strong>Scope:</strong> Convert the one-shot CLI into a long-running daemon, then give humans a real-time window and intervention controls over it.<br />
 <strong>Sequencing:</strong> Five session-sized parts (A–E). Parts are ordered by dependency: daemon core first, then API, auth, dashboard, notifications. A–B can share a long session; C is a hard prerequisite for D; E can trail slightly but success criteria need it.</p>
+<p><strong>Delivered:</strong> <code>gorchestrator serve</code> (worker pool, <code>RecoverAll</code>, graceful shutdown); Engine queue API (<code>SubmitIssue</code> / <code>Decide</code> / <code>Subscribe</code>); HTTP API + SSE; local + OIDC auth, sessions, roles, audit; HTMX dark dashboard (cards, drawer, submit, notifications); console + Slack/email notification adapters; failed/cancelled human retry with feedback; OpenAI-compatible tool schemas for llama.cpp-style servers.</p>
 </blockquote>
 <hr />
 <h2>Goal</h2>
@@ -758,153 +760,103 @@ CREATE INDEX idx_notifications_status ON notifications(status);
 <h2>Work items by part</h2>
 <p>Execute roughly in order. Each item should be commit-sized. Parts A→E are sequential dependencies.</p>
 <h3>Part A — Daemonization &amp; Engine surface</h3>
-<p><strong>A1. Engine library methods</strong> — <code>internal/orchestrator/</code></p>
-<ul>
-<li>Add <code>SubmitIssue</code>, <code>Decide</code> (factor from <code>Resume</code>/<code>applyHumanDecision</code>), <code>GetIssue</code>, <code>ListIssues</code>, <code>ListProjects</code>, <code>RecoverAll</code>.</li>
-<li><code>DecideOptions</code> includes <code>UserID</code> / <code>DecidedBy</code> string for audit.</li>
-<li><code>Run</code>/<code>Resume</code> remain; <code>Resume</code> may call <code>Decide</code> + sync pipeline for CLI.</li>
-<li>On human boundary in daemon mode: set issue <code>waiting_human</code>, create pending decision row, emit event, return from pipeline without error-as-failure (control-flow return).</li>
-</ul>
-<p><strong>A2. In-process event bus</strong> — <code>internal/orchestrator/</code> or <code>internal/daemon/</code></p>
-<ul>
-<li><code>Subscribe</code> / <code>Publish</code> with buffered channels; drop-on-slow-subscriber policy documented (SSE clients should reconnect).</li>
-<li>Event types: <code>issue_submitted</code>, <code>issue_status</code>, <code>phase_started</code>, <code>phase_finished</code>, <code>decision_requested</code>, <code>decision_applied</code>, <code>run_event</code> (optional thin wrapper pointing at latest events.jsonl offset).</li>
-</ul>
-<p><strong>A3. Worker pool</strong> — <code>internal/daemon/</code></p>
-<ul>
-<li>N workers (<code>max_concurrent_issues</code>); claim loop on <code>queued</code> issues.</li>
-<li>One <code>runPipeline</code> per claim; dry-run flag stored on issue row or in a small <code>issues</code> extension — prefer a nullable <code>options_json</code> column only if needed; otherwise store dry_run in issue title path is wrong — <strong>add <code>issues.dry_run INTEGER NOT NULL DEFAULT 0</code></strong> in migration 3 or a tiny migration 3b if cleaner.</li>
-<li>Prevent double-claim: single-threaded claim in one dispatcher goroutine, or <code>UPDATE … WHERE id=? AND status='queued'</code> check rows-affected.</li>
-</ul>
-<p><strong>A4. <code>serve</code> subcommand</strong> — <code>internal/cli/serve.go</code>, <code>main.go</code></p>
-<ul>
-<li>Load config, <code>NewEngine</code>, <code>RecoverAll</code>, start pool + (later) HTTP, block on signal, graceful shutdown.</li>
-</ul>
-<p><strong>A5. Startup recovery scan</strong> — <code>RecoverAll</code></p>
-<ul>
-<li>Implement full §9.4 table across all non-terminal issues.</li>
-<li>Re-queue crashed <code>in_progress</code>; leave <code>waiting_human</code>; reconcile SQLite status/phase from filesystem.</li>
-<li>Integration test: submit via engine → kill mid-phase (reuse dry-run block pattern from Phase 2) → new engine <code>RecoverAll</code> + workers → completes.</li>
-</ul>
-<p><strong>A6. Graceful shutdown</strong></p>
-<ul>
-<li>SIGTERM path as in Decisions; unit/integration test that shutdown does not mark issues <code>failed</code>.</li>
-</ul>
+<p><strong>A1. Engine library methods</strong> — <code>internal/orchestrator/</code><br />
+- Add <code>SubmitIssue</code>, <code>Decide</code> (factor from <code>Resume</code>/<code>applyHumanDecision</code>), <code>GetIssue</code>, <code>ListIssues</code>, <code>ListProjects</code>, <code>RecoverAll</code>.<br />
+- <code>DecideOptions</code> includes <code>UserID</code> / <code>DecidedBy</code> string for audit.<br />
+- <code>Run</code>/<code>Resume</code> remain; <code>Resume</code> may call <code>Decide</code> + sync pipeline for CLI.<br />
+- On human boundary in daemon mode: set issue <code>waiting_human</code>, create pending decision row, emit event, return from pipeline without error-as-failure (control-flow return).</p>
+<p><strong>A2. In-process event bus</strong> — <code>internal/orchestrator/</code> or <code>internal/daemon/</code><br />
+- <code>Subscribe</code> / <code>Publish</code> with buffered channels; drop-on-slow-subscriber policy documented (SSE clients should reconnect).<br />
+- Event types: <code>issue_submitted</code>, <code>issue_status</code>, <code>phase_started</code>, <code>phase_finished</code>, <code>decision_requested</code>, <code>decision_applied</code>, <code>run_event</code> (optional thin wrapper pointing at latest events.jsonl offset).</p>
+<p><strong>A3. Worker pool</strong> — <code>internal/daemon/</code><br />
+- N workers (<code>max_concurrent_issues</code>); claim loop on <code>queued</code> issues.<br />
+- One <code>runPipeline</code> per claim; dry-run flag stored on issue row or in a small <code>issues</code> extension — prefer a nullable <code>options_json</code> column only if needed; otherwise store dry_run in issue title path is wrong — <strong>add <code>issues.dry_run INTEGER NOT NULL DEFAULT 0</code></strong> in migration 3 or a tiny migration 3b if cleaner.<br />
+- Prevent double-claim: single-threaded claim in one dispatcher goroutine, or <code>UPDATE … WHERE id=? AND status='queued'</code> check rows-affected.</p>
+<p><strong>A4. <code>serve</code> subcommand</strong> — <code>internal/cli/serve.go</code>, <code>main.go</code><br />
+- Load config, <code>NewEngine</code>, <code>RecoverAll</code>, start pool + (later) HTTP, block on signal, graceful shutdown.</p>
+<p><strong>A5. Startup recovery scan</strong> — <code>RecoverAll</code><br />
+- Implement full §9.4 table across all non-terminal issues.<br />
+- Re-queue crashed <code>in_progress</code>; leave <code>waiting_human</code>; reconcile SQLite status/phase from filesystem.<br />
+- Integration test: submit via engine → kill mid-phase (reuse dry-run block pattern from Phase 2) → new engine <code>RecoverAll</code> + workers → completes.</p>
+<p><strong>A6. Graceful shutdown</strong><br />
+- SIGTERM path as in Decisions; unit/integration test that shutdown does not mark issues <code>failed</code>.</p>
 <p><strong>A7. Config: server block</strong> — <code>internal/config/</code>, <code>configs/config.example.yaml</code></p>
 <p><strong>Part A tests:</strong> claim concurrency (N issues, M&lt;N workers, no lock errors); recover-after-kill; shutdown cleanliness; CLI <code>run</code> still works without <code>serve</code>.</p>
 <hr />
 <h3>Part B — HTTP API (unauthenticated stub → ready for auth)</h3>
-<p><strong>B1. <code>internal/server</code> skeleton</strong></p>
-<ul>
-<li><code>net/http</code> mux, JSON helpers, request logging, panic recovery.</li>
-<li>Mount under <code>serve</code>.</li>
-</ul>
-<p><strong>B2. Issue API handlers</strong></p>
-<ul>
-<li>Implement the table above against Engine methods (auth middleware is a no-op or test bypass until Part C — <strong>prefer failing closed with a temporary <code>auth.mode: disabled</code> only for unit tests</strong>, never for default config).</li>
-</ul>
-<p><strong>B3. Artifact fetch</strong></p>
-<ul>
-<li>Resolve <code>{path...}</code> through StoragePort; reject <code>..</code> and absolute paths; stream bytes with content-type sniffer for md/json/text.</li>
-</ul>
-<p><strong>B4. SSE endpoint</strong></p>
-<ul>
-<li><code>GET /api/events</code>: <code>text/event-stream</code>, subscribe to bus, heartbeat comments every 15s, disconnect on context cancel.</li>
-<li>Polling fallback: list/detail already return current status — document that HTMX can <code>hx-trigger="every 5s"</code> if SSE fails.</li>
-</ul>
-<p><strong>B5. Decision API</strong></p>
-<ul>
-<li>Validate decision enum; warn path when feedback empty on retry/fail (HTTP 200 still applies decision; response body includes <code>warning</code>).</li>
-<li>Conflict if issue not <code>waiting_human</code> and not mid-pipeline override: <strong>spec §9.3 says humans can pass/fail/retry any output at any time</strong> — support adjudication on the current phase even if adjudicator was null/self, as long as the phase has a terminal or waiting result. Narrow MVP: allow decide when status is <code>waiting_human</code> <strong>or</strong> when explicitly overriding a completed phase's last attempt (member+). If override on <code>done</code> phase is complex, ship <code>waiting_human</code> first and add “adjudicate any boundary” as B5b before Part D UI needs it.</li>
-</ul>
-<p><strong>Clarification (B5):</strong> Ship two capabilities:</p>
-<ol>
-<li>Resume path for <code>waiting_human</code> (required).</li>
-<li>Manual intervene on latest phase output (<code>pass</code>/<code>fail</code>/<code>retry</code>) regardless of configured adjudicator when issue is <code>in_progress</code> at a boundary or phase is <code>done</code> but pipeline not finished — match §9.3. Implementation: <code>Decide</code> accepts optional force flag; dashboard always shows the controls on the current phase card.</li>
-</ol>
+<p><strong>B1. <code>internal/server</code> skeleton</strong><br />
+- <code>net/http</code> mux, JSON helpers, request logging, panic recovery.<br />
+- Mount under <code>serve</code>.</p>
+<p><strong>B2. Issue API handlers</strong><br />
+- Implement the table above against Engine methods (auth middleware is a no-op or test bypass until Part C — <strong>prefer failing closed with a temporary <code>auth.mode: disabled</code> only for unit tests</strong>, never for default config).</p>
+<p><strong>B3. Artifact fetch</strong><br />
+- Resolve <code>{path...}</code> through StoragePort; reject <code>..</code> and absolute paths; stream bytes with content-type sniffer for md/json/text.</p>
+<p><strong>B4. SSE endpoint</strong><br />
+- <code>GET /api/events</code>: <code>text/event-stream</code>, subscribe to bus, heartbeat comments every 15s, disconnect on context cancel.<br />
+- Polling fallback: list/detail already return current status — document that HTMX can <code>hx-trigger="every 5s"</code> if SSE fails.</p>
+<p><strong>B5. Decision API</strong><br />
+- Validate decision enum; warn path when feedback empty on retry/fail (HTTP 200 still applies decision; response body includes <code>warning</code>).<br />
+- Conflict if issue not <code>waiting_human</code> and not mid-pipeline override: <strong>spec §9.3 says humans can pass/fail/retry any output at any time</strong> — support adjudication on the current phase even if adjudicator was null/self, as long as the phase has a terminal or waiting result. Narrow MVP: allow decide when status is <code>waiting_human</code> <strong>or</strong> when explicitly overriding a completed phase's last attempt (member+). If override on <code>done</code> phase is complex, ship <code>waiting_human</code> first and add “adjudicate any boundary” as B5b before Part D UI needs it.</p>
+<p><strong>Clarification (B5):</strong> Ship two capabilities:<br />
+1. Resume path for <code>waiting_human</code> (required).<br />
+2. Manual intervene on latest phase output (<code>pass</code>/<code>fail</code>/<code>retry</code>) regardless of configured adjudicator when issue is <code>in_progress</code> at a boundary or phase is <code>done</code> but pipeline not finished — match §9.3. Implementation: <code>Decide</code> accepts optional force flag; dashboard always shows the controls on the current phase card.</p>
 <p><strong>Part B tests:</strong> httptest submit → (with worker) complete; decide with feedback; SSE receives status events during dry-run; path traversal on artifacts rejected.</p>
 <hr />
 <h3>Part C — Users, Auth, Audit</h3>
 <p><strong>C1. Migrations 3–4 + repos</strong> — users, sessions, audit_log</p>
 <p><strong>C2. Password hashing (local mode)</strong> — <code>golang.org/x/crypto/bcrypt</code> for local users only.</p>
-<p><strong>C3. Session middleware</strong></p>
-<ul>
-<li>Load session from cookie; attach <code>User</code> to context; 401 JSON / redirect HTML.</li>
-</ul>
-<p><strong>C4. Local auth</strong></p>
-<ul>
-<li>Ensure bootstrap user exists on serve start when <code>auth.mode=local</code> (create from config if missing).</li>
-<li>Login form + POST handler.</li>
-</ul>
-<p><strong>C5. OIDC auth</strong></p>
-<ul>
-<li>Authorization-code flow with PKCE if the provider supports it; state + nonce; map <code>email</code> claim to user; apply bootstrap admin emails; set <code>oidc_subject</code>.</li>
-<li>Reject <code>auth.mode=oidc</code> at startup if issuer/client_id missing.</li>
-</ul>
-<p><strong>C6. Role authorization</strong></p>
-<ul>
-<li>Helpers: <code>RequireRole(min)</code>.</li>
-<li>viewer cannot POST decisions/submit; member cannot hit future admin-only routes; unauthenticated rejected.</li>
-</ul>
-<p><strong>C7. Audit writers</strong></p>
-<ul>
-<li>Login, logout, submit, decide (include feedback excerpt), failed auth.</li>
-</ul>
+<p><strong>C3. Session middleware</strong><br />
+- Load session from cookie; attach <code>User</code> to context; 401 JSON / redirect HTML.</p>
+<p><strong>C4. Local auth</strong><br />
+- Ensure bootstrap user exists on serve start when <code>auth.mode=local</code> (create from config if missing).<br />
+- Login form + POST handler.</p>
+<p><strong>C5. OIDC auth</strong><br />
+- Authorization-code flow with PKCE if the provider supports it; state + nonce; map <code>email</code> claim to user; apply bootstrap admin emails; set <code>oidc_subject</code>.<br />
+- Reject <code>auth.mode=oidc</code> at startup if issuer/client_id missing.</p>
+<p><strong>C6. Role authorization</strong><br />
+- Helpers: <code>RequireRole(min)</code>.<br />
+- viewer cannot POST decisions/submit; member cannot hit future admin-only routes; unauthenticated rejected.</p>
+<p><strong>C7. Audit writers</strong><br />
+- Login, logout, submit, decide (include feedback excerpt), failed auth.</p>
 <p><strong>C8. Wire <code>decided_by</code></strong> from session user id/email through API → <code>Decide</code>.</p>
 <p><strong>Part C tests:</strong> viewer forbidden on decide; unauthenticated 401; local login happy path; session expiry; audit row on decide; OIDC flow unit-tested with a mock OIDC provider or recorded token verify (no real network in CI).</p>
 <hr />
 <h3>Part D — Dashboard (HTMX) — implements spec §11.5</h3>
-<p><strong>D1. Design tokens + app shell</strong> — <code>internal/web/static/css/app.css</code>, <code>templates/layout.html</code></p>
-<ul>
-<li>Implement §11.5.5 CSS variables exactly (names + hex values).</li>
-<li>Dark page chrome: top bar, filter strip, main feed column, drawer host + scrim.</li>
-<li>Vendor <code>htmx.min.js</code> + highlight.js (dark style). No theme switcher.</li>
-<li>Focus rings, reduced-motion media query, monospace for ids/JSON.</li>
-</ul>
-<p><strong>D2. Collapsed issue card partial</strong> — <code>partials/issue_card.html</code></p>
-<ul>
-<li>Minimal: <code>#id</code>, project, title, status chip, phase, attempt, tokens, relative updated.</li>
-<li>Status wash + leading accent bar from status map (§11.5.5).</li>
-<li>Entire header toggles expand via HTMX (<code>hx-get</code> card with <code>expanded=1</code> or client toggle + swap).</li>
-<li>Multi-expand: each card owns its expanded state; do not collapse siblings.</li>
-</ul>
-<p><strong>D3. Expanded card body</strong></p>
-<ul>
-<li>Phase strip (research → plan → implementation) with pink “current” marker.</li>
-<li>Truncated <code>result.json</code> summary fields.</li>
-<li>Artifact action buttons → load drawer partials (<code>result</code>, <code>output</code>, <code>activity</code>, <code>diff</code>).</li>
-<li>Adjudication block on-card: feedback textarea + Pass/Fail/Retry (member+); disabled for viewer.</li>
-<li>Empty feedback warning on fail/retry (client + optional server warning).</li>
-</ul>
-<p><strong>D4. Artifact drawer</strong></p>
-<ul>
-<li>Right slide-out, tabs Result | Output | Activity | Diff.</li>
-<li>Goldmark for Markdown output; highlighted <code>&lt;pre&gt;</code> for JSON/events.</li>
-<li>Diff tab: server-side unified diff when workspace exists; hide tab otherwise.</li>
-<li>Esc / scrim / ✕ close; one drawer at a time; size-cap huge payloads with notice.</li>
-</ul>
-<p><strong>D5. Feed page + live updates</strong> — <code>/</code>, <code>/partials/issues</code></p>
-<ul>
-<li>Vertical list, default sort by <code>updated_at</code> desc.</li>
-<li>Filters: project, status, optional “Needs you” (<code>waiting_human</code>).</li>
-<li>SSE (or HTMX sse extension): on <code>issue_status</code>, re-fetch/swap that card partial <strong>without</strong> collapsing other expanded cards.</li>
-<li>Empty state with New-issue affordance for member+.</li>
-</ul>
-<p><strong>D6. Submit drawer</strong> — top-bar <strong>+ New</strong> (accent button)</p>
-<ul>
-<li>Form: project, title, optional source path, dry-run checkbox (member+).</li>
-<li>Success: close drawer, prepend card into <code>#issue-feed</code> via HTMX.</li>
-</ul>
-<p><strong>D7. Deep links + notifications page</strong></p>
-<ul>
-<li><code>/issues/{id}</code> pre-expands card; <code>?drawer=</code> opens artifact tab.</li>
-<li><code>/notifications</code>: pending gates (link/scroll to card) + recent notification rows; badge count on top bar.</li>
-</ul>
+<p><strong>D1. Design tokens + app shell</strong> — <code>internal/web/static/css/app.css</code>, <code>templates/layout.html</code><br />
+- Implement §11.5.5 CSS variables exactly (names + hex values).<br />
+- Dark page chrome: top bar, filter strip, main feed column, drawer host + scrim.<br />
+- Vendor <code>htmx.min.js</code> + highlight.js (dark style). No theme switcher.<br />
+- Focus rings, reduced-motion media query, monospace for ids/JSON.</p>
+<p><strong>D2. Collapsed issue card partial</strong> — <code>partials/issue_card.html</code><br />
+- Minimal: <code>#id</code>, project, title, status chip, phase, attempt, tokens, relative updated.<br />
+- Status wash + leading accent bar from status map (§11.5.5).<br />
+- Entire header toggles expand via HTMX (<code>hx-get</code> card with <code>expanded=1</code> or client toggle + swap).<br />
+- Multi-expand: each card owns its expanded state; do not collapse siblings.</p>
+<p><strong>D3. Expanded card body</strong><br />
+- Phase strip (research → plan → implementation) with pink “current” marker.<br />
+- Truncated <code>result.json</code> summary fields.<br />
+- Artifact action buttons → load drawer partials (<code>result</code>, <code>output</code>, <code>activity</code>, <code>diff</code>).<br />
+- Adjudication block on-card: feedback textarea + Pass/Fail/Retry (member+); disabled for viewer.<br />
+- Empty feedback warning on fail/retry (client + optional server warning).</p>
+<p><strong>D4. Artifact drawer</strong><br />
+- Right slide-out, tabs Result | Output | Activity | Diff.<br />
+- Goldmark for Markdown output; highlighted <code>&lt;pre&gt;</code> for JSON/events.<br />
+- Diff tab: server-side unified diff when workspace exists; hide tab otherwise.<br />
+- Esc / scrim / ✕ close; one drawer at a time; size-cap huge payloads with notice.</p>
+<p><strong>D5. Feed page + live updates</strong> — <code>/</code>, <code>/partials/issues</code><br />
+- Vertical list, default sort by <code>updated_at</code> desc.<br />
+- Filters: project, status, optional “Needs you” (<code>waiting_human</code>).<br />
+- SSE (or HTMX sse extension): on <code>issue_status</code>, re-fetch/swap that card partial <strong>without</strong> collapsing other expanded cards.<br />
+- Empty state with New-issue affordance for member+.</p>
+<p><strong>D6. Submit drawer</strong> — top-bar <strong>+ New</strong> (accent button)<br />
+- Form: project, title, optional source path, dry-run checkbox (member+).<br />
+- Success: close drawer, prepend card into <code>#issue-feed</code> via HTMX.</p>
+<p><strong>D7. Deep links + notifications page</strong><br />
+- <code>/issues/{id}</code> pre-expands card; <code>?drawer=</code> opens artifact tab.<br />
+- <code>/notifications</code>: pending gates (link/scroll to card) + recent notification rows; badge count on top bar.</p>
 <p><strong>D8. CSRF</strong> on all state-changing HTML/HTMX posts.</p>
-<p><strong>D9. Accessibility pass</strong></p>
-<ul>
-<li>Status text chips (not color-only); <code>aria-expanded</code> on cards; <code>aria-modal</code> on drawer; keyboard expand/close.</li>
-</ul>
+<p><strong>D9. Accessibility pass</strong><br />
+- Status text chips (not color-only); <code>aria-expanded</code> on cards; <code>aria-modal</code> on drawer; keyboard expand/close.</p>
 <p><strong>Part D tests:</strong> template smoke tests with fixture issues in each status (assert status CSS class / wash class present); httptest expand partial, decide POST → card re-render; drawer partial returns 200 for result/output; viewer cannot POST decide; CSRF rejection without token. Manual checklist: multi-expand, SSE re-tint, drawer Esc, neon pink CTA visible on dark bg.</p>
 <hr />
 <h3>Part E — Notifications</h3>
@@ -925,26 +877,18 @@ type Port interface {
 <li>Built-in <code>Console</code> implementation (log).</li>
 <li>Multi-sink fan-out dispatcher implementing <code>Port</code>.</li>
 </ul>
-<p><strong>E2. Dispatcher loop</strong></p>
-<ul>
-<li>Insert row <code>pending</code> → call sinks → <code>sent</code> / <code>failed</code>.</li>
-<li>Triggered on: human gate entered; phase <code>failed</code> with error/timeout/empty-output; optional info events later.</li>
-</ul>
-<p><strong>E3. Admin recipients</strong></p>
-<ul>
-<li>Resolve users with <code>role=admin</code> (email as recipient key for email sink; Slack uses config channel/webhook and mentions admins in body).</li>
-</ul>
-<p><strong>E4. Slack webhook adapter</strong> — <code>adapters/slack/</code></p>
-<ul>
-<li>Manifest <code>port: notification</code>; JSON-RPC method e.g. <code>notification.send</code>.</li>
-<li>Posts incoming webhook JSON <code>{text}</code> or blocks-lite.</li>
-<li>Register via config adapters list.</li>
-</ul>
-<p><strong>E5. SMTP email adapter</strong> — <code>adapters/email/</code></p>
-<ul>
-<li>Manifest <code>port: notification</code>; params include SMTP host/port/user from adapter env/config (adapter-owned credentials, pattern for §17 Q12 later).</li>
-<li>Send plain-text email.</li>
-</ul>
+<p><strong>E2. Dispatcher loop</strong><br />
+- Insert row <code>pending</code> → call sinks → <code>sent</code> / <code>failed</code>.<br />
+- Triggered on: human gate entered; phase <code>failed</code> with error/timeout/empty-output; optional info events later.</p>
+<p><strong>E3. Admin recipients</strong><br />
+- Resolve users with <code>role=admin</code> (email as recipient key for email sink; Slack uses config channel/webhook and mentions admins in body).</p>
+<p><strong>E4. Slack webhook adapter</strong> — <code>adapters/slack/</code><br />
+- Manifest <code>port: notification</code>; JSON-RPC method e.g. <code>notification.send</code>.<br />
+- Posts incoming webhook JSON <code>{text}</code> or blocks-lite.<br />
+- Register via config adapters list.</p>
+<p><strong>E5. SMTP email adapter</strong> — <code>adapters/email/</code><br />
+- Manifest <code>port: notification</code>; params include SMTP host/port/user from adapter env/config (adapter-owned credentials, pattern for §17 Q12 later).<br />
+- Send plain-text email.</p>
 <p><strong>E6. Wire HumanAdjudicator / gate path</strong> to enqueue <code>human_gate</code> notifications; wire bad-output hooks in engine on failed phase.</p>
 <p><strong>Part E tests:</strong> console sink receives human_gate on waiting_human; dispatcher marks sent; Slack/email adapters unit-tested with httptest/net.Listener fake SMTP or mocked HTTP; end-to-end dry-run with console only in CI.</p>
 <hr />
@@ -1073,7 +1017,7 @@ Part E  Notification port + console + Slack + email adapters
 <hr />
 <p><em>End of Phase 3 Plan</em></p>
 <div class="footer">
-    <p>Regenerated 2026-07-09 · Status: Ready to implement · Canonical source: <code>phase_3.md</code></p>
+    <p>Regenerated 2026-07-09 · Status: ✅ Complete · Canonical source: <code>phase_3.md</code></p>
 </div>
 </body>
 </html>

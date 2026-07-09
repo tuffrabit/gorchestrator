@@ -7,15 +7,15 @@ import (
 
 // Run represents a run row.
 type Run struct {
-	ID          int64
-	IssueID     int64
-	AgentType   string
-	Model       string
-	Status      string
-	TokensUsed  int
-	DurationMs  int
-	LoopCount   int
-	CreatedAt   string
+	ID         int64
+	IssueID    int64
+	AgentType  string
+	Model      string
+	Status     string
+	TokensUsed int
+	DurationMs int
+	LoopCount  int
+	CreatedAt  string
 }
 
 // RunRepo provides run persistence.
@@ -61,4 +61,17 @@ func (r *RunRepo) UpdateStatus(id int64, status string, tokensUsed, durationMs, 
 		status, tokensUsed, durationMs, loopCount, id,
 	)
 	return err
+}
+
+// TokenTotalForIssue returns the sum of tokens_used across all runs for an issue.
+func (r *RunRepo) TokenTotalForIssue(issueID int64) (int, error) {
+	var total sql.NullInt64
+	err := r.db.QueryRow(`SELECT SUM(tokens_used) FROM runs WHERE issue_id = ?`, issueID).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	if !total.Valid {
+		return 0, nil
+	}
+	return int(total.Int64), nil
 }

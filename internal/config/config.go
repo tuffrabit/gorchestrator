@@ -39,22 +39,60 @@ type AdapterConfig struct {
 // AgentConfig overrides the orchestrator's defaults for a specific agent type.
 // Supported keys: "researcher", "planner", "implementer".
 type AgentConfig struct {
-	Model         ModelConfig `yaml:"model"`
-	SystemPrompt  string      `yaml:"system_prompt"`
-	Adjudicator   string      `yaml:"adjudicator"`
-	MaxAttempts   int         `yaml:"max_attempts"`
-	Loops         int         `yaml:"loops"`
-	Rubric        string      `yaml:"rubric"`
+	Model        ModelConfig `yaml:"model"`
+	SystemPrompt string      `yaml:"system_prompt"`
+	Adjudicator  string      `yaml:"adjudicator"`
+	MaxAttempts  int         `yaml:"max_attempts"`
+	Loops        int         `yaml:"loops"`
+	Rubric       string      `yaml:"rubric"`
+}
+
+// ServerConfig configures the serve daemon HTTP surface and worker pool.
+type ServerConfig struct {
+	Listen              string        `yaml:"listen"`
+	MaxConcurrentIssues int           `yaml:"max_concurrent_issues"`
+	ShutdownTimeout     string        `yaml:"shutdown_timeout"`
+	ShutdownTimeoutDur  time.Duration `yaml:"-"`
+	PublicBaseURL       string        `yaml:"public_base_url"`
+}
+
+// OIDCConfig configures OpenID Connect authentication.
+type OIDCConfig struct {
+	IssuerURL      string   `yaml:"issuer_url"`
+	ClientID       string   `yaml:"client_id"`
+	ClientSecretEnv string  `yaml:"client_secret_env"`
+	Scopes         []string `yaml:"scopes"`
+}
+
+// AuthConfig configures authentication for the serve daemon.
+type AuthConfig struct {
+	Mode                 string        `yaml:"mode"` // local | oidc | disabled (tests only)
+	LocalUsername        string        `yaml:"local_username"`
+	LocalPasswordEnv     string        `yaml:"local_password_env"`
+	OIDC                 OIDCConfig    `yaml:"oidc"`
+	BootstrapAdminEmails []string      `yaml:"bootstrap_admin_emails"`
+	SessionTTL           string        `yaml:"session_ttl"`
+	SessionTTLDur        time.Duration `yaml:"-"`
+}
+
+// NotificationsConfig configures notification sinks for the serve daemon.
+type NotificationsConfig struct {
+	// Adapters lists adapter names (from top-level adapters) that implement
+	// the notification port. Console is always enabled when serve runs.
+	Adapters []string `yaml:"adapters"`
 }
 
 // Config is the top-level user configuration.
 type Config struct {
-	StorageRoot  string                  `yaml:"storage_root"`
-	DBPath       string                  `yaml:"db_path"`
-	DefaultModel ModelConfig             `yaml:"default_model"`
-	Tools        ToolsConfig             `yaml:"tools"`
-	Adapters     []AdapterConfig         `yaml:"adapters"`
-	Agents       map[string]AgentConfig  `yaml:"agents"`
+	StorageRoot   string                 `yaml:"storage_root"`
+	DBPath        string                 `yaml:"db_path"`
+	DefaultModel  ModelConfig            `yaml:"default_model"`
+	Tools         ToolsConfig            `yaml:"tools"`
+	Adapters      []AdapterConfig        `yaml:"adapters"`
+	Agents        map[string]AgentConfig `yaml:"agents"`
+	Server        ServerConfig           `yaml:"server"`
+	Auth          AuthConfig             `yaml:"auth"`
+	Notifications NotificationsConfig    `yaml:"notifications"`
 }
 
 // HomeDir returns the user's home directory.
@@ -124,7 +162,67 @@ func LoadFrom(path string) (*Config, error) {
 		cfg.Tools.ReadFile.MaxLines = 2000
 	}
 
+	if err := applyServerDefaults(&cfg); err != nil {
+		return nil, err
+	}
+	if err := applyAuthDefaults(&cfg); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
+}
+
+func applyServerDefaults(cfg *Config) error {
+	if cfg.Server.Listen == "" {
+		cfg.Server.Listen = "127.0.0.1:8080"
+	}
+	if cfg.Server.MaxConcurrentIssues <= 0 {
+		cfg.Server.MaxConcurrentIssues = 2
+	}
+	if cfg.Server.ShutdownTimeout == "" {
+		cfg.Server.ShutdownTimeout = "30s"
+	}
+	d, err := time.ParseDuration(cfg.Server.ShutdownTimeout)
+	if err != nil {
+		return fmt.Errorf("parse server.shutdown_timeout: %w", err)
+	}
+	cfg.Server.ShutdownTimeoutDur = d
+	if cfg.Server.PublicBaseURL == "" {
+		cfg.Server.PublicBaseURL = "http://" + cfg.Server.Listen
+	}
+	return nil
+}
+
+func applyAuthDefaults(cfg *Config) error {
+	if cfg.Auth.Mode == "" {
+		cfg.Auth.Mode = "local"
+	}
+	switch cfg.Auth.Mode {
+	case "local", "oidc", "disabled":
+	default:
+		return fmt.Errorf("auth.mode must be local, oidc, or disabled; got %q", cfg.Auth.Mode)
+	}
+	if cfg.Auth.LocalUsername == "" {
+		cfg.Auth.LocalUsername = "admin"
+	}
+	if cfg.Auth.LocalPasswordEnv == "" {
+		cfg.Auth.LocalPasswordEnv = "GORCH_LOCAL_PASSWORD"
+	}
+	if cfg.Auth.OIDC.ClientSecretEnv == "" {
+		cfg.Auth.OIDC.ClientSecretEnv = "GORCH_OIDC_CLIENT_SECRET"
+	}
+	if len(cfg.Auth.OIDC.Scopes) == 0 {
+		cfg.Auth.OIDC.Scopes = []string{"openid", "profile", "email"}
+	}
+	if cfg.Auth.SessionTTL == "" {
+		cfg.Auth.SessionTTL = "168h"
+	}
+	d, err := time.ParseDuration(cfg.Auth.SessionTTL)
+	if err != nil {
+		return fmt.Errorf("parse auth.session_ttl: %w", err)
+	}
+	cfg.Auth.SessionTTLDur = d
+	return nil
 }
 
 func expandTilde(path, home string) string {

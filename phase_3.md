@@ -1,9 +1,12 @@
 # Phase 3 Implementation Plan — Daemon, Dashboard & Auth
 
-> **Status:** Ready to implement  
+> **Status:** ✅ Complete  
+> **Completed:** 2026-07-09  
 > **Prerequisite:** Phase 2 complete (full pipeline, unified adjudication, crash recovery, revised artifact contract).  
 > **Scope:** Convert the one-shot CLI into a long-running daemon, then give humans a real-time window and intervention controls over it.  
 > **Sequencing:** Five session-sized parts (A–E). Parts are ordered by dependency: daemon core first, then API, auth, dashboard, notifications. A–B can share a long session; C is a hard prerequisite for D; E can trail slightly but success criteria need it.
+>
+> **Delivered:** `gorchestrator serve` (worker pool, `RecoverAll`, graceful shutdown); Engine queue API (`SubmitIssue` / `Decide` / `Subscribe`); HTTP API + SSE; local + OIDC auth, sessions, roles, audit; HTMX dark dashboard (cards, drawer, submit, notifications); console + Slack/email notification adapters; failed/cancelled human retry with feedback; OpenAI-compatible tool schemas for llama.cpp-style servers.
 
 ---
 

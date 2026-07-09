@@ -1,0 +1,6 @@
+name: slack
+version: "1.0.0"
+protocol: jsonrpc-stdio
+port: notification
+binary: ./slack/slack-adapter
+capabilities: [send]

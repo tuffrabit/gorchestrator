@@ -1,0 +1,35 @@
+{{define "login.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login · gorchestrator</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <h1>gorchestrator</h1>
+      {{if .Error}}
+      <div class="login-error">Login failed ({{.Error}})</div>
+      {{end}}
+      {{if eq .Mode "local"}}
+      <form method="post" action="/auth/local">
+        <input type="hidden" name="next" value="{{.Next}}">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button class="btn btn-primary" type="submit">Sign in</button>
+      </form>
+      {{else if eq .Mode "oidc"}}
+      <a class="btn btn-primary" href="/auth/oidc/start" style="display:block;text-align:center">Login with SSO</a>
+      {{else}}
+      <p class="login-error">Auth mode: {{.Mode}}</p>
+      {{end}}
+    </div>
+  </div>
+</body>
+</html>
+{{end}}

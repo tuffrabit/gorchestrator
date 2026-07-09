@@ -1,0 +1,51 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{block "title" .}}gorchestrator{{end}}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/highlight-dark.css">
+  <script src="/static/js/htmx.min.js" defer></script>
+  <script src="/static/js/highlight.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">gorchestrator</a>
+    <a class="nav-link" href="/">Issues</a>
+    <a class="nav-link" href="/notifications">
+      Notifications
+      {{if .PendingGates}}<span class="badge" id="notif-badge">{{.PendingGates}}</span>{{end}}
+    </a>
+    <div class="topbar-spacer"></div>
+    {{if .CanWrite}}
+    <button class="btn btn-primary" type="button"
+      hx-get="/partials/submit"
+      hx-target="#drawer-body"
+      hx-swap="innerHTML"
+      onclick="openDrawer('submit')">+ New</button>
+    {{end}}
+    {{if .User}}
+    <span class="user-chip">{{.User.Email}}</span>
+    <form method="post" action="/logout" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+    {{end}}
+  </header>
+  {{block "content" .}}{{end}}
+
+  <div id="scrim" class="scrim" onclick="closeDrawer()"></div>
+  <aside id="drawer" class="drawer" aria-modal="true" role="dialog" aria-label="Drawer">
+    <div class="drawer-header">
+      <strong id="drawer-title">Details</strong>
+      <button class="btn" type="button" onclick="closeDrawer()" aria-label="Close">✕</button>
+    </div>
+    <div id="drawer-tabs" class="drawer-tabs" hidden></div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+</body>
+</html>
+{{end}}

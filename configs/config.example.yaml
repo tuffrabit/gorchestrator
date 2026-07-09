@@ -38,3 +38,36 @@ tools:
 # adapters:
 #   - name: s3
 #     manifest_path: ~/.config/gorchestrator/adapters/s3.yaml
+#   - name: slack
+#     manifest_path: ./adapters/slack.yaml
+#   - name: email
+#     manifest_path: ./adapters/email.yaml
+
+# Long-running daemon (`gorchestrator serve`)
+server:
+  listen: "127.0.0.1:8080"
+  max_concurrent_issues: 2
+  shutdown_timeout: 30s
+  public_base_url: "http://127.0.0.1:8080"
+
+# Authentication for the dashboard and HTTP API.
+# mode: local (dev/test) | oidc (production)
+auth:
+  mode: local
+  local_username: admin
+  local_password_env: GORCH_LOCAL_PASSWORD
+  # oidc:
+  #   issuer_url: "https://accounts.google.com"
+  #   client_id: "..."
+  #   client_secret_env: GORCH_OIDC_CLIENT_SECRET
+  #   scopes: ["openid", "profile", "email"]
+  bootstrap_admin_emails:
+    - admin@example.com
+  session_ttl: 168h
+
+# Notification sinks (console is always on when serve runs).
+# List adapter names that implement port: notification.
+notifications:
+  adapters: []
+  # adapters: [slack, email]
+

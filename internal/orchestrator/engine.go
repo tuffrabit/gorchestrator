@@ -26,6 +26,7 @@ import (
 	"github.com/tuffrabit/gorchestrator/internal/agents"
 	"github.com/tuffrabit/gorchestrator/internal/config"
 	"github.com/tuffrabit/gorchestrator/internal/llm"
+	"github.com/tuffrabit/gorchestrator/internal/notify"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 	"github.com/tuffrabit/gorchestrator/internal/tools"
@@ -80,6 +81,12 @@ type Engine struct {
 	issues    *sqlite.IssueRepo
 	runs      *sqlite.RunRepo
 	decisions *sqlite.DecisionRepo
+	users     *sqlite.UserRepo
+	sessions  *sqlite.SessionRepo
+	audit     *sqlite.AuditRepo
+	notifs    *sqlite.NotificationRepo
+	bus       *EventBus
+	notifier  *notify.Dispatcher
 }
 
 // NewEngine creates an engine from configuration.
@@ -100,7 +107,47 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		issues:    sqlite.NewIssueRepo(db),
 		runs:      sqlite.NewRunRepo(db),
 		decisions: sqlite.NewDecisionRepo(db),
+		users:     sqlite.NewUserRepo(db),
+		sessions:  sqlite.NewSessionRepo(db),
+		audit:     sqlite.NewAuditRepo(db),
+		notifs:    sqlite.NewNotificationRepo(db),
+		bus:       NewEventBus(),
 	}, nil
+}
+
+// Cfg returns the engine configuration.
+func (e *Engine) Cfg() *config.Config {
+	return e.cfg
+}
+
+// DB returns the underlying database handle.
+func (e *Engine) DB() *sql.DB {
+	return e.db
+}
+
+// Users returns the user repository.
+func (e *Engine) Users() *sqlite.UserRepo {
+	return e.users
+}
+
+// Sessions returns the session repository.
+func (e *Engine) Sessions() *sqlite.SessionRepo {
+	return e.sessions
+}
+
+// Audit returns the audit repository.
+func (e *Engine) Audit() *sqlite.AuditRepo {
+	return e.audit
+}
+
+// Notifications returns the notification repository.
+func (e *Engine) Notifications() *sqlite.NotificationRepo {
+	return e.notifs
+}
+
+// SetNotifier attaches a notification dispatcher (console + optional adapters).
+func (e *Engine) SetNotifier(d *notify.Dispatcher) {
+	e.notifier = d
 }
 
 // Close releases engine resources.
@@ -160,6 +207,7 @@ type ResumeOptions struct {
 }
 
 // Resume continues an existing issue, applying a human decision if one is pending.
+// Unlike the daemon path, Resume runs the pipeline synchronously in-process.
 func (e *Engine) Resume(ctx context.Context, opts ResumeOptions) error {
 	project, err := e.projects.GetByName(opts.ProjectName)
 	if err != nil {
@@ -183,23 +231,43 @@ func (e *Engine) Resume(ctx context.Context, opts ResumeOptions) error {
 	}
 
 	switch status {
-	case "waiting_human":
+	case "waiting_human", "failed", "cancelled":
+		// Human may intervene on gates and on failed/cancelled phases (inject
+		// feedback and retry, or pass/fail).
 		if opts.Decision == "" {
-			return fmt.Errorf("phase %s is waiting for a decision; provide --decision=pass|fail|retry", phase)
+			return fmt.Errorf("phase %s is %s; provide --decision=pass|fail|retry", phase, status)
 		}
-		if err := e.applyHumanDecision(ctx, project, issue, phase, opts.Decision, opts.Feedback); err != nil {
+		if err := e.Decide(ctx, DecideOptions{
+			IssueID:   issue.ID,
+			Decision:  opts.Decision,
+			Feedback:  opts.Feedback,
+			Phase:     phase,
+			DecidedBy: "cli",
+		}); err != nil {
 			return err
+		}
+		issue, err = e.issues.Get(opts.IssueID)
+		if err != nil || issue == nil {
+			return fmt.Errorf("reload issue after decide: %w", err)
+		}
+		switch issue.Status {
+		case sqlite.StatusDone, sqlite.StatusFailed, sqlite.StatusCancelled:
+			return nil
+		case sqlite.StatusQueued:
+			// Sync CLI path: run immediately instead of waiting for workers.
+			_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusInProgress, issue.CurrentPhase)
+			issue.Status = sqlite.StatusInProgress
 		}
 	case "in_progress":
 		// Crash recovery: re-run the current phase.
 		log.Printf("recovering crashed phase %s for issue %d", phase, issue.ID)
-	case "failed", "cancelled":
-		return fmt.Errorf("issue %d phase %s is %s; cannot resume", issue.ID, phase, status)
 	case "done":
 		// Continue to next phase.
+	case "retry":
+		// Human already marked retry on disk; continue pipeline.
 	}
 
-	return e.runPipeline(ctx, project, issue, false)
+	return e.runPipeline(ctx, project, issue, issue.DryRun)
 }
 
 // runPipeline executes research -> plan -> implementation.
@@ -233,12 +301,25 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		case "done":
 			continue
 		case "waiting_human":
-			_ = e.issues.UpdateStatus(issue.ID, "waiting_human", phaseName)
+			_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusWaitingHuman, phaseName)
+			e.Publish(Event{
+				Type: EventDecisionRequested, IssueID: issue.ID, ProjectID: project.ID,
+				Phase: phaseName, Status: sqlite.StatusWaitingHuman,
+			})
 			return fmt.Errorf("phase %s is waiting for human decision; use resume", phaseName)
 		case "failed", "cancelled":
+			// Stale terminal FS state without a prior Decide→retry conversion.
+			// Do not auto-rerun; humans must decide (which rewrites result to retry).
 			_ = e.issues.UpdateStatus(issue.ID, status, phaseName)
-			return fmt.Errorf("phase %s %s", phaseName, status)
+			return fmt.Errorf("phase %s %s; use decide/retry with feedback to re-run", phaseName, status)
+		case "retry":
+			// Fall through and re-run the phase (human or adjudicator requested retry).
 		}
+
+		e.Publish(Event{
+			Type: EventPhaseStarted, IssueID: issue.ID, ProjectID: project.ID,
+			Phase: phaseName, Status: sqlite.StatusInProgress,
+		})
 
 		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, issue.Title)
 		if err != nil {
@@ -251,18 +332,32 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		}
 
 		_ = e.issues.UpdateStatus(issue.ID, result.Status, phaseName)
+		e.Publish(Event{
+			Type: EventPhaseFinished, IssueID: issue.ID, ProjectID: project.ID,
+			Phase: phaseName, Status: result.Status, Message: result.Error,
+		})
 
 		switch result.Status {
 		case "done":
 			continue
 		case "waiting_human":
+			e.Publish(Event{
+				Type: EventDecisionRequested, IssueID: issue.ID, ProjectID: project.ID,
+				Phase: phaseName, Status: sqlite.StatusWaitingHuman,
+			})
+			notify.NotifyHumanGate(ctx, e.notifier, issue.ID, phaseName, project.Name, issue.Title, e.adminEmails())
 			return nil
 		default:
+			notify.NotifyBadOutput(ctx, e.notifier, issue.ID, phaseName, result.Error, e.adminEmails())
 			return fmt.Errorf("phase %s %s: %s", phaseName, result.Status, result.Error)
 		}
 	}
 
-	_ = e.issues.UpdateStatus(issue.ID, "done", "implementation")
+	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusDone, "implementation")
+	e.Publish(Event{
+		Type: EventIssueStatus, IssueID: issue.ID, ProjectID: project.ID,
+		Phase: "implementation", Status: sqlite.StatusDone,
+	})
 	return nil
 }
 
@@ -289,8 +384,14 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 	if previous.Status == "retry" && previous.Attempt > 0 {
 		startAttempt = previous.Attempt + 1
 	}
+	// Human retries may exceed MaxAttempts — the human is the gate. Allow at
+	// least the next attempt so operators can inject feedback after a failure.
+	limit := maxAttempts
+	if startAttempt > limit {
+		limit = startAttempt
+	}
 
-	for attempt := startAttempt; attempt <= maxAttempts; attempt++ {
+	for attempt := startAttempt; attempt <= limit; attempt++ {
 		// Implementation phases need a clean workspace seeded from source.
 		if phase == "implementation" {
 			if err := e.seedWorkspace(ctx, project.ID, issue.ID, sourceSnapshotPath); err != nil {
@@ -446,7 +547,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			}
 			return result, nil
 		case adjudication.Retry:
-			if attempt < maxAttempts {
+			if attempt < limit {
 				feedbackPath := storage.FeedbackPath(project.ID, issue.ID, phase, attempt)
 				if err := e.store.Write(ctx, feedbackPath, []byte(decision.Feedback)); err != nil {
 					return nil, fmt.Errorf("write feedback: %w", err)
@@ -794,44 +895,30 @@ func (e *Engine) buildLoopInput(ctx context.Context, baseInput, outputPath strin
 	return genai.NewContentFromText(text, genai.RoleUser)
 }
 
-// applyHumanDecision applies a resume decision to a waiting_human phase.
+// applyHumanDecision applies a resume decision to a waiting_human phase (CLI helper).
 func (e *Engine) applyHumanDecision(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phase, decisionStr, feedback string) error {
-	decision := adjudication.ParseOutcome(decisionStr)
-	resultPath := storage.ResultPath(project.ID, issue.ID, phase)
-	result, err := readResult(ctx, e.store, resultPath)
-	if err != nil {
-		return fmt.Errorf("read result for human decision: %w", err)
-	}
+	return e.applyHumanDecisionWithBy(ctx, project, issue, phase, decisionStr, feedback, "cli")
+}
 
-	// Record the decision in SQLite.
-	if err := e.decisions.Record(issue.ID, phase, decisionStr, feedback, "cli"); err != nil {
-		log.Printf("failed to record decision: %v", err)
-	}
+func nowRFC3339() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
 
-	switch decision {
-	case adjudication.Pass:
-		result.Status = "done"
-		result.DoneRationale = feedback
-		result.Timestamp = time.Now().UTC().Format(time.RFC3339)
-		return writeResult(ctx, e.store, resultPath, result)
-	case adjudication.Fail:
-		result.Status = "failed"
-		result.Error = feedback
-		result.Timestamp = time.Now().UTC().Format(time.RFC3339)
-		return writeResult(ctx, e.store, resultPath, result)
-	case adjudication.Retry:
-		// Mark as retry; the phase machine will start a new attempt.
-		result.Status = "retry"
-		result.Error = feedback
-		result.Timestamp = time.Now().UTC().Format(time.RFC3339)
-		feedbackPath := storage.FeedbackPath(project.ID, issue.ID, phase, result.Attempt)
-		if err := e.store.Write(ctx, feedbackPath, []byte(feedback)); err != nil {
-			return fmt.Errorf("write feedback: %w", err)
-		}
-		return writeResult(ctx, e.store, resultPath, result)
-	default:
-		return fmt.Errorf("invalid decision %q", decisionStr)
+func (e *Engine) adminEmails() []string {
+	admins, err := e.users.ListAdmins()
+	if err != nil || len(admins) == 0 {
+		return e.cfg.Auth.BootstrapAdminEmails
 	}
+	out := make([]string, 0, len(admins))
+	for _, a := range admins {
+		out = append(out, a.Email)
+	}
+	return out
+}
+
+// CurrentPhaseState returns the current phase and its status from the filesystem.
+func (e *Engine) CurrentPhaseState(projectID, issueID int64) (string, string, error) {
+	return e.currentPhaseState(projectID, issueID)
 }
 
 // currentPhaseState returns the current phase and its status from the filesystem.

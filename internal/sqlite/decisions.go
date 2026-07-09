@@ -56,6 +56,8 @@ func (r *DecisionRepo) Get(id int64) (*Decision, error) {
 }
 
 // Record updates the latest pending decision for an issue/phase with the human verdict.
+// If no pending row exists (e.g. retrying a failed phase that never opened a human gate),
+// inserts a completed decision row so the audit trail still captures the intervention.
 func (r *DecisionRepo) Record(issueID int64, phase, decision, feedback, decidedBy string) error {
 	// SQLite does not support ORDER BY in UPDATE. Find the latest pending row first.
 	var id int64
@@ -64,10 +66,18 @@ func (r *DecisionRepo) Record(issueID int64, phase, decision, feedback, decidedB
 		WHERE issue_id = ? AND phase = ? AND decided_at IS NULL
 		ORDER BY requested_at DESC
 		LIMIT 1`, issueID, phase).Scan(&id)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
+	if err == sql.ErrNoRows {
+		_, err = r.db.Exec(`
+			INSERT INTO decisions (issue_id, phase, decided_at, decision, feedback, decided_by)
+			VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`,
+			issueID, phase, decision, feedback, decidedBy,
+		)
+		if err != nil {
+			return fmt.Errorf("insert decision: %w", err)
 		}
+		return nil
+	}
+	if err != nil {
 		return fmt.Errorf("find pending decision: %w", err)
 	}
 

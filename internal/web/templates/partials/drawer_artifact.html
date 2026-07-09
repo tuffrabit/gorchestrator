@@ -1,0 +1,24 @@
+{{define "partials/drawer_artifact.html"}}
+<div class="drawer-tabs-inline" data-issue-id="{{.Issue.Issue.ID}}">
+  <div style="display:flex;gap:0.35rem;margin-bottom:0.75rem;flex-wrap:wrap">
+    <button class="btn {{if eq .Tab "result"}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'result')">Result</button>
+    <button class="btn {{if eq .Tab "output"}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'output')">Output</button>
+    <button class="btn {{if or (eq .Tab "activity") (eq .Tab "events")}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'activity')">Activity</button>
+    <button class="btn {{if eq .Tab "diff"}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'diff')">Diff</button>
+  </div>
+</div>
+{{if .ContentHTML}}
+<div class="md-body">{{.ContentHTML}}</div>
+{{else}}
+<pre><code class="language-json">{{.Content}}</code></pre>
+{{end}}
+<script>
+  if (window.hljs) {
+    document.querySelectorAll('#drawer-body pre code').forEach(function (el) { hljs.highlightElement(el); });
+  }
+</script>
+{{end}}

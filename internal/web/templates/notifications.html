@@ -1,0 +1,58 @@
+{{define "notifications.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Notifications · gorchestrator</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/htmx.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">gorchestrator</a>
+    <a class="nav-link" href="/">Issues</a>
+    <a class="nav-link active" href="/notifications">
+      Notifications
+      {{if .PendingGates}}<span class="badge">{{.PendingGates}}</span>{{end}}
+    </a>
+    <div class="topbar-spacer"></div>
+    {{if .User}}
+    <span class="user-chip">{{.User.Email}}</span>
+    <form method="post" action="/logout" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+    {{end}}
+  </header>
+
+  <section class="notif-list">
+    <h2>Pending human gates</h2>
+    {{if .Gates}}
+      {{range .Gates}}
+      <div class="notif-item">
+        <h3><a href="/issues/{{.Issue.ID}}">#{{.Issue.ID}} · {{.ProjectName}} · {{.Issue.Title}}</a></h3>
+        <p>{{.Issue.CurrentPhase}} · waiting for decision</p>
+      </div>
+      {{end}}
+    {{else}}
+      <p class="empty">No pending gates.</p>
+    {{end}}
+
+    <h2 style="margin-top:2rem">Recent notifications</h2>
+    {{if .Notifications}}
+      {{range .Notifications}}
+      <div class="notif-item">
+        <h3>{{.Subject}} <span class="status-chip">{{.Status}}</span></h3>
+        <p>{{.Kind}} → {{.Recipient}}</p>
+        <p>{{.Body}}</p>
+      </div>
+      {{end}}
+    {{else}}
+      <p class="empty">No notifications yet.</p>
+    {{end}}
+  </section>
+</body>
+</html>
+{{end}}

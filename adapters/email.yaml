@@ -1,0 +1,6 @@
+name: email
+version: "1.0.0"
+protocol: jsonrpc-stdio
+port: notification
+binary: ./email/email-adapter
+capabilities: [send]
