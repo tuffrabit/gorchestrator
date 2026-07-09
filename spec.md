@@ -1,6 +1,6 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-08 (post Phase 2 Part 1 review)  
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-09 (Phase 3 plan solidification)  
 > **Status:** Living document — single source of truth  
 > **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
 >
@@ -12,6 +12,8 @@
 |------|--------|
 | 2026-07-04 | Initial spec from planning session. |
 | 2026-07-08 | Post-review revision. Recorded the ADK-native LLM integration decision (supersedes LLMProviderPort); unified handoff modes and adjudicators into a single axis (§9); specified crash-recovery semantics (§9.4); added per-phase `events.jsonl` transcripts and attempt versioning with adjudication feedback (§7); moved read-only project source access into Phase 2 (§6.6); named daemonization as Phase 3's first workstream (§11.0); hardened `run_test` sandbox requirements (§6.5); added untrusted-input/prompt-injection section (§5.6); switched adapter discovery to an explicit registry (§4.3); inserted a "Phase 2 Project Cleanup" phase (§14); converted resolved open questions into soft decisions (§17). |
+| 2026-07-09 | Phase 3 plan solidification. Closed §17 Q5 (notifications: console + Slack webhook + SMTP email) and Q6 (OIDC-only MVP; SAML deferred). Recorded local auth mode for dev/test, issue-row queue model, and HTMX/SSE promoted hard for Phase 3. |
+| 2026-07-09 | Dashboard UX: vertical expandable status-tinted issue cards (not kanban); dark-only theme (greys/blues + neon pink); multi-expand; adjudication on expanded card; artifact slide-out drawer; submit from top-bar drawer. See §11.5. |
 
 ---
 
@@ -505,17 +507,139 @@ Configuration and operation via YAML files and CLI commands. No web interface.
 
 ### 11.3 Phase 3: Web Dashboard (Observation + Adjudication)
 
-- **Real-time status view:** Issue list, current phase, agent status, progress indicators (Server-Sent Events; soft decision §17 Q4)
-- **Artifact viewer:** Rendered Markdown, file tree, code/syntax highlighting, diff viewer
-- **Adjudication UI:** Pass/fail/retry buttons **plus a first-class feedback text field** available at any handoff boundary, regardless of configuration (§9.2)
-- **Agent activity log:** Stream of agent actions, tool calls, outputs — backed by the per-phase `events.jsonl` (§7.2)
-- **Token burn display:** Per-run and cumulative token usage — backed by usage records in `events.jsonl`
-- **Notification center:** Human gate alerts, admin alerts on failures
+Capabilities (what the human can do):
+
+- **Real-time issue feed:** live list of issues with phase, status, attempts, token burn (Server-Sent Events; §17 Q4)
+- **Artifact viewer:** rendered Markdown, syntax-highlighted code/JSON, activity from `events.jsonl`, workspace diff — primarily in a **slide-out drawer** (§11.5)
+- **Adjudication UI:** pass/fail/retry **plus a first-class feedback text field** on the **expanded issue card**, available at any handoff boundary regardless of configuration (§9.2, §9.3)
+- **Token burn display:** per-run and cumulative — from `runs` / `events.jsonl`
+- **Notification center:** pending human gates, admin alerts on failures
+- **Submit issue:** from the top bar (member+), not from a board column
+
+Layout, visual language, and interaction details are normative in **§11.5**.
 
 ### 11.4 Admin Features
 
 - Admin users always receive notifications on "bad" agent output (errors, timeouts, exceptions, empty outputs)
 - Configurable admin escalation rules (Phase 5)
+
+### 11.5 Dashboard UX (Phase 3) — Layout, Theme & Interaction
+
+*(Added 2026-07-09. Canonical UX for the HTMX dashboard. Implementation details live in `phase_3.md` Part D; this section is the product contract.)*
+
+#### 11.5.1 Information architecture
+
+**Not a kanban / sprint board.** No columns for “To do / In progress / Done.”
+
+The primary surface is a **single vertical feed** of **issue cards**, newest or most-recently-updated first (stable secondary sort by id). Optional filters (project, status) sit under the top bar as a compact strip — chips or selects, not a second navigation tree.
+
+| Surface | Role |
+|---------|------|
+| **Top bar** | Brand, primary nav (Issues, Notifications with badge count), **New issue** (member+), user menu (role, logout) |
+| **Issue feed** (`/`) | Vertical stack of expandable cards; default home after login |
+| **Expanded card** | Inline summary of current phase + truncated `result.json` fields + adjudication |
+| **Artifact drawer** | Right-hand slide-out for full `result.json`, `output.*`, `events.jsonl`, markdown render, workspace diff |
+| **Submit drawer** | Right-hand slide-out form (project, title, optional source, dry-run) opened from **New issue** |
+| **Notifications** (`/notifications`) | Pending human gates + recent notification rows (same dark shell) |
+| **Login** (`/login`) | Minimal centered card; no marketing chrome |
+
+Deep link: `/issues/{id}` renders the feed with that card **pre-expanded** (and optional `?drawer=result|output|events|diff` to open the artifact drawer on load). There is no separate full-page issue detail layout in Phase 3 — expansion + drawer *are* the detail experience.
+
+#### 11.5.2 Issue card — collapsed (default)
+
+Minimal chrome. One horizontal band per issue:
+
+- **Left:** status color wash (see §11.5.5) + thin brighter status accent bar on the leading edge
+- **Identity:** `#id` · project name · **title** (truncate with ellipsis)
+- **Meta chips:** status label · current phase · attempt `N` · cumulative tokens · relative `updated_at`
+- **Affordance:** chevron indicating expand; whole card header is the click/toggle target (keyboard: Enter/Space on focused card)
+
+No action buttons on the collapsed face except the expand control (adjudication is expand-only so the feed stays scannable).
+
+#### 11.5.3 Issue card — expanded
+
+**Multi-expand:** any number of cards may be open at once (parallel runs, compare two gates). Expanding one does **not** collapse others. Expanded state is client-side (and restored from the deep-link URL for a single id); SSE may re-render a card without forcing collapse.
+
+Expanded body (below the header, same status-tinted panel):
+
+1. **Phase strip** — research → plan → implementation as three steps; completed = check, current = neon-pink pulse/dot, future = dim. Clicking a completed step can open the drawer focused on that phase’s artifacts when available.
+2. **Result summary** — truncated fields from the current phase `result.json`: `status`, `attempt`, `loop_count`, `tokens_used`, `duration_ms`, `error` / `done_rationale` (one short paragraph max; overflow ellipsis).
+3. **Artifact actions** — text buttons/links:
+   - **Full result.json** → opens drawer on JSON tab
+   - **Output** → opens drawer on rendered output (`output.md` / latest attempt)
+   - **Activity** → opens drawer on `events.jsonl` stream (tail-friendly)
+   - **Diff** → opens drawer on source vs workspace unified diff (when implementation workspace exists; otherwise hidden/disabled)
+4. **Adjudication block** (member+; always shown for the current phase when a decision is meaningful per §9.3 — especially `waiting_human`, and for manual intervene):
+   - Feedback **textarea** first-class (placeholder encourages “why”)
+   - **Pass** / **Fail** / **Retry** buttons
+   - Empty feedback on Fail/Retry: client-side warning, still submittable; server may echo a warning
+   - Viewer role: block visible but controls disabled with short explanation
+
+Live updates: when SSE reports a status/phase change for an expanded card, the header chips, tint, phase strip, and summary refresh in place (HTMX swap of the card partial).
+
+#### 11.5.4 Slide-out drawer (artifacts & submit)
+
+- **Position:** fixed to the **right**, full viewport height, width ~min(520px, 92vw) on desktop; near-full width on small viewports.
+- **Behavior:** slides in over a dimmed scrim; **Esc** or scrim click or ✕ closes; body scroll lock while open; focus trapped while open.
+- **Artifact drawer tabs:** `Result` | `Output` | `Activity` | `Diff` (tabs omitted when N/A). Content is server-rendered HTML partials (goldmark for Markdown; `<pre>` + highlight.js for JSON/code). Large payloads: stream or size-cap with “truncated” notice rather than melting the browser.
+- **Submit drawer:** form fields only (no tabs); success closes drawer and inserts/refreshes the new card at the top of the feed via HTMX.
+- **Stacking:** only one drawer at a time; opening submit while artifact is open replaces it (and vice versa).
+
+#### 11.5.5 Theme — dark only
+
+**No light theme and no theme switcher.** One deliberate dark palette: deep blue-greys, cool surfaces, **hot neon pink** as the interactive accent (CTAs, focus rings, current-phase marker, badge pulses, primary buttons).
+
+**Design tokens** (CSS custom properties; names are normative for `internal/web` stylesheets):
+
+| Token | Role | Value (hex) |
+|-------|------|-------------|
+| `--bg-app` | Page background | `#0a0e14` |
+| `--bg-elevated` | Top bar, drawer, modals | `#121820` |
+| `--bg-card` | Neutral card base (before status wash) | `#151c27` |
+| `--border-subtle` | Dividers, card edge | `#243041` |
+| `--text-primary` | Titles, body | `#e8eef7` |
+| `--text-muted` | Meta, labels | `#8b9bb4` |
+| `--accent` | Neon pink — primary actions, focus | `#ff2d95` |
+| `--accent-dim` | Pink wash / glow | `#ff2d9533` |
+| `--accent-hot` | Hover/active pink | `#ff4db8` |
+| `--focus-ring` | Keyboard focus | `0 0 0 2px #0a0e14, 0 0 0 4px #ff2d95` |
+| `--status-queued` | Waiting its turn | wash `#1a2a4a` · accent bar `#3d7eff` · text chip `#8eb6ff` |
+| `--status-active` | In progress / running | wash `#0f2a22` · accent bar `#2ee59a` · text chip `#7df0c4` |
+| `--status-human` | Waiting on human | wash `#2a2410` · accent bar `#f5c542` · text chip `#ffe08a` |
+| `--status-error` | Failed | wash `#2a1218` · accent bar `#ff4d6a` · text chip `#ff8a9b` |
+| `--status-done` | Completed pipeline | wash `#141c24` · accent bar `#5b8def` · text chip `#a8c0e8` |
+| `--status-cancelled` | Cancelled (not failure) | wash `#1a1d24` · accent bar `#6b7280` · text chip `#9ca3af` |
+
+Status → token mapping:
+
+| Issue / phase status | Visual |
+|----------------------|--------|
+| `queued` | **Blue** — “waiting its turn” |
+| `in_progress` | **Green** — active / running |
+| `waiting_human` | **Yellow/amber** — human gate; optional subtle pink border pulse so gates still “pop” in a long feed |
+| `failed` | **Red** |
+| `done` | Cool slate + blue accent (calm terminal; not screaming green) |
+| `cancelled` | Neutral grey (distinct from `failed`) |
+
+Cards use a **status wash** (tinted background + 3–4px leading accent bar), not a solid full-saturation fill — keeps title text readable on dark UI. Neon pink is **not** a status color; it is reserved for interaction (New issue, Pass emphasis optional, links, focus, “you are here” on the phase strip).
+
+Typography: system UI stack (`ui-sans-serif, system-ui, …`) for chrome; `ui-monospace` for ids, JSON, tokens, and code. Comfortable density — compact cards, not dashboard-wall sparse.
+
+Motion: short (150–220ms) expand/collapse and drawer slide; respect `prefers-reduced-motion` (instant expand, no pulse).
+
+#### 11.5.6 Real-time & empty states
+
+- SSE drives card re-tints, chip updates, notification badge count, and expanded summary refresh.
+- Degraded clients: HTMX polling on the feed partial every ~5s (already planned as SSE fallback).
+- Empty feed: short copy + **New issue** affordance (member+) or “waiting for work” (viewer).
+- `waiting_human` cards may sort toward the top of the default ordering when a “Needs you” filter/chip is active; default sort remains recency unless the user selects that filter.
+
+#### 11.5.7 Accessibility (minimum bar)
+
+- Expand/collapse and drawer close keyboard-operable; focus ring uses `--focus-ring`.
+- Status is not color-only: every card also shows a text status chip.
+- Drawer labels tabs with visible text; `aria-expanded` / `aria-modal` on the appropriate nodes.
+- Contrast: primary text on washes must remain readable (washes stay dark and desaturated).
 
 ---
 
@@ -625,16 +749,16 @@ Small, native Go toolset available to agents based on agent type:
 - **Deliverable:** Full pipeline from issue to code changes against a real codebase, configurable per-agent via YAML, recoverable after a crash
 
 ### Phase 3: Human Interface (Daemon + Dashboard + Auth)
-**Goal:** Humans can see what's happening and intervene. (See `phase_3.md`.)
+**Goal:** Humans can see what's happening and intervene. (See `phase_3.md` — ready to implement.)
 
-- **Daemonization first:** `gorchestrator serve` — embeddable engine, issue queue, worker pool, graceful shutdown, startup recovery scan (§9.4). This is a named workstream, not an implied side effect of the dashboard.
-- Web dashboard: Go HTTP server + HTMX server-rendered frontend (soft decision §17 Q1)
-- Real-time view via SSE: issue list, current phase, agent status, artifact viewer, `events.jsonl` activity stream, token burn
-- Adjudication UI: pass/fail/retry **with feedback field** at any handoff boundary
-- HumanAdjudicator: pauses, notifies, respawns worker goroutine on decision (in-process; no CLI resume needed in daemon mode)
-- User/team model: SQLite-backed roles (admin, member, viewer); OIDC (built-in)
-- Notifications wired: console (built-in) + email/Slack webhook (external process adapters — moved here from Phase 2)
-- **Deliverable:** Team can log in, watch agents work live, click retry with a reason, get Slack alerts
+- **Daemonization first:** `gorchestrator serve` — embeddable engine, issue-row queue + worker pool, graceful shutdown, startup recovery scan (§9.4). This is a named workstream, not an implied side effect of the dashboard.
+- Web dashboard: Go HTTP server + HTMX; **vertical expandable status-tinted issue cards** (not kanban); **dark-only** blue-grey + neon pink theme (§11.5, §17 Q1)
+- Real-time feed via SSE: card re-tint/chips; full artifacts in a **right slide-out drawer** (`result.json`, output, `events.jsonl`, diff) (§17 Q4)
+- Adjudication UI on the **expanded card**: pass/fail/retry **with feedback field** at any handoff boundary
+- HumanAdjudicator: pauses, notifies, worker exits; decision re-queues and a new worker runs (in-process; CLI `resume` remains for headless)
+- User/team model: SQLite-backed roles (admin, member, viewer); OIDC built-in; **local auth mode for dev/test** (not production)
+- Notifications wired: console (built-in) + Slack webhook + SMTP email (external process adapters — §17 Q5); SAML out of scope (§17 Q6)
+- **Deliverable:** Team can log in, watch agents work live, click retry with a reason, get Slack/email alerts
 
 ### Phase 4: Extensibility
 **Goal:** Users can plug in their own world. (See `phase_4.md`.)
@@ -730,6 +854,10 @@ Small, native Go toolset available to agents based on agent type:
 | Explicit adapter registry | Adapters are declared in config, not discovered by scanning a directory for executables. Manifest declares `binary` explicitly; core verifies it is a regular executable file. |
 | Storage keys are slash-canonical | Port paths are forward-slash relative keys; adapters translate. Prevents OS-separator leakage into S3/Azure object keys. |
 | Daemonization is a named workstream | Phase 3 begins by converting the one-shot CLI into a `serve` daemon with queue + workers; the engine is embeddable from Phase 2 onward so this is a front-end change, not a rewrite. |
+| Issue row is the daemon queue | No separate jobs table: workers claim issues with `status=queued`. Human gates set `waiting_human` and free the worker; decisions re-queue. Filesystem remains authoritative for phase state. |
+| OIDC-only + local dev auth | Phase 3 ships built-in OIDC and a non-production local password mode for tests/first-boot. SAML stays an unimplemented external adapter. |
+| Notifications: console + Slack + email | Console is built-in; Slack webhook and SMTP email are the first real JSON-RPC notification adapters. |
+| Dashboard is a vertical expandable-card feed | Not a kanban board. Status-tinted cards, multi-expand, adjudication on the expanded card, full artifacts in a right drawer. Dark-only theme: blue-greys + neon pink accent (§11.5). |
 | `cancelled` is a distinct status | Ctrl-C / shutdown is not a failure; it must not be reported as one. |
 | Empty output fails the loop | An attempt with neither a `write_output` call nor final model text fails immediately rather than being marked done and flagged later. |
 | Markdown docs are canonical | The spec is the living document; phase docs freeze at completion; HTML renderings are unmaintained presentation artifacts. |
@@ -744,9 +872,11 @@ Small, native Go toolset available to agents based on agent type:
 
 | # | Question | Decision | Rationale |
 |---|----------|----------|-----------|
-| 1 | Frontend technology | **HTMX + server-rendered HTML** *(soft)* | Matches the stdlib-only philosophy; React drags in a build pipeline the project will resent. |
+| 1 | Frontend technology | **HTMX + server-rendered HTML** *(soft; hard for Phase 3)* | Matches the stdlib-only philosophy; React drags in a build pipeline the project will resent. |
 | 2 | Shell execution sandbox | **Containers (Docker/Podman)** — *hard requirement, not soft* | See §6.5. A subprocess timeout is not a sandbox; `run_test` executes agent-authored code. |
-| 4 | Dashboard real-time updates | **Server-Sent Events** *(soft)* | One-way updates fit the need; stdlib-friendly; no websocket dependency. Polling as degraded fallback. |
+| 4 | Dashboard real-time updates | **Server-Sent Events** *(soft; hard for Phase 3)* | One-way updates fit the need; stdlib-friendly; no websocket dependency. Polling as degraded fallback. |
+| 5 | Notification delivery | **Console (built-in) + Slack webhook + SMTP email (external process adapters)** *(soft)* | Port once, two thin adapters; config enables zero or more sinks. Closed 2026-07-09 with Phase 3 plan. |
+| 6 | SSO scope | **OIDC-only MVP** *(soft)* | SAML remains a documented external adapter (spec §3.3 / §4.5) but is **not implemented** in Phase 3. Local username/password mode exists for dev/test only. Closed 2026-07-09. |
 | 7 | Agent output versioning | **Append `attempts/N/` directories; never overwrite** *(soft)* | Preserves retry history and gives adjudication feedback a home (§7.1). |
 | 8 | Project/issue ID scheme | **Auto-increment integers** — *closed* | Decided de facto by Phase 1 code. |
 | 10 | Local LLM integration | **OpenAI-compatible endpoint** (`base_url` on the OpenAI implementation) — *closed* | Decided de facto by Phase 2 code; covers llama.cpp, Ollama, and most gateways. |
@@ -759,10 +889,8 @@ Small, native Go toolset available to agents based on agent type:
 | # | Question | Notes |
 |---|----------|-------|
 | 3 | Codebase search tool | Pure-Go grep is implemented; tree-sitter / vector semantic search remain candidates for Phase 4+. |
-| 5 | Notification delivery | Email (SMTP), Slack webhook, or both — decide when Phase 3 wires notifications. |
-| 6 | SSO scope | OIDC-only MVP vs. SAML too — decide in Phase 3. |
 | 9 | YAML config schema | Per-project vs. per-issue vs. per-agent-type defaults with overrides — firm up in Phase 2 Part 2 when per-agent config lands. |
-| 12 | Adapter authentication | How external adapters authenticate to their backends (AWS credentials for S3, API keys for Jira) — decide in Phase 4. |
+| 12 | Adapter authentication | How external adapters authenticate to their backends (AWS credentials for S3, API keys for Jira) — decide in Phase 4. Email/Slack adapters in Phase 3 own their credentials via adapter env/config (preview of the pattern). |
 | 14 | Workspace cleanup / retention | Auto-delete vs. archive for audit — decide by Phase 6. |
 
 ---
