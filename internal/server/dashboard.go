@@ -11,20 +11,22 @@ import (
 	"github.com/tuffrabit/gorchestrator/internal/auth"
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
+	"github.com/tuffrabit/gorchestrator/internal/storage"
 	"github.com/tuffrabit/gorchestrator/internal/web"
 )
 
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	s.renderFeed(w, r, 0, "")
+	s.renderFeed(w, r, 0, "", "")
 }
 
 func (s *Server) handleFeedIssue(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	drawer := r.URL.Query().Get("drawer")
-	s.renderFeed(w, r, id, drawer)
+	phase := r.URL.Query().Get("phase")
+	s.renderFeed(w, r, id, drawer, phase)
 }
 
-func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, expandID int64, drawer string) {
+func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, expandID int64, drawer, drawerPhase string) {
 	f := s.listFilterFromRequest(r)
 	views, err := s.eng.ListIssues(r.Context(), f)
 	if err != nil {
@@ -43,6 +45,7 @@ func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, expandID int
 		"PendingGates":  pending,
 		"ExpandID":      expandID,
 		"Drawer":        drawer,
+		"DrawerPhase":   drawerPhase,
 		"FilterStatus":  f.Status,
 		"FilterProject": r.URL.Query().Get("project"),
 		"CanWrite":      u != nil && roleAtLeast(u.Role, auth.RoleMember),
@@ -128,23 +131,97 @@ func (s *Server) handlePartialDrawer(w http.ResponseWriter, r *http.Request) {
 	if tab == "" {
 		tab = "result"
 	}
+	// Full-diff tab removed; legacy ?tab=diff → implementation workspace tree.
+	if tab == "diff" {
+		tab = "output"
+	}
 	view, err := s.eng.GetIssue(r.Context(), id)
-	if err != nil || view == nil {
+	if err != nil || view == nil || view.Issue == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	content, contentHTML, err := s.drawerContent(r, view, tab)
+	phase := normalizePhase(r.URL.Query().Get("phase"))
+	if phase == "" {
+		phase = normalizePhase(view.Issue.CurrentPhase)
+	}
+	if phase == "" {
+		phase = phaseResearch
+	}
+	// Deep links that used ?drawer=diff historically should land on implementation.
+	if r.URL.Query().Get("tab") == "diff" {
+		phase = phaseImplementation
+	}
+	content, contentHTML, err := s.drawerContent(r, view, tab, phase)
 	if err != nil {
 		content = err.Error()
+	}
+	// Build phase strip metadata for in-drawer tabs.
+	phaseTabs := make([]map[string]any, 0, len(knownPhases))
+	for _, p := range knownPhases {
+		st := "pending"
+		for _, step := range view.Phases {
+			if step.Name == p {
+				st = step.State
+				break
+			}
+		}
+		phaseTabs = append(phaseTabs, map[string]any{
+			"Name":    p,
+			"Label":   phaseLabel(p),
+			"Agent":   phaseAgent(p),
+			"State":   st,
+			"Current": p == phase,
+		})
 	}
 	data := map[string]any{
 		"Issue":       view,
 		"Tab":         tab,
+		"Phase":       phase,
+		"PhaseLabel":  phaseLabel(phase),
+		"PhaseTabs":   phaseTabs,
 		"Content":     content,
 		"ContentHTML": contentHTML,
 		"CSRF":        auth.CSRFToken(r),
 	}
 	if err := render(w, "partials/drawer_artifact.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handlePartialWorkspaceFile returns a single-file source-vs-workspace diff partial.
+func (s *Server) handlePartialWorkspaceFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	rel := strings.TrimSpace(r.URL.Query().Get("path"))
+	if rel == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	if err := storage.ValidateRelativePath(rel); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	view, err := s.eng.GetIssue(r.Context(), id)
+	if err != nil || view == nil || view.Issue == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	issue := view.Issue
+	ws := storage.WorkspacePath(issue.ProjectID, issue.ID)
+	src := storage.SourcePath(issue.ProjectID, issue.ID)
+	diff, err := singleFileDiff(r.Context(), s.eng.Store(), src, ws, rel)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	data := map[string]any{
+		"Path": rel,
+		"Diff": diff,
+	}
+	if err := render(w, "partials/drawer_workspace_file.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

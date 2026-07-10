@@ -1,24 +1,46 @@
 {{define "partials/drawer_artifact.html"}}
-<div class="drawer-tabs-inline" data-issue-id="{{.Issue.Issue.ID}}">
-  <div style="display:flex;gap:0.35rem;margin-bottom:0.75rem;flex-wrap:wrap">
-    <button class="btn {{if eq .Tab "result"}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'result')">Result</button>
-    <button class="btn {{if eq .Tab "output"}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'output')">Output</button>
-    <button class="btn {{if or (eq .Tab "activity") (eq .Tab "events")}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'activity')">Activity</button>
-    <button class="btn {{if eq .Tab "diff"}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{.Issue.Issue.ID}}, 'diff')">Diff</button>
+{{$id := .Issue.Issue.ID}}
+{{$phase := .Phase}}
+{{$tab := .Tab}}
+<div class="drawer-artifact" data-issue-id="{{$id}}" data-phase="{{$phase}}" data-tab="{{$tab}}">
+  <div class="drawer-phase-tabs" role="tablist" aria-label="Agent phase">
+    {{range .PhaseTabs}}
+    <button type="button"
+      class="btn drawer-phase-tab {{if .Current}}btn-primary{{end}} state-{{.State}}"
+      role="tab"
+      aria-selected="{{if .Current}}true{{else}}false{{end}}"
+      title="{{.Agent}} ({{.State}})"
+      onclick="openArtifactDrawer({{$id}}, '{{$tab}}', '{{.Name}}')">
+      {{.Label}}
+    </button>
+    {{end}}
+  </div>
+  <div class="drawer-tabs-inline" role="tablist" aria-label="Artifact view">
+    <button class="btn {{if eq $tab "result"}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{$id}}, 'result', '{{$phase}}')">Result</button>
+    <button class="btn {{if eq $tab "output"}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{$id}}, 'output', '{{$phase}}')">{{if eq $phase "implementation"}}Workspace{{else}}Output{{end}}</button>
+    <button class="btn {{if or (eq $tab "activity") (eq $tab "events")}}btn-primary{{end}}" type="button"
+      onclick="openArtifactDrawer({{$id}}, 'activity', '{{$phase}}')">Activity</button>
+  </div>
+  <div class="drawer-content-pane">
+  {{if .ContentHTML}}
+    <div class="md-body">{{.ContentHTML}}</div>
+  {{else}}
+    <pre><code class="language-json">{{.Content}}</code></pre>
+  {{end}}
   </div>
 </div>
-{{if .ContentHTML}}
-<div class="md-body">{{.ContentHTML}}</div>
-{{else}}
-<pre><code class="language-json">{{.Content}}</code></pre>
-{{end}}
 <script>
   if (window.hljs) {
     document.querySelectorAll('#drawer-body pre code').forEach(function (el) { hljs.highlightElement(el); });
+  }
+  if (window.htmx && typeof htmx.process === 'function') {
+    htmx.process(document.getElementById('drawer-body'));
+  }
+  var title = document.getElementById('drawer-title');
+  if (title) {
+    title.textContent = 'Issue #{{$id}} · {{.PhaseLabel}}';
   }
 </script>
 {{end}}

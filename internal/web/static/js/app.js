@@ -19,10 +19,35 @@ function closeDrawer() {
   document.body.style.overflow = '';
 }
 
-function openArtifactDrawer(issueId, tab) {
-  openDrawer('Issue #' + issueId);
+// openArtifactDrawer loads the artifact drawer for an issue.
+// tab: result | output | activity (legacy "diff" is remapped server-side to
+// implementation workspace output)
+// phase: research | plan | implementation (optional — defaults to the card's
+// current phase, then research).
+function openArtifactDrawer(issueId, tab, phase) {
+  var resolvedTab = tab || 'result';
+  var resolvedPhase = phase;
+  if (resolvedTab === 'diff') {
+    resolvedTab = 'output';
+    if (!resolvedPhase) resolvedPhase = 'implementation';
+  }
+  if (!resolvedPhase) {
+    var card = document.getElementById('issue-' + issueId);
+    if (card && card.dataset.phase) {
+      resolvedPhase = card.dataset.phase;
+    }
+  }
+  var title = 'Issue #' + issueId;
+  if (resolvedPhase) {
+    title += ' · ' + resolvedPhase;
+  }
+  openDrawer(title);
   if (window.htmx) {
-    htmx.ajax('GET', '/partials/issues/' + issueId + '/drawer?tab=' + encodeURIComponent(tab), {
+    var url = '/partials/issues/' + issueId + '/drawer?tab=' + encodeURIComponent(resolvedTab);
+    if (resolvedPhase) {
+      url += '&phase=' + encodeURIComponent(resolvedPhase);
+    }
+    htmx.ajax('GET', url, {
       target: '#drawer-body',
       swap: 'innerHTML'
     });
@@ -128,8 +153,9 @@ function refreshIssueCard(issueId) {
 document.addEventListener('DOMContentLoaded', function () {
   var expandId = document.body && document.body.dataset.expandId;
   var drawer = document.body && document.body.dataset.drawer;
+  var drawerPhase = document.body && document.body.dataset.drawerPhase;
   if (expandId && expandId !== '0' && drawer) {
-    openArtifactDrawer(expandId, drawer);
+    openArtifactDrawer(expandId, drawer, drawerPhase || undefined);
   }
 
   if (typeof EventSource === 'undefined') return;

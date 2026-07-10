@@ -58,11 +58,13 @@
       <button class="btn" type="button"
         onclick="openArtifactDrawer({{$issue.ID}}, 'result')">result.json</button>
       <button class="btn" type="button"
-        onclick="openArtifactDrawer({{$issue.ID}}, 'output')">output</button>
+        onclick="openArtifactDrawer({{$issue.ID}}, 'output')"
+        title="Opens the current phase ({{$issue.CurrentPhase}})">output</button>
       <button class="btn" type="button"
         onclick="openArtifactDrawer({{$issue.ID}}, 'activity')">activity</button>
       <button class="btn" type="button"
-        onclick="openArtifactDrawer({{$issue.ID}}, 'diff')">diff</button>
+        onclick="openArtifactDrawer({{$issue.ID}}, 'output', 'implementation')"
+        title="Implementation workspace tree and per-file diffs">workspace</button>
       {{if .CanWrite}}
       <button class="btn btn-danger" type="button"
         title="Permanently delete this issue and all artifacts"

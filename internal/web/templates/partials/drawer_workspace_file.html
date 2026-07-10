@@ -1,0 +1,9 @@
+{{define "partials/drawer_workspace_file.html"}}
+<pre class="ws-diff-pre"><code class="language-diff">{{.Diff}}</code></pre>
+<script>
+  if (window.hljs) {
+    var el = document.querySelector('.ws-file-details[data-path="{{.Path}}"] .ws-diff-pre code');
+    if (el) hljs.highlightElement(el);
+  }
+</script>
+{{end}}

@@ -412,6 +412,121 @@ button, input, select, textarea {
   overflow: auto;
 }
 
+/* Artifact drawer: phase + tab chrome */
+.drawer-artifact .drawer-phase-tabs {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.65rem;
+}
+.drawer-artifact .drawer-tabs-inline {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.85rem;
+}
+.drawer-phase-tab.state-done {
+  border-color: color-mix(in srgb, var(--bar-in-progress) 40%, var(--border-subtle));
+}
+.drawer-phase-tab.state-current:not(.btn-primary) {
+  color: var(--accent-pink);
+  border-color: color-mix(in srgb, var(--accent-pink) 45%, var(--border-subtle));
+}
+.drawer-phase-tab.state-failed {
+  border-color: color-mix(in srgb, var(--bar-failed) 50%, var(--border-subtle));
+}
+.drawer-phase-tab.state-waiting {
+  border-color: color-mix(in srgb, var(--bar-waiting) 50%, var(--border-subtle));
+}
+.drawer-phase-tab.state-pending {
+  opacity: 0.7;
+}
+.drawer-content-pane {
+  min-height: 4rem;
+}
+
+/* Workspace tree (implementer output) */
+.ws-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.ws-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ws-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 0.85rem;
+  font-size: 0.88rem;
+}
+.ws-tree > li {
+  margin: 0.15rem 0;
+}
+.ws-dir-label {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+.ws-file-details {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.1rem 0.25rem;
+}
+.ws-file-details[open] {
+  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-app) 70%, transparent);
+  padding: 0.35rem 0.5rem 0.5rem;
+}
+.ws-file-details summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.ws-file-details summary::-webkit-details-marker { display: none; }
+.ws-file-details summary::before {
+  content: "▸";
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  width: 0.75rem;
+}
+.ws-file-details[open] summary::before { content: "▾"; }
+.ws-file-name {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.ws-file.ws-changed .ws-file-name {
+  color: var(--accent-pink);
+}
+.ws-changed-mark {
+  color: var(--accent-pink);
+  font-weight: 700;
+}
+.ws-file-diff {
+  margin-top: 0.45rem;
+  margin-left: 0.9rem;
+}
+.ws-diff-pre {
+  margin: 0;
+  max-height: 28rem;
+  overflow: auto;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.78rem;
+  white-space: pre;
+  word-break: normal;
+}
+
 /* Login */
 .login-wrap {
   min-height: 100vh;
