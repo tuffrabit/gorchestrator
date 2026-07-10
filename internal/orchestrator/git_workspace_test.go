@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
-	gorchgit "github.com/tuffrabit/gorchestrator/internal/git"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 )
 
@@ -67,6 +66,15 @@ func TestGitWorkspace_PipelineDryRun(t *testing.T) {
 			"planner":     {Adjudicator: "null", MaxAttempts: 1, Loops: 1},
 			"implementer": {Adjudicator: "null", MaxAttempts: 1, Loops: 1},
 		},
+		Projects: map[string]config.ProjectConfig{
+			"gitproj": {
+				Git: &config.ProjectGitConfig{
+					RepoURL:    remote,
+					BaseBranch: "main",
+					Push:       false,
+				},
+			},
+		},
 	}
 
 	eng, err := NewEngine(cfg)
@@ -75,16 +83,9 @@ func TestGitWorkspace_PipelineDryRun(t *testing.T) {
 	}
 	defer eng.Close()
 
-	project, err := eng.projects.GetOrCreate("gitproj")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.setProjectGitConfig(project, gorchgit.Config{
-		RepoURL:    remote,
-		BaseBranch: "main",
-		Push:       false,
-	}); err != nil {
-		t.Fatal(err)
+	project, err := eng.projects.GetByName("gitproj")
+	if err != nil || project == nil {
+		t.Fatalf("get project: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -23,9 +23,17 @@ func NewProjectRepo(db *sql.DB) *ProjectRepo {
 	return &ProjectRepo{db: db}
 }
 
-// Create inserts a project and returns it.
+// Create inserts a project with empty config and returns it.
 func (r *ProjectRepo) Create(name string) (*Project, error) {
-	res, err := r.db.Exec(`INSERT INTO projects (name, config_json) VALUES (?, '{}')`, name)
+	return r.CreateWithConfig(name, "{}")
+}
+
+// CreateWithConfig inserts a project with the given config_json and returns it.
+func (r *ProjectRepo) CreateWithConfig(name, configJSON string) (*Project, error) {
+	if configJSON == "" {
+		configJSON = "{}"
+	}
+	res, err := r.db.Exec(`INSERT INTO projects (name, config_json) VALUES (?, ?)`, name, configJSON)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
@@ -34,6 +42,18 @@ func (r *ProjectRepo) Create(name string) (*Project, error) {
 		return nil, fmt.Errorf("last insert id: %w", err)
 	}
 	return r.Get(id)
+}
+
+// UpdateConfigJSON replaces the project's config_json blob.
+func (r *ProjectRepo) UpdateConfigJSON(id int64, configJSON string) error {
+	if configJSON == "" {
+		configJSON = "{}"
+	}
+	_, err := r.db.Exec(`UPDATE projects SET config_json = ? WHERE id = ?`, configJSON, id)
+	if err != nil {
+		return fmt.Errorf("update project config: %w", err)
+	}
+	return nil
 }
 
 // GetByName fetches a project by name.
@@ -54,21 +74,12 @@ func (r *ProjectRepo) Get(id int64) (*Project, error) {
 	row := r.db.QueryRow(`SELECT id, name, config_json, created_at FROM projects WHERE id = ?`, id)
 	p := &Project{}
 	if err := row.Scan(&p.ID, &p.Name, &p.ConfigJSON, &p.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return p, nil
-}
-
-// GetOrCreate fetches a project by name or creates it if missing.
-func (r *ProjectRepo) GetOrCreate(name string) (*Project, error) {
-	p, err := r.GetByName(name)
-	if err != nil {
-		return nil, err
-	}
-	if p != nil {
-		return p, nil
-	}
-	return r.Create(name)
 }
 
 // List returns all projects ordered by name.

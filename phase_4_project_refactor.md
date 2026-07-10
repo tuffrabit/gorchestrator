@@ -1,6 +1,6 @@
 # Phase 4 Project Refactor — YAML Registry & Agent Flavors
 
-> **Status:** Approved plan (not yet implemented).  
+> **Status:** Implemented (2026-07-10).  
 > **Approved:** 2026-07-10  
 > **Prerequisite:** Phase 4 Parts A–G in tree (git, `run_test`, MCP, triggers, S3, agent personality fields, JSON-RPC supervisor). Full suite green before starting this refactor is preferred but not a hard gate if residual Phase 4 polish is isolated.  
 > **Scope:** Make projects and agent casting first-class YAML configuration. Remove create-on-submit / CLI `GetOrCreate`. Named flavors of the three core agent types; freeze cast on the issue; submit drawer selects project + optional flavors.  

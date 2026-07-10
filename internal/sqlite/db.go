@@ -162,6 +162,13 @@ ALTER TABLE issues ADD COLUMN external_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_issues_external ON issues(source, external_id);
 `,
 	},
+	{
+		version: 8,
+		name:    "issue_agent_flavors",
+		sql: `
+ALTER TABLE issues ADD COLUMN agent_flavors_json TEXT NOT NULL DEFAULT '{}';
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

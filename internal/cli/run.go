@@ -15,8 +15,7 @@ import (
 // Run executes the `run` subcommand.
 func Run(fs *flag.FlagSet, args []string) error {
 	issue := fs.String("issue", "", "issue title/body")
-	project := fs.String("project", "", "project name")
-	source := fs.String("source", "", "project source directory (sets/updates the project's source_path)")
+	project := fs.String("project", "", "project name (must be declared under projects: in config YAML)")
 	dryRun := fs.Bool("dry-run", false, "use the dry-run LLM adapter")
 	configPath := fs.String("config", "", "path to config yaml (default: ~/.config/gorchestrator/config.yaml)")
 
@@ -53,7 +52,6 @@ func Run(fs *flag.FlagSet, args []string) error {
 	opts := orchestrator.RunOptions{
 		ProjectName: *project,
 		IssueTitle:  *issue,
-		SourcePath:  *source,
 		DryRun:      *dryRun,
 	}
 

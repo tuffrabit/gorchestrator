@@ -45,30 +45,27 @@ type IssueView struct {
 
 // SubmitIssue creates the issue (snapshot source if configured), sets status
 // queued, and returns immediately. Daemon workers pick it up.
+// Project must be declared in YAML (cfg.Projects); unknown names hard-fail.
 func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issue, error) {
-	if opts.ProjectName == "" {
-		return nil, fmt.Errorf("project name is required")
-	}
 	if opts.IssueTitle == "" {
 		return nil, fmt.Errorf("issue title is required")
 	}
 
-	project, err := e.projects.GetOrCreate(opts.ProjectName)
+	project, err := e.resolveRegisteredProject(opts.ProjectName)
 	if err != nil {
-		return nil, fmt.Errorf("get or create project: %w", err)
+		return nil, err
 	}
 
-	if opts.SourcePath != "" {
-		if err := e.setProjectSourcePath(project, opts.SourcePath); err != nil {
-			return nil, fmt.Errorf("set project source path: %w", err)
-		}
+	castJSON, err := e.resolveAndMarshalCast(project.Name, opts.AgentFlavors)
+	if err != nil {
+		return nil, err
 	}
 
 	source := opts.Source
 	if source == "" {
 		source = "manual"
 	}
-	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID)
+	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID, castJSON)
 	if err != nil {
 		return nil, fmt.Errorf("create issue: %w", err)
 	}

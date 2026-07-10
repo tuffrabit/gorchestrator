@@ -150,12 +150,19 @@ func (s *Server) handlePartialDrawer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePartialSubmit(w http.ResponseWriter, r *http.Request) {
-	projects, _ := s.eng.ListProjects(r.Context())
-	data := map[string]any{
-		"Projects": projects,
-		"CSRF":     auth.CSRFToken(r),
-	}
+	data := s.submitFormData(r, r.URL.Query().Get("project"), "", false)
 	if err := render(w, "partials/drawer_submit.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handlePartialSubmitFlavors(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		project = r.FormValue("project")
+	}
+	data := s.submitFormData(r, project, "", false)
+	if err := render(w, "partials/submit_flavors.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -167,20 +174,34 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	}
 	project := r.FormValue("project")
 	title := r.FormValue("title")
-	source := r.FormValue("source")
+	if r.FormValue("source") != "" || r.FormValue("source_path") != "" {
+		http.Error(w, "source/source_path is not accepted; configure projects.<name>.source_path in YAML", http.StatusUnprocessableEntity)
+		return
+	}
 	dryRun := r.FormValue("dry_run") == "on" || r.FormValue("dry_run") == "1" || r.FormValue("dry_run") == "true"
 	if project == "" || title == "" {
 		http.Error(w, "project and title required", http.StatusUnprocessableEntity)
 		return
 	}
+	flavors := map[string]string{}
+	for _, typ := range []string{"researcher", "planner", "implementer"} {
+		if v := r.FormValue("agent_flavor_" + typ); v != "" {
+			flavors[typ] = v
+		}
+	}
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
-		ProjectName: project,
-		IssueTitle:  title,
-		SourcePath:  source,
-		DryRun:      dryRun,
+		ProjectName:  project,
+		IssueTitle:   title,
+		DryRun:       dryRun,
+		AgentFlavors: flavors,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		msg := err.Error()
+		if isSubmitClientError(msg) {
+			http.Error(w, msg, http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, msg, http.StatusInternalServerError)
 		return
 	}
 	u := auth.UserFromContext(r.Context())
@@ -190,6 +211,7 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	}
 	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
 		"project": project, "title": title, "dry_run": dryRun,
+		"agent_flavors": parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
 	})
 	view, _ := s.eng.GetIssue(r.Context(), issue.ID)
 	// Return the new card partial; HTMX can prepend it.
@@ -203,6 +225,79 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	if err := render(w, "partials/issue_card.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// submitFormData builds template data for the New-issue drawer.
+func (s *Server) submitFormData(r *http.Request, selectedProject, title string, dryRun bool) map[string]any {
+	registered, _ := s.eng.ListRegisteredProjects(r.Context())
+	type projOpt struct {
+		Name string
+	}
+	projects := make([]projOpt, 0, len(registered))
+	for _, rp := range registered {
+		projects = append(projects, projOpt{Name: rp.Project.Name})
+	}
+	if selectedProject == "" && len(projects) == 1 {
+		selectedProject = projects[0].Name
+	}
+	data := map[string]any{
+		"Projects":        projects,
+		"SelectedProject": selectedProject,
+		"Title":           title,
+		"DryRun":          dryRun,
+		"CSRF":            auth.CSRFToken(r),
+		"FlavorSelects":   s.flavorSelectsForProject(selectedProject),
+	}
+	return data
+}
+
+// flavorSelectOption is one option in a flavor <select>.
+type flavorSelectOption struct {
+	Name     string
+	Selected bool
+}
+
+// flavorSelect is a multi-flavor stage shown in the submit form.
+type flavorSelect struct {
+	Type    string
+	Label   string
+	Options []flavorSelectOption
+}
+
+func (s *Server) flavorSelectsForProject(projectName string) []flavorSelect {
+	if projectName == "" {
+		return nil
+	}
+	pc, ok := s.eng.ProjectConfig(projectName)
+	if !ok {
+		return nil
+	}
+	catalog := pc.FlavorCatalog()
+	labels := map[string]string{
+		"researcher":  "Researcher flavor",
+		"planner":     "Planner flavor",
+		"implementer": "Implementer flavor",
+	}
+	var out []flavorSelect
+	for _, typ := range []string{"researcher", "planner", "implementer"} {
+		info := catalog[typ]
+		if len(info.Flavors) <= 1 {
+			continue
+		}
+		opts := make([]flavorSelectOption, 0, len(info.Flavors))
+		for _, name := range info.Flavors {
+			opts = append(opts, flavorSelectOption{
+				Name:     name,
+				Selected: name == info.Default,
+			})
+		}
+		out = append(out, flavorSelect{
+			Type:    typ,
+			Label:   labels[typ],
+			Options: opts,
+		})
+	}
+	return out
 }
 
 func (s *Server) handlePartialDeleteIssue(w http.ResponseWriter, r *http.Request) {

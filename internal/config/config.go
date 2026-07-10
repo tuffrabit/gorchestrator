@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -39,21 +40,173 @@ type AdapterConfig struct {
 // AgentConfig overrides the orchestrator's defaults for a specific agent type.
 // Supported keys: "researcher", "planner", "implementer".
 //
-// Merge layers (see Config.Agent): built-in defaults → default_model →
-// agents.<type> YAML → per-issue overrides (applied by the orchestrator).
+// Merge layers (see Config.Agent / orchestrator cast): built-in defaults →
+// default_model → global agents.<type> → project flavor → frozen issue cast name.
 type AgentConfig struct {
-	Model              ModelConfig `yaml:"model"`
-	Temperature        *float64    `yaml:"temperature"`
-	MaxTokens          int         `yaml:"max_tokens"`
-	SystemPrompt       string      `yaml:"system_prompt"`        // full override
-	SystemPromptAppend string      `yaml:"system_prompt_append"` // appended after base/override
-	Tools              []string    `yaml:"tools"`                // core tool name allowlist; empty = all for type
-	MCPServers         []string    `yaml:"mcp_servers"`          // per-agent MCP server allowlist
-	TokenBudget        int         `yaml:"token_budget"`         // stored only; enforced in Phase 5
-	Adjudicator        string      `yaml:"adjudicator"`
-	MaxAttempts        int         `yaml:"max_attempts"`
-	Loops              int         `yaml:"loops"`
-	Rubric             string      `yaml:"rubric"`
+	Model              ModelConfig `yaml:"model" json:"model,omitempty"`
+	Temperature        *float64    `yaml:"temperature" json:"temperature,omitempty"`
+	MaxTokens          int         `yaml:"max_tokens" json:"max_tokens,omitempty"`
+	SystemPrompt       string      `yaml:"system_prompt" json:"system_prompt,omitempty"`               // full override
+	SystemPromptAppend string      `yaml:"system_prompt_append" json:"system_prompt_append,omitempty"` // appended after base/override
+	Tools              []string    `yaml:"tools" json:"tools,omitempty"`                               // core tool name allowlist; empty = all for type
+	MCPServers         []string    `yaml:"mcp_servers" json:"mcp_servers,omitempty"`                   // per-agent MCP server allowlist
+	TokenBudget        int         `yaml:"token_budget" json:"token_budget,omitempty"`                 // stored only; enforced in Phase 5
+	Adjudicator        string      `yaml:"adjudicator" json:"adjudicator,omitempty"`
+	MaxAttempts        int         `yaml:"max_attempts" json:"max_attempts,omitempty"`
+	Loops              int         `yaml:"loops" json:"loops,omitempty"`
+	Rubric             string      `yaml:"rubric" json:"rubric,omitempty"`
+}
+
+// CoreAgentTypes are the only agent type keys allowed under projects.*.agents.
+var CoreAgentTypes = []string{"researcher", "planner", "implementer"}
+
+// ProjectAgentConfig is the per-type flavor catalog under projects.<name>.agents.<type>.
+type ProjectAgentConfig struct {
+	Default string                 `yaml:"default" json:"default,omitempty"`
+	Flavors map[string]AgentConfig `yaml:"flavors" json:"flavors,omitempty"`
+}
+
+// ProjectGitConfig is git workspace settings for a project (YAML + synced config_json).
+type ProjectGitConfig struct {
+	RepoURL     string          `yaml:"repo_url" json:"repo_url,omitempty"`
+	BaseBranch  string          `yaml:"base_branch" json:"base_branch,omitempty"`
+	Push        bool            `yaml:"push" json:"push,omitempty"`
+	CreatePR    bool            `yaml:"create_pr" json:"create_pr,omitempty"`
+	AuthorName  string          `yaml:"author_name" json:"author_name,omitempty"`
+	AuthorEmail string          `yaml:"author_email" json:"author_email,omitempty"`
+	Auth        ProjectGitAuth  `yaml:"auth" json:"auth,omitempty"`
+}
+
+// ProjectGitAuth selects credential mode (credentials live in the environment).
+type ProjectGitAuth struct {
+	Type       string `yaml:"type" json:"type,omitempty"`
+	SSHKeyPath string `yaml:"ssh_key_path" json:"ssh_key_path,omitempty"`
+	TokenEnv   string `yaml:"token_env" json:"token_env,omitempty"`
+	GHProfile  string `yaml:"gh_profile" json:"gh_profile,omitempty"`
+}
+
+// ProjectTestConfig is the immutable run_test command block for a project.
+type ProjectTestConfig struct {
+	Command    string   `yaml:"command" json:"command,omitempty"`
+	Timeout    string   `yaml:"timeout" json:"timeout,omitempty"`
+	Image      string   `yaml:"image" json:"image,omitempty"`
+	CPU        string   `yaml:"cpu" json:"cpu,omitempty"`
+	Memory     string   `yaml:"memory" json:"memory,omitempty"`
+	SecretsEnv []string `yaml:"secrets_env" json:"secrets_env,omitempty"`
+	Runtime    string   `yaml:"runtime" json:"runtime,omitempty"`
+}
+
+// ProjectConfig is one entry under the top-level projects: map (YAML source of truth).
+type ProjectConfig struct {
+	SourcePath    string                        `yaml:"source_path" json:"source_path,omitempty"`
+	Git           *ProjectGitConfig             `yaml:"git" json:"git,omitempty"`
+	Test          *ProjectTestConfig            `yaml:"test" json:"test,omitempty"`
+	TrustExternal bool                          `yaml:"trust_external" json:"trust_external,omitempty"`
+	Agents        map[string]ProjectAgentConfig `yaml:"agents" json:"agents,omitempty"`
+}
+
+// AgentFlavorInfo is the UI/API catalog for one core agent type on a project.
+type AgentFlavorInfo struct {
+	Default string   `json:"default,omitempty"`
+	Flavors []string `json:"flavors"` // names only; empty when no flavors
+}
+
+// FlavorCatalog returns per-type flavor names + defaults for submit UI.
+// Types with zero or one flavor still appear so the client can hide pickers.
+func (p ProjectConfig) FlavorCatalog() map[string]AgentFlavorInfo {
+	out := make(map[string]AgentFlavorInfo, len(CoreAgentTypes))
+	for _, typ := range CoreAgentTypes {
+		info := AgentFlavorInfo{Flavors: []string{}}
+		ac, ok := p.Agents[typ]
+		if !ok || len(ac.Flavors) == 0 {
+			out[typ] = info
+			continue
+		}
+		names := make([]string, 0, len(ac.Flavors))
+		for name := range ac.Flavors {
+			names = append(names, name)
+		}
+		// stable order for templates/tests
+		sort.Strings(names)
+		info.Flavors = names
+		info.Default = ac.Default
+		if info.Default == "" && len(names) == 1 {
+			info.Default = names[0]
+		}
+		out[typ] = info
+	}
+	return out
+}
+
+// ResolveCast validates and fills agent flavor names for submit.
+// requested may be nil or partial; missing keys use project default when flavors exist.
+// Empty cast when the project has no flavors for a type.
+func (p ProjectConfig) ResolveCast(requested map[string]string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, typ := range CoreAgentTypes {
+		want, hasWant := requested[typ]
+		ac, hasAgents := p.Agents[typ]
+		if !hasAgents || len(ac.Flavors) == 0 {
+			if hasWant && want != "" {
+				return nil, fmt.Errorf("project has no %s flavors; cannot select %q", typ, want)
+			}
+			continue
+		}
+		name := want
+		if name == "" {
+			name = ac.Default
+			if name == "" && len(ac.Flavors) == 1 {
+				for k := range ac.Flavors {
+					name = k
+				}
+			}
+		}
+		if name == "" {
+			return nil, fmt.Errorf("project agents.%s requires a default or submit choice", typ)
+		}
+		if _, ok := ac.Flavors[name]; !ok {
+			return nil, fmt.Errorf("unknown %s flavor %q", typ, name)
+		}
+		out[typ] = name
+	}
+	// Reject unknown keys in requested.
+	for k := range requested {
+		switch k {
+		case "researcher", "planner", "implementer":
+		default:
+			return nil, fmt.Errorf("unknown agent type %q in agent_flavors", k)
+		}
+	}
+	return out, nil
+}
+
+// FlavorOverlay returns the AgentConfig overlay for a frozen cast name.
+// empty name with no flavors → nil overlay (ok). missing named flavor → error.
+func (p ProjectConfig) FlavorOverlay(agentType, flavorName string) (AgentConfig, bool, error) {
+	ac, ok := p.Agents[agentType]
+	if !ok || len(ac.Flavors) == 0 {
+		if flavorName != "" {
+			return AgentConfig{}, false, fmt.Errorf("cast names %s flavor %q but project has no flavors for that type", agentType, flavorName)
+		}
+		return AgentConfig{}, false, nil
+	}
+	name := flavorName
+	if name == "" {
+		name = ac.Default
+		if name == "" && len(ac.Flavors) == 1 {
+			for k := range ac.Flavors {
+				name = k
+			}
+		}
+	}
+	if name == "" {
+		return AgentConfig{}, false, fmt.Errorf("no %s flavor selected and no project default", agentType)
+	}
+	overlay, ok := ac.Flavors[name]
+	if !ok {
+		return AgentConfig{}, false, fmt.Errorf("cast names %s flavor %q which is not defined on the project", agentType, name)
+	}
+	return overlay, true, nil
 }
 
 // ServerConfig configures the serve daemon HTTP surface and worker pool.
@@ -120,18 +273,19 @@ type StorageBackendConfig struct {
 
 // Config is the top-level user configuration.
 type Config struct {
-	StorageRoot   string                 `yaml:"storage_root"`
-	DBPath        string                 `yaml:"db_path"`
-	DefaultModel  ModelConfig            `yaml:"default_model"`
-	Tools         ToolsConfig            `yaml:"tools"`
-	Adapters      []AdapterConfig        `yaml:"adapters"`
-	Agents        map[string]AgentConfig `yaml:"agents"`
-	MCPServers    []MCPServerConfig      `yaml:"mcp_servers"`
-	Triggers      TriggersConfig         `yaml:"triggers"`
-	Storage       StorageBackendConfig   `yaml:"storage"`
-	Server        ServerConfig           `yaml:"server"`
-	Auth          AuthConfig             `yaml:"auth"`
-	Notifications NotificationsConfig    `yaml:"notifications"`
+	StorageRoot   string                   `yaml:"storage_root"`
+	DBPath        string                   `yaml:"db_path"`
+	DefaultModel  ModelConfig              `yaml:"default_model"`
+	Tools         ToolsConfig              `yaml:"tools"`
+	Adapters      []AdapterConfig          `yaml:"adapters"`
+	Agents        map[string]AgentConfig   `yaml:"agents"`
+	Projects      map[string]ProjectConfig `yaml:"projects"`
+	MCPServers    []MCPServerConfig        `yaml:"mcp_servers"`
+	Triggers      TriggersConfig           `yaml:"triggers"`
+	Storage       StorageBackendConfig     `yaml:"storage"`
+	Server        ServerConfig             `yaml:"server"`
+	Auth          AuthConfig               `yaml:"auth"`
+	Notifications NotificationsConfig      `yaml:"notifications"`
 }
 
 // HomeDir returns the user's home directory.
@@ -207,8 +361,41 @@ func LoadFrom(path string) (*Config, error) {
 	if err := applyAuthDefaults(&cfg); err != nil {
 		return nil, err
 	}
+	if err := normalizeProjects(&cfg, home); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+func normalizeProjects(cfg *Config, home string) error {
+	if cfg.Projects == nil {
+		cfg.Projects = map[string]ProjectConfig{}
+		return nil
+	}
+	for name, pc := range cfg.Projects {
+		if name == "" {
+			return fmt.Errorf("projects: empty project name is not allowed")
+		}
+		if pc.SourcePath != "" {
+			pc.SourcePath = expandTilde(pc.SourcePath, home)
+		}
+		for agentType := range pc.Agents {
+			switch agentType {
+			case "researcher", "planner", "implementer":
+			default:
+				return fmt.Errorf("projects.%s.agents: unknown agent type %q (want researcher|planner|implementer)", name, agentType)
+			}
+			ac := pc.Agents[agentType]
+			if ac.Default != "" && len(ac.Flavors) > 0 {
+				if _, ok := ac.Flavors[ac.Default]; !ok {
+					return fmt.Errorf("projects.%s.agents.%s: default %q is not a defined flavor", name, agentType, ac.Default)
+				}
+			}
+		}
+		cfg.Projects[name] = pc
+	}
+	return nil
 }
 
 func applyServerDefaults(cfg *Config) error {
@@ -276,67 +463,76 @@ func expandTilde(path, home string) string {
 
 // Agent returns the configuration for the named agent type, merging user
 // overrides with built-in defaults and global default_model. Unknown agent
-// names receive the defaults.
+// names receive the defaults. Project flavor / issue cast layers are applied
+// by the orchestrator on top of this result.
 func (c *Config) Agent(name string) AgentConfig {
 	def := defaultAgentConfig(name, c.DefaultModel)
 	ovr, ok := c.Agents[name]
 	if !ok {
 		return def
 	}
-	if ovr.Model.Provider != "" {
-		def.Model.Provider = ovr.Model.Provider
+	return MergeAgent(def, ovr)
+}
+
+// MergeAgent overlays non-zero fields from overlay onto base.
+// SystemPromptAppend is baked into SystemPrompt at the end of the merge.
+func MergeAgent(base, overlay AgentConfig) AgentConfig {
+	out := base
+	if overlay.Model.Provider != "" {
+		out.Model.Provider = overlay.Model.Provider
 	}
-	if ovr.Model.Model != "" {
-		def.Model.Model = ovr.Model.Model
+	if overlay.Model.Model != "" {
+		out.Model.Model = overlay.Model.Model
 	}
-	if ovr.Model.APIKeyEnv != "" {
-		def.Model.APIKeyEnv = ovr.Model.APIKeyEnv
+	if overlay.Model.APIKeyEnv != "" {
+		out.Model.APIKeyEnv = overlay.Model.APIKeyEnv
 	}
-	if ovr.Model.BaseURL != "" {
-		def.Model.BaseURL = ovr.Model.BaseURL
+	if overlay.Model.BaseURL != "" {
+		out.Model.BaseURL = overlay.Model.BaseURL
 	}
-	if ovr.Model.Timeout != "" {
-		def.Model.Timeout = ovr.Model.Timeout
+	if overlay.Model.Timeout != "" {
+		out.Model.Timeout = overlay.Model.Timeout
 	}
-	if ovr.SystemPrompt != "" {
-		def.SystemPrompt = ovr.SystemPrompt
+	if overlay.SystemPrompt != "" {
+		out.SystemPrompt = overlay.SystemPrompt
 	}
-	if ovr.SystemPromptAppend != "" {
-		def.SystemPromptAppend = ovr.SystemPromptAppend
+	if overlay.SystemPromptAppend != "" {
+		out.SystemPromptAppend = overlay.SystemPromptAppend
 	}
 	// Apply append after merge so full override + append both work.
-	if def.SystemPromptAppend != "" {
-		def.SystemPrompt = def.SystemPrompt + "\n\n" + def.SystemPromptAppend
+	if out.SystemPromptAppend != "" {
+		out.SystemPrompt = out.SystemPrompt + "\n\n" + out.SystemPromptAppend
+		out.SystemPromptAppend = ""
 	}
-	if ovr.Temperature != nil {
-		t := *ovr.Temperature
-		def.Temperature = &t
+	if overlay.Temperature != nil {
+		t := *overlay.Temperature
+		out.Temperature = &t
 	}
-	if ovr.MaxTokens > 0 {
-		def.MaxTokens = ovr.MaxTokens
+	if overlay.MaxTokens > 0 {
+		out.MaxTokens = overlay.MaxTokens
 	}
-	if len(ovr.Tools) > 0 {
-		def.Tools = append([]string(nil), ovr.Tools...)
+	if len(overlay.Tools) > 0 {
+		out.Tools = append([]string(nil), overlay.Tools...)
 	}
-	if len(ovr.MCPServers) > 0 {
-		def.MCPServers = append([]string(nil), ovr.MCPServers...)
+	if len(overlay.MCPServers) > 0 {
+		out.MCPServers = append([]string(nil), overlay.MCPServers...)
 	}
-	if ovr.TokenBudget > 0 {
-		def.TokenBudget = ovr.TokenBudget
+	if overlay.TokenBudget > 0 {
+		out.TokenBudget = overlay.TokenBudget
 	}
-	if ovr.Adjudicator != "" {
-		def.Adjudicator = ovr.Adjudicator
+	if overlay.Adjudicator != "" {
+		out.Adjudicator = overlay.Adjudicator
 	}
-	if ovr.MaxAttempts > 0 {
-		def.MaxAttempts = ovr.MaxAttempts
+	if overlay.MaxAttempts > 0 {
+		out.MaxAttempts = overlay.MaxAttempts
 	}
-	if ovr.Loops > 0 {
-		def.Loops = ovr.Loops
+	if overlay.Loops > 0 {
+		out.Loops = overlay.Loops
 	}
-	if ovr.Rubric != "" {
-		def.Rubric = ovr.Rubric
+	if overlay.Rubric != "" {
+		out.Rubric = overlay.Rubric
 	}
-	return def
+	return out
 }
 
 func defaultAgentConfig(name string, defaultModel ModelConfig) AgentConfig {

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,9 @@ func testConfig(tmp string) *config.Config {
 			"researcher":  {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
 			"planner":     {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
 			"implementer": {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+		},
+		Projects: map[string]config.ProjectConfig{
+			"acme": {},
 		},
 		Server: config.ServerConfig{
 			Listen:              "127.0.0.1:0",
@@ -210,6 +214,152 @@ func TestAPI_DecideWaitingHuman(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPI_Submit_UnknownProject(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"project":"missing","title":"x","dry_run":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPI_Submit_RejectsSourcePath(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"project":"acme","title":"x","source":"/tmp/repo","dry_run":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPI_Submit_AgentFlavors(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	cfg.Projects["acme"] = config.ProjectConfig{
+		Agents: map[string]config.ProjectAgentConfig{
+			"researcher": {
+				Default: "thorough",
+				Flavors: map[string]config.AgentConfig{
+					"thorough": {},
+					"cheap":    {},
+				},
+			},
+		},
+	}
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"project":"acme","title":"cast","dry_run":true,"agent_flavors":{"researcher":"cheap"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	flavors, _ := created["agent_flavors"].(map[string]any)
+	if flavors["researcher"] != "cheap" {
+		t.Fatalf("agent_flavors = %#v", created["agent_flavors"])
+	}
+
+	// List projects includes flavor catalog.
+	req = httptest.NewRequest(http.MethodGet, "/api/projects", nil)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("projects status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "thorough") || !strings.Contains(rec.Body.String(), "cheap") {
+		t.Fatalf("projects payload missing flavors: %s", rec.Body.String())
+	}
+}
+
+func TestPartialSubmit_RendersFlavorSelects(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	cfg.Projects["acme"] = config.ProjectConfig{
+		Agents: map[string]config.ProjectAgentConfig{
+			"researcher": {
+				Default: "thorough",
+				Flavors: map[string]config.AgentConfig{
+					"thorough": {},
+					"cheap":    {},
+				},
+			},
+			"planner": {
+				Default: "only",
+				Flavors: map[string]config.AgentConfig{
+					"only": {},
+				},
+			},
+		},
+	}
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/partials/submit?project=acme", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="agent_flavor_researcher"`) {
+		t.Fatalf("expected researcher multi-flavor select, got: %s", body)
+	}
+	if strings.Contains(body, `name="agent_flavor_planner"`) {
+		t.Fatalf("single-flavor planner should not render select: %s", body)
+	}
+	if strings.Contains(body, "Source path") || strings.Contains(body, `name="source"`) {
+		t.Fatalf("source field should be gone: %s", body)
+	}
+	if !strings.Contains(body, `<select id="project"`) {
+		t.Fatalf("expected project select: %s", body)
 	}
 }
 

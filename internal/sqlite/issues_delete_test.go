@@ -19,7 +19,7 @@ func TestIssueRepo_DeleteCascade(t *testing.T) {
 	decisions := NewDecisionRepo(db)
 	notifs := NewNotificationRepo(db)
 
-	p, err := projects.GetOrCreate("acme")
+	p, err := projects.Create("acme")
 	if err != nil {
 		t.Fatal(err)
 	}

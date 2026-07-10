@@ -6,23 +6,27 @@
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
   <div class="form-row">
     <label for="project">Project</label>
-    <input id="project" name="project" list="project-list" required placeholder="acme">
-    <datalist id="project-list">
+    <select id="project" name="project" required
+      hx-get="/partials/submit/flavors"
+      hx-trigger="change"
+      hx-target="#agent-flavors"
+      hx-include="this"
+      hx-swap="innerHTML">
+      <option value="" disabled {{if not .SelectedProject}}selected{{end}}>Select a project…</option>
       {{range .Projects}}
-      <option value="{{.Name}}"></option>
+      <option value="{{.Name}}" {{if eq $.SelectedProject .Name}}selected{{end}}>{{.Name}}</option>
       {{end}}
-    </datalist>
+    </select>
   </div>
   <div class="form-row">
     <label for="title">Title</label>
-    <input id="title" name="title" required placeholder="Add OIDC login">
+    <input id="title" name="title" required placeholder="Add OIDC login" value="{{.Title}}">
+  </div>
+  <div id="agent-flavors">
+    {{template "partials/submit_flavors.html" .}}
   </div>
   <div class="form-row">
-    <label for="source">Source path (optional)</label>
-    <input id="source" name="source" placeholder="/path/to/repo">
-  </div>
-  <div class="form-row">
-    <label><input type="checkbox" name="dry_run" value="1"> Dry run</label>
+    <label><input type="checkbox" name="dry_run" value="1" {{if .DryRun}}checked{{end}}> Dry run</label>
   </div>
   <button class="btn btn-primary" type="submit">Submit issue</button>
 </form>

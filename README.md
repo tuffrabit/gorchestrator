@@ -21,9 +21,12 @@ cp configs/config.example.yaml ~/.config/gorchestrator/config.yaml
 
 ### One-shot CLI (no daemon)
 
+Projects must be declared under `projects:` in config YAML before use (no create-on-submit).
+`source_path` / git / test / agent flavors live in that block — not on CLI flags or the submit form.
+
 ```bash
-# Full pipeline against a project source directory (dry-run LLM)
-./gorchestrator run --issue="add auth" --project=foo --source=/path/to/repo --dry-run
+# Full pipeline for a YAML-registered project (dry-run LLM)
+./gorchestrator run --issue="add auth" --project=foo --dry-run
 
 # Resume a phase waiting for human adjudication
 ./gorchestrator resume --project=foo --issue=1 --decision=pass --feedback="looks good"
@@ -48,7 +51,7 @@ export OPENAI_API_KEY='sk-local'   # often ignored by local servers
 
 From the dashboard:
 
-1. **+ New** — submit an issue (project, title, optional source path, dry-run checkbox).
+1. **+ New** — submit an issue (required project select from YAML registry, title, optional agent flavor selects when a stage has multiple flavors, dry-run).
 2. Expand a card — phase strip, artifacts, Pass / Fail / Retry with feedback.
 3. **Notifications** — pending human gates and recent alerts.
 
@@ -61,10 +64,11 @@ See `configs/config.example.yaml` for the full surface.
 | Block | Purpose |
 |-------|---------|
 | `default_model` | Provider (`openai`, `anthropic`, `gemini`, `dryrun`), model id, `api_key_env`, optional `base_url` for OpenAI-compatible endpoints |
+| `projects` | **YAML registry of projects** (source of truth). Each entry may set `source_path`, `git`, `test`, `trust_external`, and named agent **flavors**. Synced into SQLite at process start. |
 | `server` | `listen`, `max_concurrent_issues`, `shutdown_timeout`, `public_base_url` |
 | `auth` | `mode: local \| oidc`, local password env, OIDC issuer/client, bootstrap admin emails |
 | `notifications.adapters` | Optional names of JSON-RPC adapters with `port: notification` (Slack webhook, SMTP email) |
-| `agents.*` | Per-role adjudicator, max_attempts, model overrides |
+| `agents.*` | Global per-role adjudicator, max_attempts, model overrides (overlaid by project flavors) |
 
 ### OpenAI-compatible local / remote inference
 

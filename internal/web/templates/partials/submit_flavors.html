@@ -1,0 +1,15 @@
+{{define "partials/submit_flavors.html"}}
+{{/* Renders per-stage flavor selects only when len(flavors) > 1 */}}
+{{if .FlavorSelects}}
+  {{range .FlavorSelects}}
+  <div class="form-row">
+    <label for="flavor-{{.Type}}">{{.Label}}</label>
+    <select id="flavor-{{.Type}}" name="agent_flavor_{{.Type}}">
+      {{range .Options}}
+      <option value="{{.Name}}" {{if .Selected}}selected{{end}}>{{.Name}}</option>
+      {{end}}
+    </select>
+  </div>
+  {{end}}
+{{end}}
+{{end}}

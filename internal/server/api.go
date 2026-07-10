@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,10 +16,12 @@ import (
 )
 
 type submitIssueRequest struct {
-	Project string `json:"project"`
-	Title   string `json:"title"`
-	Source  string `json:"source"`
-	DryRun  bool   `json:"dry_run"`
+	Project      string            `json:"project"`
+	Title        string            `json:"title"`
+	Source       string            `json:"source"`       // rejected if set
+	SourcePath   string            `json:"source_path"`  // rejected if set
+	DryRun       bool              `json:"dry_run"`
+	AgentFlavors map[string]string `json:"agent_flavors"`
 }
 
 type decideRequest struct {
@@ -38,15 +41,24 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "project and title are required")
 		return
 	}
+	if req.Source != "" || req.SourcePath != "" {
+		writeJSONError(w, http.StatusUnprocessableEntity, "source/source_path is not accepted; configure projects.<name>.source_path in YAML")
+		return
+	}
 
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
-		ProjectName: req.Project,
-		IssueTitle:  req.Title,
-		SourcePath:  req.Source,
-		DryRun:      req.DryRun,
+		ProjectName:  req.Project,
+		IssueTitle:   req.Title,
+		DryRun:       req.DryRun,
+		AgentFlavors: req.AgentFlavors,
 	})
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		msg := err.Error()
+		if isSubmitClientError(msg) {
+			writeJSONError(w, http.StatusUnprocessableEntity, msg)
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, msg)
 		return
 	}
 
@@ -56,9 +68,10 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		uid = &u.ID
 	}
 	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
-		"project": req.Project,
-		"title":   req.Title,
-		"dry_run": req.DryRun,
+		"project":       req.Project,
+		"title":         req.Title,
+		"dry_run":       req.DryRun,
+		"agent_flavors": parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
 	})
 
 	view, err := s.eng.GetIssue(r.Context(), issue.ID)
@@ -67,6 +80,15 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, viewToJSON(view))
+}
+
+func parseAgentFlavorsJSON(raw string) map[string]string {
+	out := map[string]string{}
+	if raw == "" || raw == "{}" {
+		return out
+	}
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
 }
 
 func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
@@ -244,18 +266,46 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.eng.ListProjects(r.Context())
+	// Prefer YAML-registered projects with flavor catalogs for the submit UI.
+	// Include any orphan DB-only rows (historical) without agents catalog.
+	registered, err := s.eng.ListRegisteredProjects(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := make([]map[string]any, 0, len(projects))
-	for _, p := range projects {
+	seen := map[string]bool{}
+	out := make([]map[string]any, 0, len(registered))
+	for _, rp := range registered {
+		seen[rp.Project.Name] = true
+		agents := map[string]any{}
+		for typ, info := range rp.Agents {
+			agents[typ] = map[string]any{
+				"default": info.Default,
+				"flavors": info.Flavors,
+			}
+		}
 		out = append(out, map[string]any{
-			"id":         p.ID,
-			"name":       p.Name,
-			"created_at": p.CreatedAt,
+			"id":         rp.Project.ID,
+			"name":       rp.Project.Name,
+			"created_at": rp.Project.CreatedAt,
+			"registered": true,
+			"agents":     agents,
 		})
+	}
+	all, err := s.eng.ListProjects(r.Context())
+	if err == nil {
+		for _, p := range all {
+			if seen[p.Name] {
+				continue
+			}
+			out = append(out, map[string]any{
+				"id":         p.ID,
+				"name":       p.Name,
+				"created_at": p.CreatedAt,
+				"registered": false,
+				"agents":     map[string]any{},
+			})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": out})
 }
@@ -341,18 +391,19 @@ func viewToJSON(v *orchestrator.IssueView) map[string]any {
 
 func issueToJSON(i *sqlite.Issue, project string, tokens, attempt int, phaseStatus string) map[string]any {
 	return map[string]any{
-		"id":            i.ID,
-		"project_id":    i.ProjectID,
-		"project":       project,
-		"title":         i.Title,
-		"status":        i.Status,
-		"current_phase": i.CurrentPhase,
-		"dry_run":       i.DryRun,
-		"created_at":    i.CreatedAt,
-		"updated_at":    i.UpdatedAt,
-		"token_total":   tokens,
-		"attempt":       attempt,
-		"phase_status":  phaseStatus,
+		"id":             i.ID,
+		"project_id":     i.ProjectID,
+		"project":        project,
+		"title":          i.Title,
+		"status":         i.Status,
+		"current_phase":  i.CurrentPhase,
+		"dry_run":        i.DryRun,
+		"agent_flavors":  parseAgentFlavorsJSON(i.AgentFlavorsJSON),
+		"created_at":     i.CreatedAt,
+		"updated_at":     i.UpdatedAt,
+		"token_total":    tokens,
+		"attempt":        attempt,
+		"phase_status":   phaseStatus,
 	}
 }
 
@@ -378,6 +429,15 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func isSubmitClientError(msg string) bool {
+	return strings.Contains(msg, "unknown project") ||
+		strings.Contains(msg, "not declared") ||
+		strings.Contains(msg, "no projects declared") ||
+		strings.Contains(msg, "flavor") ||
+		strings.Contains(msg, "agent_flavors") ||
+		strings.Contains(msg, "has no ")
 }
 
 func jsonMarshal(v any) ([]byte, error) {

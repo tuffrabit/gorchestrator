@@ -50,8 +50,33 @@ func testConfig(tmp string) *config.Config {
 				Loops:       1,
 			},
 		},
+		// Register common fixture project names used across orchestrator tests.
+		Projects: map[string]config.ProjectConfig{
+			"acme":       {},
+			"foo":        {},
+			"steps":      {},
+			"done-steps": {},
+			"delproj":    {},
+			"gitproj":    {},
+		},
 	}
 }
+
+// firstIssueIDs returns project_id and issue id for the first issue row.
+func firstIssueIDs(t *testing.T, dbPath string) (projectID, issueID int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	err = db.QueryRow(`SELECT project_id, id FROM issues ORDER BY id ASC LIMIT 1`).Scan(&projectID, &issueID)
+	if err != nil {
+		t.Fatalf("first issue: %v", err)
+	}
+	return projectID, issueID
+}
+
 
 func TestRun_DryRun_Pipeline(t *testing.T) {
 	ctx := context.Background()
@@ -237,10 +262,10 @@ func TestRun_DryRun_SourceSnapshot_ExcludesGit(t *testing.T) {
 		t.Fatalf("write .git/config: %v", err)
 	}
 
+	cfg.Projects["foo"] = config.ProjectConfig{SourcePath: sourceDir}
 	opts := RunOptions{
 		ProjectName: "foo",
 		IssueTitle:  "add auth",
-		SourcePath:  sourceDir,
 		DryRun:      true,
 	}
 
@@ -253,7 +278,8 @@ func TestRun_DryRun_SourceSnapshot_ExcludesGit(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	snapshotPath := storage.SourcePath(1, 1)
+	pid, iid := firstIssueIDs(t, cfg.DBPath)
+	snapshotPath := storage.SourcePath(pid, iid)
 	if exists, _ := store.Exists(ctx, filepath.Join(snapshotPath, "main.go")); !exists {
 		t.Fatalf("source snapshot missing main.go")
 	}
@@ -261,7 +287,7 @@ func TestRun_DryRun_SourceSnapshot_ExcludesGit(t *testing.T) {
 		t.Fatalf("source snapshot should exclude .git")
 	}
 
-	wsPath := storage.WorkspacePath(1, 1)
+	wsPath := storage.WorkspacePath(pid, iid)
 	if exists, _ := store.Exists(ctx, filepath.Join(wsPath, "main.go")); !exists {
 		t.Fatalf("workspace missing seeded main.go")
 	}
@@ -283,10 +309,10 @@ func TestRun_DryRun_SourceSnapshot(t *testing.T) {
 		t.Fatalf("write main.go: %v", err)
 	}
 
+	cfg.Projects["foo"] = config.ProjectConfig{SourcePath: sourceDir}
 	opts := RunOptions{
 		ProjectName: "foo",
 		IssueTitle:  "add auth",
-		SourcePath:  sourceDir,
 		DryRun:      true,
 	}
 
@@ -299,12 +325,13 @@ func TestRun_DryRun_SourceSnapshot(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	snapshotPath := storage.SourcePath(1, 1)
+	pid, iid := firstIssueIDs(t, cfg.DBPath)
+	snapshotPath := storage.SourcePath(pid, iid)
 	if exists, _ := store.Exists(ctx, filepath.Join(snapshotPath, "main.go")); !exists {
 		t.Fatalf("source snapshot missing main.go")
 	}
 
-	wsPath := storage.WorkspacePath(1, 1)
+	wsPath := storage.WorkspacePath(pid, iid)
 	if exists, _ := store.Exists(ctx, filepath.Join(wsPath, "main.go")); !exists {
 		t.Fatalf("workspace missing seeded main.go")
 	}
@@ -333,7 +360,8 @@ func TestRun_DryRun_Cancellation(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	resultPath := storage.ResultPath(1, 1, "research")
+	pid, iid := firstIssueIDs(t, cfg.DBPath)
+	resultPath := storage.ResultPath(pid, iid, "research")
 	resultData, err := store.Read(context.Background(), resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -376,7 +404,8 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 	defer db.Close()
 
 	issues := sqlite.NewIssueRepo(db)
-	issue, err := issues.Get(1)
+	_, iid := firstIssueIDs(t, cfg.DBPath)
+	issue, err := issues.Get(iid)
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
@@ -401,7 +430,7 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 	}
 
 	// After retry, the phase re-runs and pauses again for human adjudication.
-	issue, err = issues.Get(1)
+	issue, err = issues.Get(iid)
 	if err != nil {
 		t.Fatalf("get issue after retry: %v", err)
 	}
@@ -409,7 +438,7 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 		t.Fatalf("issue status after retry = %q, want waiting_human", issue.Status)
 	}
 
-	feedbackPath := storage.FeedbackPath(1, 1, "research", 1)
+	feedbackPath := storage.FeedbackPath(issue.ProjectID, issue.ID, "research", 1)
 	fbData, err := store.Read(ctx, feedbackPath)
 	if err != nil {
 		t.Fatalf("read feedback: %v", err)
@@ -419,7 +448,7 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 	}
 
 	// A second attempt directory should exist.
-	attempt2Output := storage.AttemptOutputPath(1, 1, "research", 2)
+	attempt2Output := storage.AttemptOutputPath(issue.ProjectID, issue.ID, "research", 2)
 	if exists, _ := store.Exists(ctx, attempt2Output); !exists {
 		t.Fatalf("attempt 2 output missing")
 	}
@@ -431,7 +460,7 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 		t.Fatalf("Resume pass failed: %v", err)
 	}
 
-	issue, err = issues.Get(1)
+	issue, err = issues.Get(iid)
 	if err != nil {
 		t.Fatalf("get issue after pass: %v", err)
 	}
@@ -461,9 +490,10 @@ func TestResume_Pass(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
+	pid, iid := firstIssueIDs(t, cfg.DBPath)
 	resumeOpts := ResumeOptions{
 		ProjectName: "foo",
-		IssueID:     1,
+		IssueID:     iid,
 		Decision:    "pass",
 		Feedback:    "looks good",
 	}
@@ -476,7 +506,7 @@ func TestResume_Pass(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	resultPath := storage.ResultPath(1, 1, "research")
+	resultPath := storage.ResultPath(pid, iid, "research")
 	resultData, err := store.Read(ctx, resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -514,9 +544,10 @@ func TestResume_Fail(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
+	pid, iid := firstIssueIDs(t, cfg.DBPath)
 	resumeOpts := ResumeOptions{
 		ProjectName: "foo",
-		IssueID:     1,
+		IssueID:     iid,
 		Decision:    "fail",
 		Feedback:    "irrelevant research",
 	}
@@ -530,7 +561,7 @@ func TestResume_Fail(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	resultPath := storage.ResultPath(1, 1, "research")
+	resultPath := storage.ResultPath(pid, iid, "research")
 	resultData, err := store.Read(ctx, resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -548,7 +579,7 @@ func TestResume_Fail(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
-	issue, err := sqlite.NewIssueRepo(db).Get(1)
+	issue, err := sqlite.NewIssueRepo(db).Get(iid)
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
@@ -569,9 +600,9 @@ func TestCrashRecovery_RerunInProgressPhase(t *testing.T) {
 	}
 	defer eng.Close()
 
-	project, err := eng.projects.GetOrCreate("foo")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
+	project, err := eng.projects.GetByName("foo")
+	if err != nil || project == nil {
+		t.Fatalf("get project: %v", err)
 	}
 	issue, err := eng.issues.Create(project.ID, "add auth")
 	if err != nil {

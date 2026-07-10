@@ -29,6 +29,9 @@ func testConfig(tmp string) *config.Config {
 			"planner":     {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
 			"implementer": {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
 		},
+		Projects: map[string]config.ProjectConfig{
+			"acme": {},
+		},
 		Server: config.ServerConfig{
 			Listen:              "127.0.0.1:0",
 			MaxConcurrentIssues: 2,

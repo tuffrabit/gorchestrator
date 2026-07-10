@@ -51,9 +51,9 @@ func TestBuildPhaseSteps_TransitionResearchToPlan(t *testing.T) {
 	}
 	defer eng.Close()
 
-	project, err := eng.projects.GetOrCreate("steps")
-	if err != nil {
-		t.Fatal(err)
+	project, err := eng.projects.GetByName("steps")
+	if err != nil || project == nil {
+		t.Fatalf("get project: %v", err)
 	}
 	issue, err := eng.issues.CreateQueued(project.ID, "phase strip", false)
 	if err != nil {
@@ -116,9 +116,9 @@ func TestBuildPhaseSteps_IssueDone(t *testing.T) {
 	}
 	defer eng.Close()
 
-	project, err := eng.projects.GetOrCreate("done-steps")
-	if err != nil {
-		t.Fatal(err)
+	project, err := eng.projects.GetByName("done-steps")
+	if err != nil || project == nil {
+		t.Fatalf("get project: %v", err)
 	}
 	issue, err := eng.issues.CreateQueued(project.ID, "all done", false)
 	if err != nil {

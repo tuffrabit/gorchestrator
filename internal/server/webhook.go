@@ -57,7 +57,12 @@ func (s *Server) handleWebhookIssue(w http.ResponseWriter, r *http.Request) {
 		Source:      "webhook",
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		msg := err.Error()
+		if strings.Contains(msg, "unknown project") || strings.Contains(msg, "not declared") {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{

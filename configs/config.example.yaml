@@ -15,8 +15,8 @@ tools:
     max_bytes: 65536
     max_lines: 2000
 
-# Per-agent configuration. Keys: researcher, planner, implementer.
-# Merge: built-in defaults → default_model → agents.<type> → per-issue overrides.
+# Global per-agent defaults. Keys: researcher, planner, implementer.
+# Merge: built-in defaults → default_model → agents.<type> → project flavor → frozen issue cast.
 # agents:
 #   researcher:
 #     adjudicator: self
@@ -41,6 +41,44 @@ tools:
 #     max_attempts: 3
 #     loops: 1
 #     mcp_servers: []          # per-agent MCP server allowlist (deny by default)
+
+# Projects are declared ONLY here (YAML). Process start upserts the SQLite registry.
+# Issue submit / CLI / webhook hard-fail on unknown names — no create-on-submit.
+# source_path / git / test / agent flavors live under the project; not on the submit form.
+# projects:
+#   acme:
+#     source_path: /path/to/acme     # local snapshot mode; omit when using git
+#     # git:
+#     #   repo_url: "git@github.com:myorg/acme.git"
+#     #   base_branch: main
+#     #   push: false
+#     #   create_pr: false
+#     #   auth:
+#     #     type: ssh_key
+#     # test:
+#     #   command: "go test ./..."
+#     #   timeout: 60s
+#     #   image: "golang:1.22"
+#     #   secrets_env: []
+#     trust_external: false
+#     agents:
+#       researcher:
+#         default: thorough          # used when submit omits a choice
+#         flavors:
+#           thorough:
+#             model: { provider: openai, model: o3-mini }
+#             system_prompt_append: "Prefer root-cause depth..."
+#           cheap:
+#             model: { provider: openai, model: gpt-4o-mini }
+#       planner:
+#         default: standard
+#         flavors:
+#           standard: {}             # inherits global + built-in
+#       implementer:
+#         default: coder
+#         flavors:
+#           coder:
+#             model: { provider: anthropic, model: claude-sonnet-4 }
 
 # MCP servers (deny by default). Only agents that list a server in mcp_servers see its tools.
 # mcp_servers:

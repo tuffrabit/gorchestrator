@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -104,7 +105,7 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	return &Engine{
+	e := &Engine{
 		cfg:       cfg,
 		store:     store,
 		db:        db,
@@ -117,7 +118,115 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		audit:     sqlite.NewAuditRepo(db),
 		notifs:    sqlite.NewNotificationRepo(db),
 		bus:       NewEventBus(),
-	}, nil
+	}
+	if err := e.SyncProjects(); err != nil {
+		_ = e.Close()
+		return nil, fmt.Errorf("sync projects: %w", err)
+	}
+	return e, nil
+}
+
+// SyncProjects upserts the SQLite project registry from cfg.Projects (YAML).
+// Missing names are created; existing names have config_json refreshed.
+// Projects present only in SQLite are left in place (historical issues) but
+// cannot accept new work until listed in YAML.
+func (e *Engine) SyncProjects() error {
+	if e.cfg.Projects == nil {
+		return nil
+	}
+	for name, pc := range e.cfg.Projects {
+		data, err := json.Marshal(pc)
+		if err != nil {
+			return fmt.Errorf("marshal project %q: %w", name, err)
+		}
+		existing, err := e.projects.GetByName(name)
+		if err != nil {
+			return fmt.Errorf("get project %q: %w", name, err)
+		}
+		if existing == nil {
+			if _, err := e.projects.CreateWithConfig(name, string(data)); err != nil {
+				return fmt.Errorf("create project %q: %w", name, err)
+			}
+			continue
+		}
+		if err := e.projects.UpdateConfigJSON(existing.ID, string(data)); err != nil {
+			return fmt.Errorf("update project %q: %w", name, err)
+		}
+		existing.ConfigJSON = string(data)
+	}
+	return nil
+}
+
+// resolveRegisteredProject requires name ∈ YAML projects map and a synced DB row.
+func (e *Engine) resolveRegisteredProject(name string) (*sqlite.Project, error) {
+	if name == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+	if e.cfg.Projects == nil {
+		return nil, fmt.Errorf("unknown project %q: no projects declared in config", name)
+	}
+	if _, ok := e.cfg.Projects[name]; !ok {
+		return nil, fmt.Errorf("unknown project %q: not declared in config projects map", name)
+	}
+	p, err := e.projects.GetByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("get project %q: %w", name, err)
+	}
+	if p == nil {
+		return nil, fmt.Errorf("project %q registered in config but missing from database; restart to sync", name)
+	}
+	return p, nil
+}
+
+// ProjectConfig returns the YAML project config for a name, if registered.
+func (e *Engine) ProjectConfig(name string) (config.ProjectConfig, bool) {
+	if e.cfg.Projects == nil {
+		return config.ProjectConfig{}, false
+	}
+	pc, ok := e.cfg.Projects[name]
+	return pc, ok
+}
+
+// RegisteredProjectNames returns sorted names from the YAML projects map.
+func (e *Engine) RegisteredProjectNames() []string {
+	if e.cfg.Projects == nil {
+		return nil
+	}
+	names := make([]string, 0, len(e.cfg.Projects))
+	for n := range e.cfg.Projects {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ListRegisteredProjects returns synced project rows for names present in YAML,
+// each paired with its flavor catalog for the submit UI.
+func (e *Engine) ListRegisteredProjects(ctx context.Context) ([]RegisteredProject, error) {
+	_ = ctx
+	names := e.RegisteredProjectNames()
+	out := make([]RegisteredProject, 0, len(names))
+	for _, name := range names {
+		p, err := e.projects.GetByName(name)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil {
+			continue
+		}
+		pc := e.cfg.Projects[name]
+		out = append(out, RegisteredProject{
+			Project: p,
+			Agents:  pc.FlavorCatalog(),
+		})
+	}
+	return out, nil
+}
+
+// RegisteredProject is a YAML-registered project with its flavor catalog.
+type RegisteredProject struct {
+	Project *sqlite.Project
+	Agents  map[string]config.AgentFlavorInfo
 }
 
 func openStorage(cfg *config.Config) (storage.Port, error) {
@@ -203,11 +312,10 @@ func (e *Engine) Close() error {
 	return nil
 }
 
-// RunOptions holds the CLI flags for a new run.
+// RunOptions holds parameters for a new run or queue submit.
 type RunOptions struct {
 	ProjectName string
 	IssueTitle  string
-	SourcePath  string
 	DryRun      bool
 	// Source is the trigger provenance: manual | webhook | github | jira | ...
 	Source string
@@ -215,22 +323,24 @@ type RunOptions struct {
 	ExternalID string
 	// TrustExternal skips the forced human implementer gate for external sources.
 	TrustExternal bool
+	// AgentFlavors is an optional cast: map agent type → flavor name.
+	// Missing keys are filled from the project's default when flavors exist.
+	AgentFlavors map[string]string
 }
 
 // Run creates a new issue and executes the full pipeline.
 func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
-	project, err := e.projects.GetOrCreate(opts.ProjectName)
+	project, err := e.resolveRegisteredProject(opts.ProjectName)
 	if err != nil {
-		return fmt.Errorf("get or create project: %w", err)
+		return err
 	}
 
-	if opts.SourcePath != "" {
-		if err := e.setProjectSourcePath(project, opts.SourcePath); err != nil {
-			return fmt.Errorf("set project source path: %w", err)
-		}
+	castJSON, err := e.resolveAndMarshalCast(project.Name, opts.AgentFlavors)
+	if err != nil {
+		return err
 	}
 
-	issue, err := e.issues.Create(project.ID, opts.IssueTitle)
+	issue, err := e.issues.CreateWithCast(project.ID, opts.IssueTitle, castJSON)
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)
 	}
@@ -314,22 +424,62 @@ func (e *Engine) Resume(ctx context.Context, opts ResumeOptions) error {
 	return e.runPipeline(ctx, project, issue, issue.DryRun)
 }
 
-// agentConfigForIssue returns agent config with untrusted-input defaults applied.
-func (e *Engine) agentConfigForIssue(project *sqlite.Project, issue *sqlite.Issue, phaseName string) config.AgentConfig {
-	phaseCfg := e.cfg.Agent(phaseAgentType(phaseName))
+// agentConfigForIssue returns agent config with project flavor cast and
+// untrusted-input defaults applied.
+func (e *Engine) agentConfigForIssue(project *sqlite.Project, issue *sqlite.Issue, phaseName string) (config.AgentConfig, error) {
+	agentType := phaseAgentType(phaseName)
+	phaseCfg := e.cfg.Agent(agentType)
+
+	pc, err := e.typedProjectConfig(project)
+	if err != nil {
+		return phaseCfg, err
+	}
+	cast := parseIssueCast(issue.AgentFlavorsJSON)
+	flavorName := cast[agentType]
+	overlay, ok, err := pc.FlavorOverlay(agentType, flavorName)
+	if err != nil {
+		return phaseCfg, err
+	}
+	if ok {
+		phaseCfg = config.MergeAgent(phaseCfg, overlay)
+	}
+
 	// Untrusted external issues default to human gate before implementation.
 	if phaseName == "implementation" && trigger.IsExternal(issue.Source) {
-		trust := e.cfg.Triggers.TrustExternal
-		if pc, err := e.projectConfig(project); err == nil {
-			if v, ok := pc["trust_external"].(bool); ok {
-				trust = v
-			}
-		}
+		trust := e.cfg.Triggers.TrustExternal || pc.TrustExternal
 		if !trust {
 			phaseCfg.Adjudicator = "human"
 		}
 	}
-	return phaseCfg
+	return phaseCfg, nil
+}
+
+func (e *Engine) resolveAndMarshalCast(projectName string, requested map[string]string) (string, error) {
+	pc, ok := e.cfg.Projects[projectName]
+	if !ok {
+		return "{}", nil
+	}
+	cast, err := pc.ResolveCast(requested)
+	if err != nil {
+		return "", err
+	}
+	if len(cast) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(cast)
+	if err != nil {
+		return "", fmt.Errorf("marshal agent flavors: %w", err)
+	}
+	return string(data), nil
+}
+
+func parseIssueCast(raw string) map[string]string {
+	out := map[string]string{}
+	if raw == "" || raw == "{}" {
+		return out
+	}
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
 }
 
 // runPipeline executes research -> plan -> implementation.
@@ -355,7 +505,10 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		if currentIdx < phaseIdx {
 			phaseName = currentPhase
 		}
-		phaseCfg := e.agentConfigForIssue(project, issue, phaseName)
+		phaseCfg, err := e.agentConfigForIssue(project, issue, phaseName)
+		if err != nil {
+			return fmt.Errorf("agent config for %s: %w", phaseName, err)
+		}
 
 		switch status {
 		case "done":
@@ -1215,134 +1368,83 @@ func (e *Engine) seedWorkspace(ctx context.Context, projectID, issueID int64, so
 	return copyStorageDir(ctx, e.store, sourceSnapshotPath, dest)
 }
 
-// setProjectSourcePath stores or updates the project's source path in config_json.
-func (e *Engine) setProjectSourcePath(project *sqlite.Project, sourcePath string) error {
-	cfg, err := e.projectConfig(project)
-	if err != nil {
-		return err
+// typedProjectConfig prefers live YAML (cfg.Projects); falls back to config_json
+// for orphan historical projects no longer in YAML.
+func (e *Engine) typedProjectConfig(project *sqlite.Project) (config.ProjectConfig, error) {
+	if e.cfg.Projects != nil {
+		if pc, ok := e.cfg.Projects[project.Name]; ok {
+			return pc, nil
+		}
 	}
-	cfg["source_path"] = sourcePath
-	return e.writeProjectConfig(project, cfg)
+	var pc config.ProjectConfig
+	if project.ConfigJSON == "" || project.ConfigJSON == "{}" {
+		return pc, nil
+	}
+	if err := json.Unmarshal([]byte(project.ConfigJSON), &pc); err != nil {
+		return pc, fmt.Errorf("parse project config: %w", err)
+	}
+	return pc, nil
 }
 
-// setProjectGitConfig stores git settings in projects.config_json.
-func (e *Engine) setProjectGitConfig(project *sqlite.Project, gitCfg gorchgit.Config) error {
-	cfg, err := e.projectConfig(project)
-	if err != nil {
-		return err
-	}
-	raw, err := json.Marshal(gitCfg)
-	if err != nil {
-		return err
-	}
-	var asMap map[string]any
-	if err := json.Unmarshal(raw, &asMap); err != nil {
-		return err
-	}
-	cfg["git"] = asMap
-	return e.writeProjectConfig(project, cfg)
-}
-
-func (e *Engine) writeProjectConfig(project *sqlite.Project, cfg map[string]any) error {
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal project config: %w", err)
-	}
-	_, err = e.db.Exec(`UPDATE projects SET config_json = ? WHERE id = ?`, string(data), project.ID)
-	if err != nil {
-		return fmt.Errorf("update project config: %w", err)
-	}
-	project.ConfigJSON = string(data)
-	return nil
-}
-
-// projectSourcePath extracts the source path from project config_json.
+// projectSourcePath extracts the source path from project config.
 func (e *Engine) projectSourcePath(project *sqlite.Project) (string, error) {
-	cfg, err := e.projectConfig(project)
+	pc, err := e.typedProjectConfig(project)
 	if err != nil {
 		return "", err
 	}
-	if v, ok := cfg["source_path"].(string); ok {
-		return v, nil
-	}
-	return "", nil
+	return pc.SourcePath, nil
 }
 
-// projectGitConfig extracts git config from projects.config_json.
+// projectGitConfig extracts git config from project config.
 func (e *Engine) projectGitConfig(project *sqlite.Project) (gorchgit.Config, error) {
-	cfg, err := e.projectConfig(project)
+	pc, err := e.typedProjectConfig(project)
 	if err != nil {
 		return gorchgit.Config{}, err
 	}
-	raw, ok := cfg["git"]
-	if !ok || raw == nil {
+	if pc.Git == nil || strings.TrimSpace(pc.Git.RepoURL) == "" {
 		return gorchgit.Config{}, nil
 	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return gorchgit.Config{}, err
-	}
-	var out gorchgit.Config
-	if err := json.Unmarshal(b, &out); err != nil {
-		return gorchgit.Config{}, fmt.Errorf("parse project git config: %w", err)
-	}
-	return out, nil
+	return gorchgit.Config{
+		RepoURL:     pc.Git.RepoURL,
+		BaseBranch:  pc.Git.BaseBranch,
+		Push:        pc.Git.Push,
+		CreatePR:    pc.Git.CreatePR,
+		AuthorName:  pc.Git.AuthorName,
+		AuthorEmail: pc.Git.AuthorEmail,
+		Auth: gorchgit.AuthConfig{
+			Type:       gorchgit.AuthType(pc.Git.Auth.Type),
+			SSHKeyPath: pc.Git.Auth.SSHKeyPath,
+			TokenEnv:   pc.Git.Auth.TokenEnv,
+			GHProfile:  pc.Git.Auth.GHProfile,
+		},
+	}, nil
 }
 
-// projectTestConfig extracts the immutable test command block from config_json.
+// projectTestConfig extracts the immutable test command block.
 func (e *Engine) projectTestConfig(project *sqlite.Project) (tools.TestConfig, error) {
-	cfg, err := e.projectConfig(project)
+	pc, err := e.typedProjectConfig(project)
 	if err != nil {
 		return tools.TestConfig{}, err
 	}
-	raw, ok := cfg["test"]
-	if !ok || raw == nil {
+	if pc.Test == nil || pc.Test.Command == "" {
 		return tools.TestConfig{}, nil
 	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return tools.TestConfig{}, err
-	}
-	var wire struct {
-		Command    string   `json:"command"`
-		Image      string   `json:"image"`
-		Timeout    string   `json:"timeout"`
-		CPU        string   `json:"cpu"`
-		Memory     string   `json:"memory"`
-		SecretsEnv []string `json:"secrets_env"`
-		Runtime    string   `json:"runtime"`
-	}
-	if err := json.Unmarshal(b, &wire); err != nil {
-		return tools.TestConfig{}, fmt.Errorf("parse project test config: %w", err)
-	}
 	out := tools.TestConfig{
-		Command:    wire.Command,
-		Image:      wire.Image,
-		CPU:        wire.CPU,
-		Memory:     wire.Memory,
-		SecretsEnv: wire.SecretsEnv,
-		Runtime:    wire.Runtime,
+		Command:    pc.Test.Command,
+		Image:      pc.Test.Image,
+		CPU:        pc.Test.CPU,
+		Memory:     pc.Test.Memory,
+		SecretsEnv: pc.Test.SecretsEnv,
+		Runtime:    pc.Test.Runtime,
 	}
-	if wire.Timeout != "" {
-		d, err := time.ParseDuration(wire.Timeout)
+	if pc.Test.Timeout != "" {
+		d, err := time.ParseDuration(pc.Test.Timeout)
 		if err != nil {
 			return tools.TestConfig{}, fmt.Errorf("parse test.timeout: %w", err)
 		}
 		out.Timeout = d
 	}
 	return out, nil
-}
-
-// projectConfig parses a project's config_json into a map.
-func (e *Engine) projectConfig(project *sqlite.Project) (map[string]any, error) {
-	cfg := map[string]any{}
-	if project.ConfigJSON == "" || project.ConfigJSON == "{}" {
-		return cfg, nil
-	}
-	if err := json.Unmarshal([]byte(project.ConfigJSON), &cfg); err != nil {
-		return nil, fmt.Errorf("parse project config: %w", err)
-	}
-	return cfg, nil
 }
 
 // copyDirToStorage copies a host directory into the storage port under destKey.

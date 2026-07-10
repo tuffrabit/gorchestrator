@@ -71,6 +71,7 @@ func (s *Server) routes() {
 	s.mux.Handle("DELETE /partials/issues/{id}", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialDeleteIssue)))
 	s.mux.Handle("GET /partials/issues/{id}/drawer", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialDrawer)))
 	s.mux.Handle("GET /partials/submit", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmit)))
+	s.mux.Handle("GET /partials/submit/flavors", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitFlavors)))
 	s.mux.Handle("POST /partials/issues/{id}/decisions", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialDecide)))
 	s.mux.Handle("POST /partials/submit", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitPost)))
 
