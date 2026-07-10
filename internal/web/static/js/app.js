@@ -150,6 +150,19 @@ document.addEventListener('DOMContentLoaded', function () {
     es.addEventListener('decision_requested', onIssueEvent);
     es.addEventListener('decision_applied', onIssueEvent);
     es.addEventListener('issue_submitted', onIssueEvent);
+    es.addEventListener('issue_deleted', function (ev) {
+      try {
+        var data = JSON.parse(ev.data);
+        if (!data.issue_id) return;
+        var el = document.getElementById('issue-' + data.issue_id);
+        if (el) el.remove();
+        // Close drawer if it was showing the deleted issue.
+        var title = document.getElementById('drawer-title');
+        if (title && title.textContent && title.textContent.indexOf('#' + data.issue_id) !== -1) {
+          closeDrawer();
+        }
+      } catch (err) { /* ignore */ }
+    });
   } catch (e) { /* SSE unavailable */ }
 });
 

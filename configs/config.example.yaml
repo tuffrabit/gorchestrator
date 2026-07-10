@@ -8,7 +8,7 @@ default_model:
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
   # base_url: http://localhost:8080/v1
-  timeout: 60s
+  timeout: 360s
 
 tools:
   read_file:

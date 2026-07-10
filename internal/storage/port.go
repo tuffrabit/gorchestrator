@@ -27,4 +27,9 @@ type Port interface {
 
 	// Mkdir creates a directory (and parents if needed).
 	Mkdir(ctx context.Context, path string) error
+
+	// RemoveAll deletes the file or directory tree at path.
+	// Missing paths are not an error. Implementations must refuse to remove
+	// the storage root (empty, ".", "/").
+	RemoveAll(ctx context.Context, path string) error
 }

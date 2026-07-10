@@ -376,6 +376,10 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			// Fall through and re-run the phase (human or adjudicator requested retry).
 		}
 
+		// Issue status is independent of phase result.json status. Mark the
+		// issue in_progress on the new phase *before* work starts so SSE/UI
+		// can show the transition (research → plan → implementation).
+		_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusInProgress, phaseName)
 		e.Publish(Event{
 			Type: EventPhaseStarted, IssueID: issue.ID, ProjectID: project.ID,
 			Phase: phaseName, Status: sqlite.StatusInProgress,
@@ -391,14 +395,28 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			return fmt.Errorf("run phase %s: %w", phaseName, err)
 		}
 
-		_ = e.issues.UpdateStatus(issue.ID, result.Status, phaseName)
+		issueStatus := mapPhaseResultToIssueStatus(result.Status)
+		// On phase success, point current_phase at the *next* stage immediately so
+		// the dashboard shows the transition before the next phase_started lands.
+		phaseForIssue := phaseName
+		if result.Status == "done" {
+			if next := nextPhaseName(phaseName); next != "" {
+				phaseForIssue = next
+			}
+		}
+		_ = e.issues.UpdateStatus(issue.ID, issueStatus, phaseForIssue)
 		e.Publish(Event{
 			Type: EventPhaseFinished, IssueID: issue.ID, ProjectID: project.ID,
-			Phase: phaseName, Status: result.Status, Message: result.Error,
+			Phase: phaseName, Status: issueStatus, Message: result.Error,
+			Data: map[string]any{
+				"phase_result":  result.Status,
+				"current_phase": phaseForIssue,
+			},
 		})
 
 		switch result.Status {
 		case "done":
+			// Pipeline continues; issue stays in_progress until all phases finish.
 			continue
 		case "waiting_human":
 			e.Publish(Event{
@@ -510,6 +528,10 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 		if phase == "implementation" {
 			allowlist = append(allowlist, storage.WorkspacePath(project.ID, issue.ID))
 		}
+
+		// Agents need explicit path guidance; short names like "source" only
+		// work once BasePath/allowlist resolution is documented in context.
+		input = input + pathGuide(project.ID, issue.ID, phase, allowlist)
 
 		totalTokens := 0
 		loopCount := 0
@@ -654,10 +676,12 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 // finish_task done flag, rationale, token count, and any error.
 func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, allowlist []string, attempt, loop int, runID int64, dryRun bool) ([]byte, bool, string, int, error) {
 	outputWritten := false
+	issueDir := storage.IssueDir(projectID, issueID)
 	bt := &tools.BoundTools{
 		Storage:          e.store,
 		RootPath:         e.cfg.StorageRoot,
 		Allowlist:        allowlist,
+		BasePath:         issueDir,
 		OutputPath:       outputPath,
 		ReadFileMaxBytes: e.cfg.Tools.ReadFile.MaxBytes,
 		ReadFileMaxLines: e.cfg.Tools.ReadFile.MaxLines,
@@ -667,6 +691,8 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		wsKey := storage.WorkspacePath(projectID, issueID)
 		bt.WorkspacePath = wsKey
 		bt.WorkspaceHostPath = storage.Abs(e.cfg.StorageRoot, wsKey)
+		// Default short paths (list ".", read "main.go") to the workspace.
+		bt.BasePath = wsKey
 		// Resolve project for test config (issue → project).
 		if issue, ierr := e.issues.Get(issueID); ierr == nil && issue != nil {
 			if project, perr := e.projects.Get(issue.ProjectID); perr == nil && project != nil {
@@ -967,6 +993,29 @@ func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, p
 	}
 	input += fmt.Sprintf("\n\nAccepted %s output:\n%s", prev, string(data))
 	return input, nil
+}
+
+// pathGuide tells the agent how tool paths work for this issue. Without it,
+// models guess names like "attempts" or "." against the storage root and
+// loop on "path not allowed".
+func pathGuide(projectID, issueID int64, phase string, allowlist []string) string {
+	issueDir := storage.IssueDir(projectID, issueID)
+	source := storage.SourcePath(projectID, issueID)
+	var b strings.Builder
+	b.WriteString("\n\n## Path guide for tools\n")
+	b.WriteString("Tool paths are relative to the issue directory (short names like `source`), ")
+	b.WriteString("or full storage keys under the allowlist. Path traversal (`..`) is rejected.\n")
+	b.WriteString(fmt.Sprintf("- Issue root (`list_directory` with path omitted or `.`): `%s`\n", issueDir))
+	b.WriteString(fmt.Sprintf("- Source snapshot (start research/plan here): `%s` or `source`\n", source))
+	if phase == "implementation" {
+		ws := storage.WorkspacePath(projectID, issueID)
+		b.WriteString(fmt.Sprintf("- Workspace (default base for implementer; edit here): `%s`\n", ws))
+	}
+	b.WriteString("- Allowlist prefixes:\n")
+	for _, a := range allowlist {
+		b.WriteString(fmt.Sprintf("  - `%s`\n", a))
+	}
+	return b.String()
 }
 
 // buildRetryContext appends the rejected attempt's output and feedback.
@@ -1413,6 +1462,28 @@ func phaseAgentType(phase string) string {
 	}
 }
 
+// mapPhaseResultToIssueStatus converts a phase result.json status into an
+// issue-row status. Phase "done" must not mark the issue done — the pipeline
+// may still have plan/implementation left. Only runPipeline's final UpdateStatus
+// sets issue status to done after all phases complete.
+func mapPhaseResultToIssueStatus(phaseResult string) string {
+	switch phaseResult {
+	case "done", "retry", "in_progress":
+		return sqlite.StatusInProgress
+	case "waiting_human":
+		return sqlite.StatusWaitingHuman
+	case "failed":
+		return sqlite.StatusFailed
+	case "cancelled":
+		return sqlite.StatusCancelled
+	default:
+		if phaseResult == "" {
+			return sqlite.StatusInProgress
+		}
+		return phaseResult
+	}
+}
+
 // previousPhase returns the phase that feeds into the given phase.
 func previousPhase(phase string) string {
 	switch phase {
@@ -1420,6 +1491,18 @@ func previousPhase(phase string) string {
 		return "research"
 	case "implementation":
 		return "plan"
+	default:
+		return ""
+	}
+}
+
+// nextPhaseName returns the following pipeline phase, or "" after implementation.
+func nextPhaseName(phase string) string {
+	switch phase {
+	case "research":
+		return "plan"
+	case "plan":
+		return "implementation"
 	default:
 		return ""
 	}
@@ -1491,7 +1574,7 @@ func schemasFromTools(toolList []tool.Tool) ([]map[string]any, error) {
 		out = append(out, map[string]any{
 			"name":        decl.Name,
 			"description": decl.Description,
-			"parameters":  llm.SchemaToMap(decl.Parameters),
+			"parameters":  llm.DeclarationParameters(decl),
 		})
 	}
 	return out, nil

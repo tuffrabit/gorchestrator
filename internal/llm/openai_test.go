@@ -185,6 +185,73 @@ func TestOpenAIModel_ToolSchemaUsesJSONSchemaTypes(t *testing.T) {
 	}
 }
 
+func TestOpenAIModel_ToolSchemaFromParametersJsonSchema(t *testing.T) {
+	// ADK functiontool.New sets ParametersJsonSchema, not Parameters.
+	// Without reading it, tools ship with empty properties and llama.cpp
+	// models loop calling list_directory with {}.
+	var sawTools atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("parse body: %v", err)
+		}
+		tools, _ := req["tools"].([]any)
+		if len(tools) != 1 {
+			t.Fatalf("tools len = %d", len(tools))
+		}
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		if fn["name"] != "list_directory" {
+			t.Fatalf("name = %v", fn["name"])
+		}
+		params := fn["parameters"].(map[string]any)
+		props, ok := params["properties"].(map[string]any)
+		if !ok || props["path"] == nil {
+			t.Fatalf("parameters must include path property, got %#v", params)
+		}
+		path := props["path"].(map[string]any)
+		if path["type"] != "string" {
+			t.Fatalf("path.type = %v", path["type"])
+		}
+		sawTools.Store(true)
+		_ = json.NewEncoder(w).Encode(openAIChatResponse{
+			Choices: []choice{{Message: message{Role: "assistant", Content: "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	m := NewOpenAIModel("local-model", "", server.URL, 0)
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("list root", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{
+					Name:        "list_directory",
+					Description: "List a directory",
+					// Parameters intentionally nil — like real ADK function tools.
+					ParametersJsonSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path": map[string]any{
+								"type":        "string",
+								"description": "Relative path",
+							},
+						},
+					},
+				}},
+			}},
+		},
+	}
+	for _, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !sawTools.Load() {
+		t.Fatal("server did not receive tools")
+	}
+}
+
 func TestOpenAIModel_convertContents_ToolRoundTripNoEmptyUser(t *testing.T) {
 	// Simulates ADK history: user text → assistant tool_call → user function response only.
 	m := &OpenAIModel{model: "local"}

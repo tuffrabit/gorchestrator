@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
@@ -39,8 +38,7 @@ func writeFile(ctx context.Context, bt *BoundTools, args WriteFileArgs) (WriteFi
 	if args.Path == "" {
 		return WriteFileResult{}, fmt.Errorf("path is required")
 	}
-	fullPath := filepath.Join(bt.WorkspacePath, args.Path)
-	resolved, ok := resolveAllowedPath(fullPath, []string{bt.WorkspacePath})
+	resolved, ok := resolveAllowedPath(args.Path, []string{bt.WorkspacePath}, bt.WorkspacePath)
 	if !ok {
 		return WriteFileResult{}, fmt.Errorf("path escapes workspace: %s", args.Path)
 	}

@@ -163,7 +163,36 @@ func (fs *FS) Mkdir(ctx context.Context, path string) error {
 	return os.MkdirAll(abs, 0o755)
 }
 
+// RemoveAll implements Port.
+func (fs *FS) RemoveAll(ctx context.Context, path string) error {
+	if err := refuseRootRemove(path); err != nil {
+		return err
+	}
+	abs, err := fs.resolve(path)
+	if err != nil {
+		return err
+	}
+	// Extra belt: never delete the storage root itself.
+	if abs == fs.root {
+		return fmt.Errorf("refusing to remove storage root")
+	}
+	if err := os.RemoveAll(abs); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Root returns the absolute storage root.
 func (fs *FS) Root() string {
 	return fs.root
+}
+
+// refuseRootRemove blocks empty / "." / "/" paths that would wipe the store.
+func refuseRootRemove(path string) error {
+	p := strings.TrimSpace(path)
+	p = strings.Trim(p, "/")
+	if p == "" || p == "." {
+		return fmt.Errorf("refusing to remove storage root")
+	}
+	return nil
 }

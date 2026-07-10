@@ -231,14 +231,10 @@ func (m *AnthropicModel) convertContents(contents []*genai.Content, cfg *genai.G
 func (m *AnthropicModel) convertTools(decls []*genai.FunctionDeclaration) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(decls))
 	for _, d := range decls {
-		params := SchemaToMap(d.Parameters)
-		if params == nil {
-			params = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
 		out = append(out, map[string]any{
-			"name":        d.Name,
-			"description": d.Description,
-			"input_schema": params,
+			"name":         d.Name,
+			"description":  d.Description,
+			"input_schema": DeclarationParameters(d),
 		})
 	}
 	return out, nil

@@ -312,16 +312,12 @@ func functionDeclarations(cfg *genai.GenerateContentConfig) []*genai.FunctionDec
 func (m *OpenAIModel) convertTools(decls []*genai.FunctionDeclaration) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(decls))
 	for _, d := range decls {
-		params := SchemaToMap(d.Parameters)
-		if params == nil {
-			params = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
 		out = append(out, map[string]any{
 			"type": "function",
 			"function": map[string]any{
 				"name":        d.Name,
 				"description": d.Description,
-				"parameters":  params,
+				"parameters":  DeclarationParameters(d),
 			},
 		})
 	}

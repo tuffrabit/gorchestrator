@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
@@ -33,8 +32,7 @@ func newUpdateFileTool(bt *BoundTools) (tool.Tool, error) {
 		if args.Path == "" {
 			return UpdateFileResult{}, fmt.Errorf("path is required")
 		}
-		fullPath := filepath.Join(bt.WorkspacePath, args.Path)
-		resolved, ok := resolveAllowedPath(fullPath, []string{bt.WorkspacePath})
+		resolved, ok := resolveAllowedPath(args.Path, []string{bt.WorkspacePath}, bt.WorkspacePath)
 		if !ok {
 			return UpdateFileResult{}, fmt.Errorf("path escapes workspace: %s", args.Path)
 		}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -202,6 +203,30 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	if err := render(w, "partials/issue_card.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handlePartialDeleteIssue(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	if err := s.eng.DeleteIssue(r.Context(), id); err != nil {
+		if errors.Is(err, orchestrator.ErrIssueNotFound) {
+			http.Error(w, "issue not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	var uid *int64
+	if u != nil {
+		uid = &u.ID
+	}
+	_ = s.eng.Audit().Record(uid, "delete_issue", "issue", orchestrator.IssueIDString(id), nil)
+	// Empty body + outerHTML swap removes the card from the feed.
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handlePartialDecide(w http.ResponseWriter, r *http.Request) {

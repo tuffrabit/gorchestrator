@@ -211,6 +211,42 @@ func (r *IssueRepo) Requeue(id int64) error {
 	return err
 }
 
+// Delete hard-deletes an issue and all dependent rows (runs, decisions,
+// notifications). Audit log entries are retained (target_id is not a FK).
+// Returns sql.ErrNoRows when the issue id does not exist.
+func (r *IssueRepo) Delete(id int64) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin delete issue: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM runs WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete runs: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM decisions WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete decisions: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM notifications WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete notifications: %w", err)
+	}
+	res, err := tx.Exec(`DELETE FROM issues WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete issue: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete issue: %w", err)
+	}
+	return nil
+}
+
 func scanIssue(row *sql.Row) (*Issue, error) {
 	i := &Issue{}
 	var dry int

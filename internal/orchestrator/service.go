@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -23,13 +25,22 @@ type DecideOptions struct {
 	Force     bool   // allow decide when not waiting_human (manual intervene)
 }
 
+// PhaseStep is one step in the research → plan → implementation strip.
+type PhaseStep struct {
+	Name   string // research | plan | implementation
+	Agent  string // researcher | planner | implementer
+	State  string // pending | current | done | failed | waiting
+	Status string // raw phase result.json status (may be empty)
+}
+
 // IssueView is a read model for API/dashboard consumers.
 type IssueView struct {
 	Issue       *sqlite.Issue
 	ProjectName string
 	TokenTotal  int
 	Attempt     int
-	PhaseStatus string // filesystem result status for current phase
+	PhaseStatus string      // filesystem result status for current phase
+	Phases      []PhaseStep // research → plan → implementation strip
 }
 
 // SubmitIssue creates the issue (snapshot source if configured), sets status
@@ -414,6 +425,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 	tokens, _ := e.runs.TokenTotalForIssue(issue.ID)
 	phaseStatus := ""
 	attempt := 0
+	var phases []PhaseStep
 	if project != nil {
 		phase, status, err := e.currentPhaseState(project.ID, issue.ID)
 		if err == nil {
@@ -427,6 +439,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 				}
 			}
 		}
+		phases = e.buildPhaseSteps(ctx, project.ID, issue)
 	}
 	return &IssueView{
 		Issue:       issue,
@@ -434,7 +447,57 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		TokenTotal:  tokens,
 		Attempt:     attempt,
 		PhaseStatus: phaseStatus,
+		Phases:      phases,
 	}, nil
+}
+
+// buildPhaseSteps derives the dashboard phase strip from issue state + each
+// phase's result.json. Completed phases show as done; the issue's current_phase
+// shows as current while the issue is still active.
+func (e *Engine) buildPhaseSteps(ctx context.Context, projectID int64, issue *sqlite.Issue) []PhaseStep {
+	names := []string{"research", "plan", "implementation"}
+	steps := make([]PhaseStep, 0, len(names))
+	curIdx := indexOf(names, issue.CurrentPhase)
+
+	for i, name := range names {
+		step := PhaseStep{
+			Name:  name,
+			Agent: phaseAgentType(name),
+			State: "pending",
+		}
+		if res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issue.ID, name)); err == nil {
+			step.Status = res.Status
+		}
+
+		switch {
+		case issue.Status == sqlite.StatusDone:
+			step.State = "done"
+		case step.Status == "done":
+			step.State = "done"
+		case step.Status == "failed" || step.Status == "cancelled":
+			step.State = "failed"
+		case step.Status == "waiting_human" || (issue.Status == sqlite.StatusWaitingHuman && name == issue.CurrentPhase):
+			step.State = "waiting"
+		case name == issue.CurrentPhase && issue.Status != sqlite.StatusFailed && issue.Status != sqlite.StatusCancelled:
+			// Active issue on this phase (running, queued mid-pipeline, or retrying).
+			if step.Status == "done" {
+				step.State = "done"
+			} else {
+				step.State = "current"
+			}
+		case curIdx >= 0 && i < curIdx:
+			// Behind the current phase pointer — treat as completed unless FS says otherwise.
+			if step.Status == "failed" || step.Status == "cancelled" {
+				step.State = "failed"
+			} else {
+				step.State = "done"
+			}
+		default:
+			step.State = "pending"
+		}
+		steps = append(steps, step)
+	}
+	return steps
 }
 
 // ArtifactPath resolves a relative artifact path under an issue directory.
@@ -467,4 +530,42 @@ func (e *Engine) ReadArtifact(ctx context.Context, issueID int64, rel string) ([
 // IssueIDString is a helper for audit target ids.
 func IssueIDString(id int64) string {
 	return strconv.FormatInt(id, 10)
+}
+
+// ErrIssueNotFound is returned when DeleteIssue targets a missing id.
+var ErrIssueNotFound = fmt.Errorf("issue not found")
+
+// DeleteIssue permanently removes an issue: its storage directory tree
+// (projects/{pid}/issues/{iid}/…) and all related DB rows (issue, runs,
+// decisions, notifications). Audit history is kept. This is a hard delete.
+func (e *Engine) DeleteIssue(ctx context.Context, issueID int64) error {
+	issue, err := e.issues.Get(issueID)
+	if err != nil {
+		return fmt.Errorf("get issue: %w", err)
+	}
+	if issue == nil {
+		return ErrIssueNotFound
+	}
+
+	dir := storage.IssueDir(issue.ProjectID, issue.ID)
+	if err := e.store.RemoveAll(ctx, dir); err != nil {
+		return fmt.Errorf("remove issue storage %s: %w", dir, err)
+	}
+
+	if err := e.issues.Delete(issue.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrIssueNotFound
+		}
+		return fmt.Errorf("delete issue row: %w", err)
+	}
+
+	e.Publish(Event{
+		Type:      EventIssueDeleted,
+		IssueID:   issue.ID,
+		ProjectID: issue.ProjectID,
+		Phase:     issue.CurrentPhase,
+		Status:    "deleted",
+		Message:   issue.Title,
+	})
+	return nil
 }

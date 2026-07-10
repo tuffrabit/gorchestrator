@@ -95,6 +95,57 @@ func TestAPI_SubmitListGet(t *testing.T) {
 	}
 }
 
+func TestAPI_DeleteIssue(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	defer eng.Close()
+
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	h := srv.Handler()
+
+	body := `{"project":"acme","title":"delete via api","dry_run":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := int64(created["id"].(float64))
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/issues/"+strconv.FormatInt(id, 10), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/issues/"+strconv.FormatInt(id, 10), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get after delete = %d, want 404", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/issues/"+strconv.FormatInt(id, 10), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second delete = %d, want 404", rec.Code)
+	}
+}
+
 func TestAPI_ArtifactPathTraversalRejected(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)

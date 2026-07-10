@@ -6,6 +6,62 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestDeclarationParameters_PrefersParametersJsonSchema(t *testing.T) {
+	// ADK functiontool puts the real schema here; Parameters is nil.
+	d := &genai.FunctionDeclaration{
+		Name: "list_directory",
+		ParametersJsonSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "Relative path",
+				},
+			},
+			"required": []any{"path"},
+		},
+	}
+	m := DeclarationParameters(d)
+	if m["type"] != "object" {
+		t.Fatalf("type = %v", m["type"])
+	}
+	props, ok := m["properties"].(map[string]any)
+	if !ok || props["path"] == nil {
+		t.Fatalf("properties = %#v, want path", m["properties"])
+	}
+}
+
+func TestDeclarationParameters_FallsBackToParameters(t *testing.T) {
+	// finish_task and hand-built tools use Parameters.
+	d := &genai.FunctionDeclaration{
+		Name: "finish_task",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"done":      {Type: genai.TypeBoolean},
+				"rationale": {Type: genai.TypeString},
+			},
+			Required: []string{"done", "rationale"},
+		},
+	}
+	m := DeclarationParameters(d)
+	props := m["properties"].(map[string]any)
+	if props["done"].(map[string]any)["type"] != "boolean" {
+		t.Fatalf("done type = %#v", props["done"])
+	}
+}
+
+func TestDeclarationParameters_EmptyFallback(t *testing.T) {
+	m := DeclarationParameters(&genai.FunctionDeclaration{Name: "noop"})
+	if m["type"] != "object" {
+		t.Fatalf("type = %v", m["type"])
+	}
+	props, ok := m["properties"].(map[string]any)
+	if !ok || len(props) != 0 {
+		t.Fatalf("properties = %#v", m["properties"])
+	}
+}
+
 func TestSchemaToMap_LowercaseJSONSchemaTypes(t *testing.T) {
 	s := &genai.Schema{
 		Type:        genai.TypeObject,

@@ -106,6 +106,14 @@ button, input, select, textarea {
 .btn-pass { border-color: var(--bar-in-progress); color: var(--bar-in-progress); }
 .btn-fail { border-color: var(--bar-failed); color: var(--bar-failed); }
 .btn-retry { border-color: var(--bar-waiting); color: var(--bar-waiting); }
+.btn-danger {
+  border-color: var(--bar-failed);
+  color: var(--bar-failed);
+  margin-left: auto;
+}
+.btn-danger:hover {
+  background: color-mix(in srgb, var(--bar-failed) 18%, transparent);
+}
 .user-chip {
   color: var(--text-muted);
   font-size: 0.85rem;
@@ -227,16 +235,83 @@ button, input, select, textarea {
   padding: 0 1rem 1rem;
   border-top: 1px solid var(--border-subtle);
 }
+.phase-chip {
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  background: color-mix(in srgb, var(--accent-pink) 18%, transparent);
+  color: var(--accent-pink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
 .phase-strip {
   display: flex;
-  gap: 0.5rem;
-  align-items: center;
+  gap: 0.45rem;
+  align-items: stretch;
   margin: 0.85rem 0;
   font-size: 0.85rem;
   color: var(--text-muted);
+  flex-wrap: wrap;
 }
-.phase-strip .current { color: var(--accent-pink); font-weight: 600; }
-.phase-strip .done { color: var(--bar-in-progress); }
+.phase-sep {
+  color: var(--border-subtle);
+  align-self: center;
+  user-select: none;
+}
+.phase-step {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 6.5rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-app) 60%, transparent);
+}
+.phase-step .phase-name {
+  font-weight: 600;
+  text-transform: lowercase;
+}
+.phase-step .phase-agent {
+  font-size: 0.72rem;
+  opacity: 0.75;
+}
+.phase-step .phase-mark {
+  margin-right: 0.25rem;
+}
+.phase-step.pending {
+  opacity: 0.55;
+}
+.phase-step.current {
+  color: var(--accent-pink);
+  border-color: color-mix(in srgb, var(--accent-pink) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-pink) 12%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-pink) 25%, transparent);
+}
+.phase-step.current .phase-mark.pulse {
+  display: inline-block;
+  animation: phase-pulse 1.4s ease-in-out infinite;
+}
+.phase-step.done {
+  color: var(--bar-in-progress);
+  border-color: color-mix(in srgb, var(--bar-in-progress) 40%, var(--border-subtle));
+}
+.phase-step.waiting {
+  color: var(--bar-waiting);
+  border-color: color-mix(in srgb, var(--bar-waiting) 50%, var(--border-subtle));
+}
+.phase-step.failed {
+  color: var(--bar-failed);
+  border-color: color-mix(in srgb, var(--bar-failed) 50%, var(--border-subtle));
+}
+@keyframes phase-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .phase-step.current .phase-mark.pulse { animation: none; }
+}
 .artifact-actions {
   display: flex;
   flex-wrap: wrap;

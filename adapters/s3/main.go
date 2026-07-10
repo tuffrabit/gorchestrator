@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type request struct {
@@ -200,6 +201,81 @@ func handle(ctx context.Context, client *s3.Client, bucket, prefix string, req r
 			return errResp(req.ID, -32000, err.Error())
 		}
 		return response{JSONRPC: "2.0", Result: map[string]any{"ok": true}, ID: req.ID}
+	case "storage.remove_all":
+		var p struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, err.Error())
+		}
+		rel := strings.TrimSpace(strings.Trim(p.Path, "/"))
+		if rel == "" || rel == "." {
+			return errResp(req.ID, -32602, "refusing to remove storage root")
+		}
+		pref := key(prefix, p.Path)
+		if pref != "" && !strings.HasSuffix(pref, "/") {
+			// Delete both the path as a key and everything under path/.
+			// Issue dirs are always prefixes, but files may be keys too.
+		}
+		listPref := pref
+		if listPref != "" && !strings.HasSuffix(listPref, "/") {
+			listPref += "/"
+		}
+		var toDelete []types.ObjectIdentifier
+		var token *string
+		for {
+			out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+				Bucket:            aws.String(bucket),
+				Prefix:             aws.String(listPref),
+				ContinuationToken: token,
+			})
+			if err != nil {
+				return errResp(req.ID, -32000, err.Error())
+			}
+			for _, obj := range out.Contents {
+				toDelete = append(toDelete, types.ObjectIdentifier{Key: obj.Key})
+			}
+			// Also try exact key match (file rather than prefix).
+			if pref != "" && !strings.HasSuffix(pref, "/") {
+				toDelete = append(toDelete, types.ObjectIdentifier{Key: aws.String(pref)})
+			}
+			if !aws.ToBool(out.IsTruncated) {
+				break
+			}
+			token = out.NextContinuationToken
+		}
+		// Deduplicate keys.
+		seen := map[string]struct{}{}
+		var unique []types.ObjectIdentifier
+		for _, id := range toDelete {
+			k := aws.ToString(id.Key)
+			if k == "" {
+				continue
+			}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			unique = append(unique, id)
+		}
+		for i := 0; i < len(unique); i += 1000 {
+			end := i + 1000
+			if end > len(unique) {
+				end = len(unique)
+			}
+			batch := unique[i:end]
+			if len(batch) == 0 {
+				continue
+			}
+			_, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+				Bucket: aws.String(bucket),
+				Delete: &types.Delete{Objects: batch, Quiet: aws.Bool(true)},
+			})
+			if err != nil {
+				return errResp(req.ID, -32000, err.Error())
+			}
+		}
+		return response{JSONRPC: "2.0", Result: map[string]any{"ok": true, "deleted": len(unique)}, ID: req.ID}
 	default:
 		return errResp(req.ID, -32601, "method not found")
 	}

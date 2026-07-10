@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -146,6 +147,29 @@ func (s *Server) handleGetArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", ct)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+func (s *Server) handleDeleteIssue(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid issue id")
+		return
+	}
+	if err := s.eng.DeleteIssue(r.Context(), id); err != nil {
+		if errors.Is(err, orchestrator.ErrIssueNotFound) {
+			writeJSONError(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	var uid *int64
+	if u != nil {
+		uid = &u.ID
+	}
+	_ = s.eng.Audit().Record(uid, "delete_issue", "issue", orchestrator.IssueIDString(id), nil)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
 }
 
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {

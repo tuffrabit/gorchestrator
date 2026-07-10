@@ -15,11 +15,16 @@ import (
 
 // BoundTools carries the storage port and resolved paths for a single agent run.
 type BoundTools struct {
-	Storage          storage.Port
-	RootPath         string
-	Allowlist        []string
-	OutputPath       string
-	WorkspacePath    string
+	Storage   storage.Port
+	RootPath  string
+	Allowlist []string
+	// BasePath is the default directory for short relative tool paths (empty,
+	// ".", "source", …). Typically the issue directory for research/plan, or
+	// the implementer workspace for implementation. Full storage keys under
+	// Allowlist still work.
+	BasePath          string
+	OutputPath        string
+	WorkspacePath     string
 	// WorkspaceHostPath is the absolute host path of the implementer workspace
 	// (for container bind-mounts). Empty when not an implementer run.
 	WorkspaceHostPath string

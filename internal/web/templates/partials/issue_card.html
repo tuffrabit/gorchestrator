@@ -7,7 +7,9 @@
 {{$expanded := .Expanded}}
 <article id="issue-{{$issue.ID}}"
   class="issue-card {{statusClass $issue.Status}}"
-  data-issue-id="{{$issue.ID}}">
+  data-issue-id="{{$issue.ID}}"
+  data-phase="{{$issue.CurrentPhase}}"
+  data-status="{{$issue.Status}}">
   <button type="button" class="card-header"
     aria-expanded="{{if $expanded}}true{{else}}false{{end}}"
     hx-get="/partials/issues/{{$issue.ID}}?expanded={{if $expanded}}0{{else}}1{{end}}"
@@ -17,22 +19,38 @@
     <span class="card-title">{{if .Issue.ProjectName}}{{.Issue.ProjectName}} · {{end}}{{$issue.Title}}</span>
     <span class="card-meta">
       <span class="status-chip">{{statusLabel $issue.Status}}</span>
-      <span>{{$issue.CurrentPhase}}</span>
+      <span class="phase-chip" title="current phase">{{$issue.CurrentPhase}}</span>
+      {{if .Issue.PhaseStatus}}<span class="mono" title="phase result status">{{.Issue.PhaseStatus}}</span>{{end}}
       {{if .Issue.Attempt}}<span>attempt {{.Issue.Attempt}}</span>{{end}}
       <span class="mono">{{.Issue.TokenTotal}} tok</span>
     </span>
   </button>
   {{if $expanded}}
   <div class="card-body">
-    <div class="phase-strip">
-      <span class="{{if eq $issue.CurrentPhase "research"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "plan") (eq $issue.CurrentPhase "implementation")}}done{{end}}">research</span>
-      <span>—</span>
-      <span class="{{if eq $issue.CurrentPhase "plan"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "implementation")}}done{{end}}">plan</span>
-      <span>—</span>
-      <span class="{{if eq $issue.CurrentPhase "implementation"}}current{{else if eq $issue.Status "done"}}done{{end}}">implementation</span>
+    <div class="phase-strip" role="list" aria-label="Pipeline phases">
+      {{range $i, $p := .Issue.Phases}}
+        {{if $i}}<span class="phase-sep" aria-hidden="true">→</span>{{end}}
+        <span class="phase-step {{$p.State}}" role="listitem"
+          title="{{$p.Agent}}: {{if $p.Status}}{{$p.Status}}{{else}}{{$p.State}}{{end}}">
+          {{if eq $p.State "done"}}<span class="phase-mark" aria-hidden="true">✓</span>{{end}}
+          {{if eq $p.State "current"}}<span class="phase-mark pulse" aria-hidden="true">●</span>{{end}}
+          {{if eq $p.State "waiting"}}<span class="phase-mark" aria-hidden="true">⏸</span>{{end}}
+          {{if eq $p.State "failed"}}<span class="phase-mark" aria-hidden="true">✕</span>{{end}}
+          <span class="phase-name">{{$p.Name}}</span>
+          <span class="phase-agent">{{$p.Agent}}</span>
+        </span>
+      {{else}}
+        {{/* Fallback when Phases is empty (older views). */}}
+        <span class="phase-step {{if eq $issue.CurrentPhase "research"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "plan") (eq $issue.CurrentPhase "implementation")}}done{{end}}">research</span>
+        <span class="phase-sep">→</span>
+        <span class="phase-step {{if eq $issue.CurrentPhase "plan"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "implementation")}}done{{end}}">plan</span>
+        <span class="phase-sep">→</span>
+        <span class="phase-step {{if eq $issue.CurrentPhase "implementation"}}current{{else if eq $issue.Status "done"}}done{{end}}">implementation</span>
+      {{end}}
     </div>
     <div class="card-meta" style="margin-bottom:0.75rem">
-      <span>status={{$issue.Status}}</span>
+      <span>issue={{$issue.Status}}</span>
+      {{if .Issue.PhaseStatus}}<span>phase_result={{.Issue.PhaseStatus}}</span>{{end}}
       <span>tokens={{.Issue.TokenTotal}}</span>
       <span>updated={{$issue.UpdatedAt}}</span>
     </div>
@@ -45,6 +63,16 @@
         onclick="openArtifactDrawer({{$issue.ID}}, 'activity')">activity</button>
       <button class="btn" type="button"
         onclick="openArtifactDrawer({{$issue.ID}}, 'diff')">diff</button>
+      {{if .CanWrite}}
+      <button class="btn btn-danger" type="button"
+        title="Permanently delete this issue and all artifacts"
+        hx-delete="/partials/issues/{{$issue.ID}}"
+        hx-target="#issue-{{$issue.ID}}"
+        hx-swap="outerHTML"
+        hx-confirm="Permanently delete issue #{{$issue.ID}} «{{$issue.Title}}»? This removes the database row and all on-disk artifacts. This cannot be undone.">
+        Delete
+      </button>
+      {{end}}
     </div>
     {{if .CanWrite}}
       {{if or (eq $issue.Status "waiting_human") (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
@@ -69,9 +97,9 @@
       {{end}}
     </form>
       {{else if eq $issue.Status "done"}}
-    <p class="card-meta">Issue complete.</p>
+    <p class="card-meta">Issue complete — all phases finished.</p>
       {{else}}
-    <p class="card-meta">Pipeline active ({{$issue.Status}}). Intervene when it pauses or fails.</p>
+    <p class="card-meta">Pipeline active on <strong>{{$issue.CurrentPhase}}</strong> ({{$issue.Status}}). Intervene when it pauses or fails.</p>
       {{end}}
     {{else}}
     <p class="card-meta">Adjudication requires member role.</p>

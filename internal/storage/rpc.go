@@ -95,6 +95,15 @@ func (r *RPC) Mkdir(ctx context.Context, path string) error {
 	return err
 }
 
+// RemoveAll implements Port.
+func (r *RPC) RemoveAll(ctx context.Context, path string) error {
+	if err := refuseRootRemove(path); err != nil {
+		return err
+	}
+	_, err := r.client.Call(ctx, "storage.remove_all", map[string]any{"path": path})
+	return err
+}
+
 // Close stops the underlying client if supported.
 func (r *RPC) Close() error {
 	if r.client != nil {

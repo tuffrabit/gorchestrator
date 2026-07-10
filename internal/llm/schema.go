@@ -1,10 +1,61 @@
 package llm
 
 import (
+	"encoding/json"
 	"strings"
 
 	"google.golang.org/genai"
 )
+
+// emptyObjectSchema is the fallback when a function declaration has no
+// parameter schema. Prefer DeclarationParameters, which also handles ADK
+// function tools that populate ParametersJsonSchema instead of Parameters.
+func emptyObjectSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+// DeclarationParameters returns an OpenAI/Anthropic-compatible JSON Schema map
+// for a function declaration's parameters.
+//
+// ADK functiontool.New stores the inferred schema in ParametersJsonSchema
+// (*jsonschema.Schema), not Parameters (*genai.Schema). finish_task and other
+// hand-built tools still use Parameters. Both must be handled or tools are
+// sent with empty properties and models (especially llama.cpp) call them with {}.
+func DeclarationParameters(d *genai.FunctionDeclaration) map[string]any {
+	if d == nil {
+		return emptyObjectSchema()
+	}
+	if d.ParametersJsonSchema != nil {
+		if m := anySchemaToMap(d.ParametersJsonSchema); m != nil {
+			return m
+		}
+	}
+	if m := SchemaToMap(d.Parameters); m != nil {
+		return m
+	}
+	return emptyObjectSchema()
+}
+
+// anySchemaToMap converts ParametersJsonSchema (any) into a plain map.
+// Values are typically *jsonschema.Schema from google/jsonschema-go, which
+// already marshals to standard lowercase JSON Schema types.
+func anySchemaToMap(s any) map[string]any {
+	if s == nil {
+		return nil
+	}
+	if m, ok := s.(map[string]any); ok {
+		return m
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil || m == nil {
+		return nil
+	}
+	return m
+}
 
 // SchemaToMap converts a genai.Schema into a JSON-Schema map suitable for
 // OpenAI/Anthropic tool declarations and task.json.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,9 +20,12 @@ const maxGrepResults = 100
 
 // GrepArgs are the arguments for the grep_search tool.
 type GrepArgs struct {
-	Path    string `json:"path" jsonschema:"Relative directory path to search"`
+	// Path is optional; empty or "." searches BasePath (issue root / workspace).
+	Path string `json:"path,omitempty" jsonschema:"Directory to search, relative to the issue root (e.g. \"source\") or a full allowlisted storage key; omit or \".\" for the default base"`
+	// Pattern is required.
 	Pattern string `json:"pattern" jsonschema:"Pattern to search for"`
-	Regex   bool   `json:"regex" jsonschema:"If true, treat pattern as a Go regular expression"`
+	// Regex is optional; false means plain substring match.
+	Regex bool `json:"regex,omitempty" jsonschema:"If true, treat pattern as a Go regular expression"`
 }
 
 // GrepMatch is a single grep result.
@@ -42,25 +46,23 @@ type GrepResult struct {
 
 func newGrepTool(bt *BoundTools) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
-		Name:        "grep_search",
-		Description: "Search file contents for a pattern. Returns matching lines with file paths. Honors .gitignore, skips .git and binary files.",
+		Name: "grep_search",
+		Description: `Search file contents for a pattern. Returns matching lines with storage-relative file paths suitable for read_file. Honors .gitignore, skips .git and binary files.
+
+Path may be omitted/"." (default base), relative to the issue root (e.g. "source"), or a full allowlisted storage key.`,
 	}, func(ctx agent.Context, args GrepArgs) (GrepResult, error) {
 		return grepSearch(ctx, bt, args)
 	})
 }
 
 func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult, error) {
-	path := args.Path
-	if path == "" {
-		path = "."
-	}
 	if args.Pattern == "" {
 		return GrepResult{}, fmt.Errorf("pattern is required")
 	}
 
-	resolved, ok := resolveAllowedPath(path, bt.Allowlist)
+	resolved, ok := resolveAllowedPath(args.Path, bt.Allowlist, bt.BasePath)
 	if !ok {
-		return GrepResult{}, fmt.Errorf("path not allowed: %s", path)
+		return GrepResult{}, fmt.Errorf("path not allowed: %s", args.Path)
 	}
 
 	var matcher func(line string) bool
@@ -76,7 +78,7 @@ func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult,
 		matcher = func(line string) bool { return strings.Contains(line, args.Pattern) }
 	}
 
-	absRoot := filepath.Join(bt.RootPath, resolved)
+	absRoot := filepath.Join(bt.RootPath, filepath.FromSlash(resolved))
 
 	var matches []GrepMatch
 	var stack []gitignoreFrame
@@ -98,6 +100,13 @@ func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult,
 		if rel == "." {
 			return nil
 		}
+		// Storage keys use forward slashes; keep match paths storage-relative
+		// so agents can pass them straight to read_file.
+		relSlash := filepath.ToSlash(rel)
+		storagePath := relSlash
+		if resolved != "" {
+			storagePath = path.Join(resolved, relSlash)
+		}
 
 		// Pop frames when leaving their directories.
 		for len(stack) > 0 && !strings.HasPrefix(filePath, stack[len(stack)-1].dir+string(filepath.Separator)) {
@@ -113,8 +122,8 @@ func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult,
 			}
 		}
 
-		// Honor .gitignore.
-		if ignoredByGitignore(stack, rel, isDir) {
+		// Honor .gitignore (paths relative to search root).
+		if ignoredByGitignore(stack, relSlash, isDir) {
 			if isDir {
 				return filepath.SkipDir
 			}
@@ -131,7 +140,7 @@ func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult,
 		if isBinary(filePath) {
 			return nil
 		}
-		fileMatches, err := grepFile(filePath, rel, matcher)
+		fileMatches, err := grepFile(filePath, storagePath, matcher)
 		if err != nil {
 			return nil
 		}
@@ -156,7 +165,7 @@ func grepSearch(ctx context.Context, bt *BoundTools, args GrepArgs) (GrepResult,
 	}
 
 	return GrepResult{
-		Path:      path,
+		Path:      resolved,
 		Pattern:   args.Pattern,
 		Regex:     args.Regex,
 		Matches:   matches,

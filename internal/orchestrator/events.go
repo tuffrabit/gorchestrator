@@ -11,6 +11,7 @@ import (
 const (
 	EventIssueSubmitted    = "issue_submitted"
 	EventIssueStatus       = "issue_status"
+	EventIssueDeleted      = "issue_deleted"
 	EventPhaseStarted      = "phase_started"
 	EventPhaseFinished     = "phase_finished"
 	EventDecisionRequested = "decision_requested"

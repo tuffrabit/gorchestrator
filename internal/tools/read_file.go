@@ -20,9 +20,11 @@ import (
 //      that range. This is the intended follow-up to grep_search, which returns
 //      file paths and line numbers.
 type ReadFileArgs struct {
-	Path   string `json:"path" jsonschema:"Relative path to the file"`
-	Offset int    `json:"offset" jsonschema:"1-based line offset for surgical mode; omit for whole-file mode"`
-	Limit  int    `json:"limit" jsonschema:"Maximum number of lines for surgical mode; omit for whole-file mode"`
+	Path string `json:"path" jsonschema:"File path relative to the issue root (e.g. source/main.go) or a full allowlisted storage key"`
+	// Offset/Limit are optional (omit for whole-file mode). omitempty keeps them
+	// out of the JSON Schema "required" list so models need not pass zeros.
+	Offset int `json:"offset,omitempty" jsonschema:"1-based line offset for surgical mode; omit for whole-file mode"`
+	Limit  int `json:"limit,omitempty" jsonschema:"Maximum number of lines for surgical mode; omit for whole-file mode"`
 }
 
 // ReadFileResult is the result of the read_file tool.
@@ -35,7 +37,9 @@ type ReadFileResult struct {
 }
 
 func newReadFileTool(bt *BoundTools) (tool.Tool, error) {
-	description := `Read the full or a precise line-number range of a file. Path is relative to the storage root.
+	description := `Read the full or a precise line-number range of a file.
+
+Path may be relative to the issue root (e.g. "source/main.go") or a full allowlisted storage key. Prefer paths returned by grep_search / list_directory.
 
 Two modes:
 1. Whole-file (no offset/limit): returns the full file subject to a cap. If the cap is hit, truncated=true and total_lines reports the full line count so you can switch to surgical mode.
@@ -55,7 +59,7 @@ func readFile(ctx context.Context, bt *BoundTools, args ReadFileArgs) (ReadFileR
 	if args.Path == "" {
 		return ReadFileResult{}, fmt.Errorf("path is required")
 	}
-	resolved, ok := resolveAllowedPath(args.Path, bt.Allowlist)
+	resolved, ok := resolveAllowedPath(args.Path, bt.Allowlist, bt.BasePath)
 	if !ok {
 		return ReadFileResult{}, fmt.Errorf("path not allowed: %s", args.Path)
 	}
@@ -70,7 +74,7 @@ func readFile(ctx context.Context, bt *BoundTools, args ReadFileArgs) (ReadFileR
 	if args.Offset <= 0 && args.Limit <= 0 {
 		content, truncated := applyCap(lines, bt.ReadFileMaxBytes, bt.ReadFileMaxLines)
 		return ReadFileResult{
-			Path:       args.Path,
+			Path:       resolved,
 			Content:    content,
 			Size:       len(content),
 			TotalLines: totalLines,
@@ -80,7 +84,7 @@ func readFile(ctx context.Context, bt *BoundTools, args ReadFileArgs) (ReadFileR
 
 	content := applyRange(lines, args.Offset, args.Limit)
 	return ReadFileResult{
-		Path:       args.Path,
+		Path:       resolved,
 		Content:    content,
 		Size:       len(content),
 		TotalLines: totalLines,
