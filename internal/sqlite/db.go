@@ -145,6 +145,23 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications(status);
 `,
 	},
+	{
+		version: 6,
+		name:    "run_workspace_tracking",
+		sql: `
+ALTER TABLE runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN branch_name TEXT NOT NULL DEFAULT '';
+`,
+	},
+	{
+		version: 7,
+		name:    "issue_provenance",
+		sql: `
+ALTER TABLE issues ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE issues ADD COLUMN external_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_issues_external ON issues(source, external_id);
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

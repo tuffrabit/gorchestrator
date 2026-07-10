@@ -167,10 +167,18 @@ document.addEventListener('htmx:afterSwap', function (e) {
   });
 });
 
+// Close the drawer after a successful issue *submission* (POST), not after the
+// GET that loads the submit form into #drawer-body (that would slam it shut).
 document.addEventListener('htmx:afterRequest', function (e) {
   if (!e.detail || !e.detail.successful) return;
   var path = (e.detail.pathInfo && e.detail.pathInfo.requestPath) || '';
-  if (String(path).indexOf('/partials/submit') !== -1) {
-    closeDrawer();
-  }
+  if (String(path).indexOf('/partials/submit') === -1) return;
+  var verb = (e.detail.requestConfig && e.detail.requestConfig.verb) || '';
+  if (String(verb).toLowerCase() !== 'post') return;
+  closeDrawer();
+});
+
+// Server also sends HX-Trigger: close-drawer on successful POST /partials/submit.
+document.body.addEventListener('close-drawer', function () {
+  closeDrawer();
 });

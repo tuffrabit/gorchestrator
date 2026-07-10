@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -60,6 +61,17 @@ func SourcePath(projectID, issueID int64) string {
 // WorkspacePath returns the relative path to the implementer's workspace for an issue.
 func WorkspacePath(projectID, issueID int64) string {
 	return path.Join(PhaseDir(projectID, issueID, "implementation"), "workspace")
+}
+
+// RepoCachePath returns the relative path to the project's bare git clone cache.
+func RepoCachePath(projectID int64) string {
+	return path.Join("repos", fmt.Sprintf("%d.git", projectID))
+}
+
+// Abs joins storage root with a slash-canonical relative key for host paths
+// (git worktrees, container mounts). Prefer this over ad-hoc filepath joins.
+func Abs(storageRoot, relKey string) string {
+	return filepath.Join(storageRoot, filepath.FromSlash(relKey))
 }
 
 // ValidateRelativePath rejects absolute paths and parent-directory segments.

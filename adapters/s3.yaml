@@ -1,0 +1,6 @@
+name: s3
+version: "1.0.0"
+protocol: jsonrpc-stdio
+port: storage
+binary: ./s3/s3
+capabilities: [read, write, list]

@@ -20,6 +20,11 @@ type BoundTools struct {
 	Allowlist        []string
 	OutputPath       string
 	WorkspacePath    string
+	// WorkspaceHostPath is the absolute host path of the implementer workspace
+	// (for container bind-mounts). Empty when not an implementer run.
+	WorkspaceHostPath string
+	// Test holds project test config for run_test (implementer only).
+	Test *TestConfig
 	ReadFileMaxBytes int
 	ReadFileMaxLines int
 	// OutputWritten is set to true by the write_output tool when it executes.
@@ -71,5 +76,27 @@ func NewImplementerRegistry(bt *BoundTools) ([]tool.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("update_file tool: %w", err)
 	}
-	return []tool.Tool{readFile, listDir, grep, writeFile, updateFile}, nil
+	runTest, err := newRunTestTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("run_test tool: %w", err)
+	}
+	return []tool.Tool{readFile, listDir, grep, writeFile, updateFile, runTest}, nil
+}
+
+// FilterByNames keeps only tools whose Name() is in allow. Empty allow returns all.
+func FilterByNames(all []tool.Tool, allow []string) []tool.Tool {
+	if len(allow) == 0 {
+		return all
+	}
+	set := make(map[string]struct{}, len(allow))
+	for _, n := range allow {
+		set[n] = struct{}{}
+	}
+	var out []tool.Tool
+	for _, t := range all {
+		if _, ok := set[t.Name()]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }

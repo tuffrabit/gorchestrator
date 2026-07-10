@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 const (
 	maxScanTokenSize = 10 * 1024 * 1024 // 10MB
 	closeTimeout     = 5 * time.Second
+	defaultNotifBuf  = 64
 )
 
 // Request is a JSON-RPC 2.0 request.
@@ -45,22 +47,51 @@ func (e *RPCError) Error() string {
 	return fmt.Sprintf("jsonrpc error %d: %s", e.Code, e.Message)
 }
 
+// Notification is a JSON-RPC 2.0 notification (no id) received from the adapter.
+type Notification struct {
+	Method string
+	Params json.RawMessage
+}
+
+// ClientOptions configures how an adapter process is spawned.
+type ClientOptions struct {
+	// Env is the full environment for the child process. If nil, os.Environ() is used.
+	// Adapters own their credentials via env (see spec §17 Q12).
+	Env []string
+	// ExtraEnv is appended to os.Environ() when Env is nil.
+	ExtraEnv []string
+	// NotifBuffer is the capacity of the notifications channel (default 64).
+	NotifBuffer int
+}
+
 // Client manages a JSON-RPC stdio adapter process.
 type Client struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  *bufio.Scanner
-	stderr  io.Reader
-	nextID  int64
-	pending map[int64]chan *Response
-	mu      sync.Mutex
-	done    chan struct{}
-	scanErr atomic.Value
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   *bufio.Scanner
+	stderr   io.Reader
+	nextID   int64
+	pending  map[int64]chan *Response
+	mu       sync.Mutex
+	done     chan struct{}
+	scanErr  atomic.Value
+	notifCh  chan Notification
+	closed   atomic.Bool
 }
 
 // NewClient spawns an external adapter binary and performs the initialize handshake.
 func NewClient(binary string) (*Client, error) {
+	return NewClientWithOptions(binary, ClientOptions{})
+}
+
+// NewClientWithOptions spawns an adapter with the given options.
+func NewClientWithOptions(binary string, opts ClientOptions) (*Client, error) {
 	cmd := exec.Command(binary)
+	if opts.Env != nil {
+		cmd.Env = opts.Env
+	} else if len(opts.ExtraEnv) > 0 {
+		cmd.Env = append(os.Environ(), opts.ExtraEnv...)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
@@ -77,6 +108,11 @@ func NewClient(binary string) (*Client, error) {
 		return nil, fmt.Errorf("start adapter: %w", err)
 	}
 
+	buf := opts.NotifBuffer
+	if buf <= 0 {
+		buf = defaultNotifBuf
+	}
+
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), maxScanTokenSize)
 
@@ -87,13 +123,12 @@ func NewClient(binary string) (*Client, error) {
 		stderr:  stderr,
 		pending: make(map[int64]chan *Response),
 		done:    make(chan struct{}),
+		notifCh: make(chan Notification, buf),
 	}
 
-	// Capture stderr in the background.
 	go c.logStderr()
 	go c.readLoop()
 
-	// Perform initialize handshake.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := c.Call(ctx, "initialize", map[string]any{}); err != nil {
@@ -104,14 +139,67 @@ func NewClient(binary string) (*Client, error) {
 	return c, nil
 }
 
+// Notifications returns a channel of JSON-RPC notifications from the adapter.
+// The channel is closed when the client process exits or Close is called.
+func (c *Client) Notifications() <-chan Notification {
+	return c.notifCh
+}
+
+// Done is closed when the adapter process has exited (or failed to read).
+func (c *Client) Done() <-chan struct{} {
+	return c.done
+}
+
+// Pid returns the child process id, or 0 if unknown.
+func (c *Client) Pid() int {
+	if c.cmd == nil || c.cmd.Process == nil {
+		return 0
+	}
+	return c.cmd.Process.Pid
+}
+
+type wireMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *RPCError       `json:"error,omitempty"`
+	ID      *int64          `json:"id,omitempty"`
+}
+
 func (c *Client) readLoop() {
 	defer close(c.done)
+	defer close(c.notifCh)
+
 	for c.stdout.Scan() {
 		line := c.stdout.Bytes()
-		var resp Response
-		if err := json.Unmarshal(line, &resp); err != nil {
-			log.Printf("jsonrpc: dropping malformed response: %v", err)
+		var msg wireMessage
+		if err := json.Unmarshal(line, &msg); err != nil {
+			log.Printf("jsonrpc: dropping malformed message: %v", err)
 			continue
+		}
+
+		// Notification: has method, no id.
+		if msg.Method != "" && msg.ID == nil {
+			n := Notification{Method: msg.Method, Params: msg.Params}
+			select {
+			case c.notifCh <- n:
+			default:
+				log.Printf("jsonrpc: dropping notification %s (buffer full)", msg.Method)
+			}
+			continue
+		}
+
+		// Response: has id.
+		if msg.ID == nil {
+			log.Printf("jsonrpc: dropping message with neither method nor id")
+			continue
+		}
+		resp := &Response{
+			JSONRPC: msg.JSONRPC,
+			Result:  msg.Result,
+			Error:   msg.Error,
+			ID:      *msg.ID,
 		}
 		c.mu.Lock()
 		ch, ok := c.pending[resp.ID]
@@ -120,7 +208,7 @@ func (c *Client) readLoop() {
 		}
 		c.mu.Unlock()
 		if ok {
-			ch <- &resp
+			ch <- resp
 		}
 	}
 	if err := c.stdout.Err(); err != nil {
@@ -131,7 +219,11 @@ func (c *Client) readLoop() {
 func (c *Client) logStderr() {
 	scanner := bufio.NewScanner(c.stderr)
 	for scanner.Scan() {
-		log.Printf("adapter[%d] stderr: %s", c.cmd.Process.Pid, scanner.Text())
+		pid := 0
+		if c.cmd.Process != nil {
+			pid = c.cmd.Process.Pid
+		}
+		log.Printf("adapter[%d] stderr: %s", pid, scanner.Text())
 	}
 }
 
@@ -145,6 +237,9 @@ func (c *Client) ScanError() error {
 
 // Call sends a JSON-RPC request and waits for a response.
 func (c *Client) Call(ctx context.Context, method string, params any) (*Response, error) {
+	if c.closed.Load() {
+		return nil, fmt.Errorf("adapter client closed")
+	}
 	data, err := json.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("marshal params: %w", err)
@@ -163,6 +258,9 @@ func (c *Client) Call(ctx context.Context, method string, params any) (*Response
 
 	reqData, err := json.Marshal(req)
 	if err != nil {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, err
 	}
 	reqData = append(reqData, '\n')
@@ -185,12 +283,20 @@ func (c *Client) Call(ctx context.Context, method string, params any) (*Response
 		c.mu.Unlock()
 		return nil, ctx.Err()
 	case <-c.done:
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
 		return nil, fmt.Errorf("adapter process exited")
 	}
 }
 
 // Close terminates the adapter process.
 func (c *Client) Close() error {
+	if !c.closed.CompareAndSwap(false, true) {
+		// Already closed; wait for done.
+		<-c.done
+		return nil
+	}
 	_ = c.stdin.Close()
 
 	done := make(chan struct{})
@@ -201,12 +307,14 @@ func (c *Client) Close() error {
 
 	select {
 	case <-done:
+		<-c.done
 		return nil
 	case <-time.After(closeTimeout):
 		if err := c.cmd.Process.Kill(); err != nil {
 			return fmt.Errorf("kill adapter: %w", err)
 		}
 		<-done
+		<-c.done
 		return nil
 	}
 }

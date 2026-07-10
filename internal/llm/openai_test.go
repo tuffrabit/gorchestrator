@@ -185,6 +185,67 @@ func TestOpenAIModel_ToolSchemaUsesJSONSchemaTypes(t *testing.T) {
 	}
 }
 
+func TestOpenAIModel_convertContents_ToolRoundTripNoEmptyUser(t *testing.T) {
+	// Simulates ADK history: user text → assistant tool_call → user function response only.
+	m := &OpenAIModel{model: "local"}
+	msgs, err := m.convertContents([]*genai.Content{
+		{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "investigate auth"}}},
+		{Role: genai.RoleModel, Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{
+				ID:   "call_1",
+				Name: "read_file",
+				Args: map[string]any{"path": "main.go"},
+			},
+		}}},
+		{Role: genai.RoleUser, Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:   "call_1",
+				Name: "read_file",
+				Response: map[string]any{
+					"content": "package main",
+				},
+			},
+		}}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect: user, assistant(+tool_calls), tool — no empty user between assistant and tool.
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %d, want 3: %#v", len(msgs), msgs)
+	}
+	if msgs[0]["role"] != "user" || msgs[0]["content"] == nil || msgs[0]["content"] == "" {
+		t.Fatalf("msg0 = %#v", msgs[0])
+	}
+	if msgs[1]["role"] != "assistant" {
+		t.Fatalf("msg1 role = %v", msgs[1]["role"])
+	}
+	// content key must be present (even if empty) for strict servers
+	if _, ok := msgs[1]["content"]; !ok {
+		t.Fatal("assistant tool_calls message missing content key")
+	}
+	if _, ok := msgs[1]["tool_calls"]; !ok {
+		t.Fatal("assistant missing tool_calls")
+	}
+	if msgs[2]["role"] != "tool" {
+		t.Fatalf("msg2 role = %v want tool", msgs[2]["role"])
+	}
+	if _, ok := msgs[2]["content"]; !ok {
+		t.Fatal("tool message missing content")
+	}
+	// Ensure no role=user without content slipped in.
+	for i, msg := range msgs {
+		role, _ := msg["role"].(string)
+		if role == "assistant" {
+			continue
+		}
+		if _, ok := msg["content"]; !ok {
+			t.Fatalf("msg[%d] role=%s missing content: %#v", i, role, msg)
+		}
+	}
+}
+
 func TestOpenAIModel_GenerateContent_RetryAfter429(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

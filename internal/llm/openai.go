@@ -21,15 +21,22 @@ import (
 // (or any OpenAI-compatible endpoint). It translates between genai types and
 // OpenAI request/response formats.
 type OpenAIModel struct {
-	model   string
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	model       string
+	apiKey      string
+	baseURL     string
+	client      *http.Client
+	temperature *float64
+	maxTokens   int
 }
 
 // NewOpenAIModel creates an OpenAI-compatible model.LLM.
 // If baseURL is empty, it defaults to https://api.openai.com/v1.
 func NewOpenAIModel(modelName, apiKeyEnv, baseURL string, timeout time.Duration) model.LLM {
+	return NewOpenAIModelWithOptions(modelName, apiKeyEnv, baseURL, timeout, nil, 0)
+}
+
+// NewOpenAIModelWithOptions creates an OpenAI model with temperature/max_tokens.
+func NewOpenAIModelWithOptions(modelName, apiKeyEnv, baseURL string, timeout time.Duration, temperature *float64, maxTokens int) model.LLM {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
@@ -41,10 +48,12 @@ func NewOpenAIModel(modelName, apiKeyEnv, baseURL string, timeout time.Duration)
 		apiKey = os.Getenv(apiKeyEnv)
 	}
 	return &OpenAIModel{
-		model:   modelName,
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		client:  &http.Client{Timeout: timeout},
+		model:       modelName,
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		client:      &http.Client{Timeout: timeout},
+		temperature: temperature,
+		maxTokens:   maxTokens,
 	}
 }
 
@@ -168,6 +177,12 @@ func (m *OpenAIModel) buildRequestBody(req *model.LLMRequest) (map[string]any, e
 		"model":    modelName,
 		"messages": messages,
 	}
+	if m.temperature != nil {
+		body["temperature"] = *m.temperature
+	}
+	if m.maxTokens > 0 {
+		body["max_tokens"] = m.maxTokens
+	}
 
 	if tools := functionDeclarations(req.Config); len(tools) > 0 {
 		openAITools, err := m.convertTools(tools)
@@ -195,14 +210,15 @@ func (m *OpenAIModel) convertContents(contents []*genai.Content, cfg *genai.Gene
 	}
 
 	for _, c := range contents {
+		if c == nil {
+			continue
+		}
 		role := c.Role
 		if role == genai.RoleUser {
 			role = "user"
 		} else if role == genai.RoleModel {
 			role = "assistant"
 		}
-
-		msg := map[string]any{"role": role}
 
 		// Separate text, function calls, and function responses.
 		var textParts []string
@@ -217,8 +233,13 @@ func (m *OpenAIModel) convertContents(contents []*genai.Content, cfg *genai.Gene
 				textParts = append(textParts, p.Text)
 			}
 			if p.FunctionCall != nil {
+				id := p.FunctionCall.ID
+				if id == "" {
+					// llama.cpp / some servers require non-empty tool_call ids.
+					id = "call_" + p.FunctionCall.Name
+				}
 				toolCalls = append(toolCalls, map[string]any{
-					"id":   p.FunctionCall.ID,
+					"id":   id,
 					"type": "function",
 					"function": map[string]any{
 						"name":      p.FunctionCall.Name,
@@ -232,22 +253,38 @@ func (m *OpenAIModel) convertContents(contents []*genai.Content, cfg *genai.Gene
 					b, _ := json.Marshal(p.FunctionResponse.Response)
 					respText = string(b)
 				}
+				// OpenAI-compat requires tool messages to always include content
+				// (empty string is fine; missing key is not — llama.cpp 400s).
+				id := p.FunctionResponse.ID
+				if id == "" {
+					id = "call_" + p.FunctionResponse.Name
+				}
 				toolResponses = append(toolResponses, map[string]any{
 					"role":         "tool",
-					"tool_call_id": p.FunctionResponse.ID,
+					"tool_call_id": id,
 					"content":      respText,
 				})
 			}
 		}
 
-		if len(textParts) > 0 {
-			msg["content"] = joinStrings(textParts, "\n")
+		// ADK often packs function responses into a user Content with no text.
+		// Emitting {"role":"user"} without content makes llama.cpp reject the
+		// request: "All non-assistant messages must contain 'content'".
+		// Only emit a primary message when there is text and/or tool_calls.
+		if len(textParts) > 0 || len(toolCalls) > 0 {
+			msg := map[string]any{"role": role}
+			// Always set content for non-assistant; for assistant tool_calls-only
+			// use "" so strict OpenAI-compat servers still accept the message.
+			if len(textParts) > 0 {
+				msg["content"] = joinStrings(textParts, "\n")
+			} else {
+				msg["content"] = ""
+			}
+			if len(toolCalls) > 0 {
+				msg["tool_calls"] = toolCalls
+			}
+			messages = append(messages, msg)
 		}
-		if len(toolCalls) > 0 {
-			msg["tool_calls"] = toolCalls
-		}
-
-		messages = append(messages, msg)
 
 		// Tool responses must be their own messages in OpenAI format.
 		for _, tr := range toolResponses {

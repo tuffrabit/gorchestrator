@@ -16,11 +16,19 @@ tools:
     max_lines: 2000
 
 # Per-agent configuration. Keys: researcher, planner, implementer.
+# Merge: built-in defaults → default_model → agents.<type> → per-issue overrides.
 # agents:
 #   researcher:
 #     adjudicator: self
 #     max_attempts: 3
 #     loops: 1
+#     temperature: 0.2
+#     # max_tokens: 8192
+#     # system_prompt: "full override..."
+#     # system_prompt_append: "extra instructions..."
+#     # tools: [read_file, list_directory, grep_search, write_output]
+#     # mcp_servers: []
+#     # token_budget: 100000   # stored only; enforced in Phase 5
 #     model:
 #       provider: openai
 #       model: o3-mini
@@ -32,6 +40,14 @@ tools:
 #     adjudicator: self
 #     max_attempts: 3
 #     loops: 1
+#     mcp_servers: []          # per-agent MCP server allowlist (deny by default)
+
+# MCP servers (deny by default). Only agents that list a server in mcp_servers see its tools.
+# mcp_servers:
+#   - name: internal-api
+#     command: ["./bin/my-mcp-server"]
+#     args: []
+#     env: [API_TOKEN]         # host env var NAMES passed through; values not logged
 
 # External adapters are declared explicitly by name + manifest path.
 # The core does not scan directories for adapters.
@@ -70,4 +86,18 @@ auth:
 notifications:
   adapters: []
   # adapters: [slack, email]
+
+# Storage backend: fs (default) or adapter (e.g. S3 via JSON-RPC).
+storage:
+  backend: fs
+  # adapter_name: s3
+
+# External triggers (webhook is built-in; github/jira are adapters).
+triggers:
+  webhook:
+    enabled: false
+    token_env: GORCH_WEBHOOK_TOKEN
+  adapters: []
+  # adapters: [github, jira]
+  trust_external: false   # external issues force human implementer gate
 

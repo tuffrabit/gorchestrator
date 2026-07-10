@@ -13,6 +13,7 @@ import (
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
 	"github.com/tuffrabit/gorchestrator/internal/daemon"
+	gorchmcp "github.com/tuffrabit/gorchestrator/internal/mcp"
 	"github.com/tuffrabit/gorchestrator/internal/notify"
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
 	"github.com/tuffrabit/gorchestrator/internal/server"
@@ -70,6 +71,11 @@ func Serve(fs *flag.FlagSet, args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if len(cfg.MCPServers) > 0 {
+		mcpMgr := gorchmcp.NewManager(ctx, cfg.MCPServers)
+		eng.SetMCP(mcpMgr)
+	}
 
 	d := daemon.New(eng, cfg)
 	if err := d.Start(ctx); err != nil {

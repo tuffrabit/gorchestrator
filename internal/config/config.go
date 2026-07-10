@@ -38,13 +38,22 @@ type AdapterConfig struct {
 
 // AgentConfig overrides the orchestrator's defaults for a specific agent type.
 // Supported keys: "researcher", "planner", "implementer".
+//
+// Merge layers (see Config.Agent): built-in defaults → default_model →
+// agents.<type> YAML → per-issue overrides (applied by the orchestrator).
 type AgentConfig struct {
-	Model        ModelConfig `yaml:"model"`
-	SystemPrompt string      `yaml:"system_prompt"`
-	Adjudicator  string      `yaml:"adjudicator"`
-	MaxAttempts  int         `yaml:"max_attempts"`
-	Loops        int         `yaml:"loops"`
-	Rubric       string      `yaml:"rubric"`
+	Model              ModelConfig `yaml:"model"`
+	Temperature        *float64    `yaml:"temperature"`
+	MaxTokens          int         `yaml:"max_tokens"`
+	SystemPrompt       string      `yaml:"system_prompt"`        // full override
+	SystemPromptAppend string      `yaml:"system_prompt_append"` // appended after base/override
+	Tools              []string    `yaml:"tools"`                // core tool name allowlist; empty = all for type
+	MCPServers         []string    `yaml:"mcp_servers"`          // per-agent MCP server allowlist
+	TokenBudget        int         `yaml:"token_budget"`         // stored only; enforced in Phase 5
+	Adjudicator        string      `yaml:"adjudicator"`
+	MaxAttempts        int         `yaml:"max_attempts"`
+	Loops              int         `yaml:"loops"`
+	Rubric             string      `yaml:"rubric"`
 }
 
 // ServerConfig configures the serve daemon HTTP surface and worker pool.
@@ -82,6 +91,33 @@ type NotificationsConfig struct {
 	Adapters []string `yaml:"adapters"`
 }
 
+// MCPServerConfig declares an MCP server (stdio transport).
+type MCPServerConfig struct {
+	Name    string   `yaml:"name"`
+	Command []string `yaml:"command"` // binary + optional fixed args prefix
+	Args    []string `yaml:"args"`
+	Env     []string `yaml:"env"` // host env var NAMES to pass through
+}
+
+// WebhookTriggerConfig configures the built-in HTTP webhook trigger.
+type WebhookTriggerConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	TokenEnv string `yaml:"token_env"` // env var holding shared secret
+}
+
+// TriggersConfig configures external and built-in issue sources.
+type TriggersConfig struct {
+	Webhook       WebhookTriggerConfig `yaml:"webhook"`
+	Adapters      []string             `yaml:"adapters"`       // adapter names with port: trigger
+	TrustExternal bool                 `yaml:"trust_external"` // skip forced human implementer gate
+}
+
+// StorageBackendConfig selects filesystem vs adapter-backed StoragePort.
+type StorageBackendConfig struct {
+	Backend     string `yaml:"backend"`      // fs | adapter
+	AdapterName string `yaml:"adapter_name"` // when backend=adapter
+}
+
 // Config is the top-level user configuration.
 type Config struct {
 	StorageRoot   string                 `yaml:"storage_root"`
@@ -90,6 +126,9 @@ type Config struct {
 	Tools         ToolsConfig            `yaml:"tools"`
 	Adapters      []AdapterConfig        `yaml:"adapters"`
 	Agents        map[string]AgentConfig `yaml:"agents"`
+	MCPServers    []MCPServerConfig      `yaml:"mcp_servers"`
+	Triggers      TriggersConfig         `yaml:"triggers"`
+	Storage       StorageBackendConfig   `yaml:"storage"`
 	Server        ServerConfig           `yaml:"server"`
 	Auth          AuthConfig             `yaml:"auth"`
 	Notifications NotificationsConfig    `yaml:"notifications"`
@@ -262,6 +301,29 @@ func (c *Config) Agent(name string) AgentConfig {
 	if ovr.SystemPrompt != "" {
 		def.SystemPrompt = ovr.SystemPrompt
 	}
+	if ovr.SystemPromptAppend != "" {
+		def.SystemPromptAppend = ovr.SystemPromptAppend
+	}
+	// Apply append after merge so full override + append both work.
+	if def.SystemPromptAppend != "" {
+		def.SystemPrompt = def.SystemPrompt + "\n\n" + def.SystemPromptAppend
+	}
+	if ovr.Temperature != nil {
+		t := *ovr.Temperature
+		def.Temperature = &t
+	}
+	if ovr.MaxTokens > 0 {
+		def.MaxTokens = ovr.MaxTokens
+	}
+	if len(ovr.Tools) > 0 {
+		def.Tools = append([]string(nil), ovr.Tools...)
+	}
+	if len(ovr.MCPServers) > 0 {
+		def.MCPServers = append([]string(nil), ovr.MCPServers...)
+	}
+	if ovr.TokenBudget > 0 {
+		def.TokenBudget = ovr.TokenBudget
+	}
 	if ovr.Adjudicator != "" {
 		def.Adjudicator = ovr.Adjudicator
 	}
@@ -343,9 +405,11 @@ Core tools:
 - grep_search: locate relevant code
 - write_file: create new files in the workspace
 - update_file: overwrite existing files in the workspace
+- run_test: run the project's immutable tests in a container sandbox
 
 Rules:
 1. Edit only within the implementer's workspace.
 2. Write clean, testable code matching the existing style.
-3. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.`
+3. Use run_test for test-and-fix when available.
+4. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.`
 }

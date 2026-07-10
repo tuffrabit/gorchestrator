@@ -7,15 +7,17 @@ import (
 
 // Run represents a run row.
 type Run struct {
-	ID         int64
-	IssueID    int64
-	AgentType  string
-	Model      string
-	Status     string
-	TokensUsed int
-	DurationMs int
-	LoopCount  int
-	CreatedAt  string
+	ID          int64
+	IssueID     int64
+	AgentType   string
+	Model       string
+	Status      string
+	TokensUsed  int
+	DurationMs  int
+	LoopCount   int
+	WorkspaceID string
+	BranchName  string
+	CreatedAt   string
 }
 
 // RunRepo provides run persistence.
@@ -46,9 +48,9 @@ func (r *RunRepo) Create(issueID int64, agentType, model, status string) (*Run, 
 
 // Get fetches a run by id.
 func (r *RunRepo) Get(id int64) (*Run, error) {
-	row := r.db.QueryRow(`SELECT id, issue_id, agent_type, model, status, tokens_used, duration_ms, loop_count, created_at FROM runs WHERE id = ?`, id)
+	row := r.db.QueryRow(`SELECT id, issue_id, agent_type, model, status, tokens_used, duration_ms, loop_count, workspace_id, branch_name, created_at FROM runs WHERE id = ?`, id)
 	run := &Run{}
-	if err := row.Scan(&run.ID, &run.IssueID, &run.AgentType, &run.Model, &run.Status, &run.TokensUsed, &run.DurationMs, &run.LoopCount, &run.CreatedAt); err != nil {
+	if err := row.Scan(&run.ID, &run.IssueID, &run.AgentType, &run.Model, &run.Status, &run.TokensUsed, &run.DurationMs, &run.LoopCount, &run.WorkspaceID, &run.BranchName, &run.CreatedAt); err != nil {
 		return nil, err
 	}
 	return run, nil
@@ -59,6 +61,15 @@ func (r *RunRepo) UpdateStatus(id int64, status string, tokensUsed, durationMs, 
 	_, err := r.db.Exec(
 		`UPDATE runs SET status = ?, tokens_used = ?, duration_ms = ?, loop_count = ? WHERE id = ?`,
 		status, tokensUsed, durationMs, loopCount, id,
+	)
+	return err
+}
+
+// SetWorkspace records the workspace path key and git branch for a run.
+func (r *RunRepo) SetWorkspace(id int64, workspaceID, branchName string) error {
+	_, err := r.db.Exec(
+		`UPDATE runs SET workspace_id = ?, branch_name = ? WHERE id = ?`,
+		workspaceID, branchName, id,
 	)
 	return err
 }

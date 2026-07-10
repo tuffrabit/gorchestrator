@@ -1,0 +1,6 @@
+name: jira
+version: "1.0.0"
+protocol: jsonrpc-stdio
+port: trigger
+binary: ./jira/jira
+capabilities: [trigger]

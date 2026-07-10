@@ -22,14 +22,18 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 
+	"github.com/tuffrabit/gorchestrator/internal/adapters"
 	"github.com/tuffrabit/gorchestrator/internal/adjudication"
 	"github.com/tuffrabit/gorchestrator/internal/agents"
 	"github.com/tuffrabit/gorchestrator/internal/config"
+	gorchgit "github.com/tuffrabit/gorchestrator/internal/git"
 	"github.com/tuffrabit/gorchestrator/internal/llm"
+	gorchmcp "github.com/tuffrabit/gorchestrator/internal/mcp"
 	"github.com/tuffrabit/gorchestrator/internal/notify"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 	"github.com/tuffrabit/gorchestrator/internal/tools"
+	"github.com/tuffrabit/gorchestrator/internal/trigger"
 )
 
 // PhaseResult is the orchestrator-written status envelope for a phase.
@@ -87,11 +91,12 @@ type Engine struct {
 	notifs    *sqlite.NotificationRepo
 	bus       *EventBus
 	notifier  *notify.Dispatcher
+	mcp       *gorchmcp.Manager
 }
 
 // NewEngine creates an engine from configuration.
 func NewEngine(cfg *config.Config) (*Engine, error) {
-	store, err := storage.NewFS(cfg.StorageRoot)
+	store, err := openStorage(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("init storage: %w", err)
 	}
@@ -113,6 +118,38 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		notifs:    sqlite.NewNotificationRepo(db),
 		bus:       NewEventBus(),
 	}, nil
+}
+
+func openStorage(cfg *config.Config) (storage.Port, error) {
+	backend := cfg.Storage.Backend
+	if backend == "" || backend == "fs" {
+		return storage.NewFS(cfg.StorageRoot)
+	}
+	if backend != "adapter" {
+		return nil, fmt.Errorf("unknown storage.backend %q", backend)
+	}
+	name := cfg.Storage.AdapterName
+	if name == "" {
+		return nil, fmt.Errorf("storage.adapter_name required when backend=adapter")
+	}
+	for _, ac := range cfg.Adapters {
+		if ac.Name != name {
+			continue
+		}
+		m, err := adapters.LoadManifest(ac.ManifestPath)
+		if err != nil {
+			return nil, fmt.Errorf("load storage adapter %s: %w", name, err)
+		}
+		if m.Port != "storage" {
+			return nil, fmt.Errorf("adapter %s port=%s, want storage", name, m.Port)
+		}
+		sup, err := adapters.NewSupervisor(m.Binary, adapters.SupervisorConfig{})
+		if err != nil {
+			return nil, fmt.Errorf("start storage adapter %s: %w", name, err)
+		}
+		return storage.NewRPCPort(sup, name), nil
+	}
+	return nil, fmt.Errorf("storage adapter %q not found in adapters:", name)
 }
 
 // Cfg returns the engine configuration.
@@ -150,8 +187,16 @@ func (e *Engine) SetNotifier(d *notify.Dispatcher) {
 	e.notifier = d
 }
 
+// SetMCP attaches an MCP manager (per-agent server allowlists).
+func (e *Engine) SetMCP(m *gorchmcp.Manager) {
+	e.mcp = m
+}
+
 // Close releases engine resources.
 func (e *Engine) Close() error {
+	if e.mcp != nil {
+		_ = e.mcp.Close()
+	}
 	if e.db != nil {
 		return e.db.Close()
 	}
@@ -164,6 +209,12 @@ type RunOptions struct {
 	IssueTitle  string
 	SourcePath  string
 	DryRun      bool
+	// Source is the trigger provenance: manual | webhook | github | jira | ...
+	Source string
+	// ExternalID is an optional id from the external system.
+	ExternalID string
+	// TrustExternal skips the forced human implementer gate for external sources.
+	TrustExternal bool
 }
 
 // Run creates a new issue and executes the full pipeline.
@@ -179,20 +230,13 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 		}
 	}
 
-	sourcePath, err := e.projectSourcePath(project)
-	if err != nil {
-		return err
-	}
-
 	issue, err := e.issues.Create(project.ID, opts.IssueTitle)
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)
 	}
 
-	if sourcePath != "" {
-		if err := e.snapshotSource(ctx, project.ID, issue.ID, sourcePath); err != nil {
-			return fmt.Errorf("snapshot source: %w", err)
-		}
+	if err := e.prepareIssueSource(ctx, project, issue); err != nil {
+		return fmt.Errorf("prepare source: %w", err)
 	}
 
 	return e.runPipeline(ctx, project, issue, opts.DryRun)
@@ -270,13 +314,29 @@ func (e *Engine) Resume(ctx context.Context, opts ResumeOptions) error {
 	return e.runPipeline(ctx, project, issue, issue.DryRun)
 }
 
+// agentConfigForIssue returns agent config with untrusted-input defaults applied.
+func (e *Engine) agentConfigForIssue(project *sqlite.Project, issue *sqlite.Issue, phaseName string) config.AgentConfig {
+	phaseCfg := e.cfg.Agent(phaseAgentType(phaseName))
+	// Untrusted external issues default to human gate before implementation.
+	if phaseName == "implementation" && trigger.IsExternal(issue.Source) {
+		trust := e.cfg.Triggers.TrustExternal
+		if pc, err := e.projectConfig(project); err == nil {
+			if v, ok := pc["trust_external"].(bool); ok {
+				trust = v
+			}
+		}
+		if !trust {
+			phaseCfg.Adjudicator = "human"
+		}
+	}
+	return phaseCfg
+}
+
 // runPipeline executes research -> plan -> implementation.
 func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, dryRun bool) error {
 	phases := []string{"research", "plan", "implementation"}
 
 	for _, phaseName := range phases {
-		phaseCfg := e.cfg.Agent(phaseAgentType(phaseName))
-
 		currentPhase, status, err := e.currentPhaseState(project.ID, issue.ID)
 		if err != nil {
 			return err
@@ -294,8 +354,8 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		// use the current phase so we pick up the correct config and input.
 		if currentIdx < phaseIdx {
 			phaseName = currentPhase
-			phaseCfg = e.cfg.Agent(phaseAgentType(phaseName))
 		}
+		phaseCfg := e.agentConfigForIssue(project, issue, phaseName)
 
 		switch status {
 		case "done":
@@ -372,8 +432,6 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 		loops = 1
 	}
 
-	sourceSnapshotPath := storage.SourcePath(project.ID, issue.ID)
-
 	adjudicator := adjudication.New(cfg.Adjudicator)
 
 	// Resume from the previous state if present: a retry continues at the next
@@ -392,13 +450,6 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 	}
 
 	for attempt := startAttempt; attempt <= limit; attempt++ {
-		// Implementation phases need a clean workspace seeded from source.
-		if phase == "implementation" {
-			if err := e.seedWorkspace(ctx, project.ID, issue.ID, sourceSnapshotPath); err != nil {
-				return nil, fmt.Errorf("seed workspace: %w", err)
-			}
-		}
-
 		input := baseInput
 		if attempt > 1 {
 			retryCtx, err := e.buildRetryContext(ctx, project.ID, issue.ID, phase, attempt-1)
@@ -435,7 +486,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			return nil, fmt.Errorf("write task.json: %w", err)
 		}
 
-		// Create run record.
+		// Create run record before workspace setup so branch names can use run_id.
 		modelName := cfg.Model.Model
 		if dryRun {
 			modelName = "dryrun"
@@ -445,9 +496,16 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			return nil, fmt.Errorf("create run: %w", err)
 		}
 
+		// Implementation phases need a clean workspace (git worktree or snapshot copy).
+		if phase == "implementation" {
+			if err := e.prepareImplementerWorkspace(ctx, project, issue, run); err != nil {
+				return nil, fmt.Errorf("prepare workspace: %w", err)
+			}
+		}
+
 		allowlist := []string{
 			storage.IssueDir(project.ID, issue.ID),
-			sourceSnapshotPath,
+			storage.SourcePath(project.ID, issue.ID),
 		}
 		if phase == "implementation" {
 			allowlist = append(allowlist, storage.WorkspacePath(project.ID, issue.ID))
@@ -519,6 +577,18 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 
 		if loopErr != nil {
 			return result, nil
+		}
+
+		// After a successful implementer run, create the single structured commit.
+		if phase == "implementation" {
+			if err := e.commitImplementerWorkspace(ctx, project, issue, run); err != nil {
+				log.Printf("git commit after implementer: %v", err)
+				result.Status = "failed"
+				result.Error = "git commit: " + err.Error()
+				_ = writeResult(ctx, e.store, resultPath, *result)
+				_ = e.runs.UpdateStatus(run.ID, "failed", totalTokens, int(duration), loopCount)
+				return result, nil
+			}
 		}
 
 		// Apply adjudicator at the boundary.
@@ -594,7 +664,21 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		OutputWritten:    &outputWritten,
 	}
 	if phase == "implementation" {
-		bt.WorkspacePath = storage.WorkspacePath(projectID, issueID)
+		wsKey := storage.WorkspacePath(projectID, issueID)
+		bt.WorkspacePath = wsKey
+		bt.WorkspaceHostPath = storage.Abs(e.cfg.StorageRoot, wsKey)
+		// Resolve project for test config (issue → project).
+		if issue, ierr := e.issues.Get(issueID); ierr == nil && issue != nil {
+			if project, perr := e.projects.Get(issue.ProjectID); perr == nil && project != nil {
+				tc, _ := e.projectTestConfig(project)
+				if dryRun {
+					tc.DryRun = true
+				}
+				if tc.Command != "" {
+					bt.Test = &tc
+				}
+			}
+		}
 	}
 
 	var registry []tool.Tool
@@ -608,13 +692,23 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 	if err != nil {
 		return nil, false, "", 0, fmt.Errorf("build tool registry: %w", err)
 	}
+	registry = tools.FilterByNames(registry, cfg.Tools)
+	if e.mcp != nil && len(cfg.MCPServers) > 0 {
+		mcpTools, merr := e.mcp.ToolsForAgent(cfg.MCPServers)
+		if merr != nil {
+			return nil, false, "", 0, fmt.Errorf("mcp tools: %w", merr)
+		}
+		registry = append(registry, mcpTools...)
+	}
 
 	modelCfg := llm.Config{
-		Provider:  cfg.Model.Provider,
-		Model:     cfg.Model.Model,
-		APIKeyEnv: cfg.Model.APIKeyEnv,
-		BaseURL:   cfg.Model.BaseURL,
-		Timeout:   modelTimeout(cfg.Model),
+		Provider:    cfg.Model.Provider,
+		Model:       cfg.Model.Model,
+		APIKeyEnv:   cfg.Model.APIKeyEnv,
+		BaseURL:     cfg.Model.BaseURL,
+		Timeout:     modelTimeout(cfg.Model),
+		Temperature: cfg.Temperature,
+		MaxTokens:   cfg.MaxTokens,
 	}
 	if dryRun {
 		modelCfg.Provider = "dryrun"
@@ -773,11 +867,23 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 func (e *Engine) buildAgent(phase string, cfg config.AgentConfig, llmModel adkmodel.LLM, tools []tool.Tool) (agent.Agent, error) {
 	switch phase {
 	case "research":
-		return agents.NewResearcher().Build(llmModel, tools)
+		a := agents.NewResearcher()
+		if cfg.SystemPrompt != "" {
+			a.SystemPrompt = cfg.SystemPrompt
+		}
+		return a.Build(llmModel, tools)
 	case "plan":
-		return agents.NewPlanner().Build(llmModel, tools)
+		a := agents.NewPlanner()
+		if cfg.SystemPrompt != "" {
+			a.SystemPrompt = cfg.SystemPrompt
+		}
+		return a.Build(llmModel, tools)
 	case "implementation":
-		return agents.NewImplementer().Build(llmModel, tools)
+		a := agents.NewImplementer()
+		if cfg.SystemPrompt != "" {
+			a.SystemPrompt = cfg.SystemPrompt
+		}
+		return a.Build(llmModel, tools)
 	default:
 		return nil, fmt.Errorf("unknown phase: %s", phase)
 	}
@@ -803,6 +909,7 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 	case "implementation":
 		toolList, _ = tools.NewImplementerRegistry(bt)
 	}
+	toolList = tools.FilterByNames(toolList, cfg.Tools)
 	toolSchemas, err := schemasFromTools(toolList)
 	if err != nil {
 		return PhaseTask{}, err
@@ -942,6 +1049,102 @@ func (e *Engine) currentPhaseState(projectID, issueID int64) (string, string, er
 	return "implementation", "done", nil
 }
 
+// prepareIssueSource sets up the issue's source/ tree: git worktree when
+// configured, otherwise a Phase 2 snapshot copy from source_path.
+func (e *Engine) prepareIssueSource(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue) error {
+	gitCfg, err := e.projectGitConfig(project)
+	if err != nil {
+		return err
+	}
+	if gitCfg.Enabled() {
+		return e.prepareGitSource(ctx, project.ID, issue.ID, gitCfg)
+	}
+	sourcePath, err := e.projectSourcePath(project)
+	if err != nil {
+		return err
+	}
+	if sourcePath == "" {
+		return nil
+	}
+	return e.snapshotSource(ctx, project.ID, issue.ID, sourcePath)
+}
+
+func (e *Engine) prepareGitSource(ctx context.Context, projectID, issueID int64, cfg gorchgit.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
+	if err := mgr.EnsureCache(ctx, projectID, cfg); err != nil {
+		return err
+	}
+	abs := storage.Abs(e.cfg.StorageRoot, storage.SourcePath(projectID, issueID))
+	return mgr.CreateSourceWorktree(ctx, projectID, abs, cfg)
+}
+
+// prepareImplementerWorkspace creates a git worktree branch or seeds from snapshot.
+func (e *Engine) prepareImplementerWorkspace(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, run *sqlite.Run) error {
+	gitCfg, err := e.projectGitConfig(project)
+	if err != nil {
+		return err
+	}
+	wsKey := storage.WorkspacePath(project.ID, issue.ID)
+	if gitCfg.Enabled() {
+		mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
+		if err := mgr.EnsureCache(ctx, project.ID, gitCfg); err != nil {
+			return err
+		}
+		branch := gorchgit.BranchName(issue.ID, run.ID)
+		abs := storage.Abs(e.cfg.StorageRoot, wsKey)
+		if err := mgr.CreateImplementerWorktree(ctx, project.ID, abs, branch, gitCfg); err != nil {
+			return err
+		}
+		return e.runs.SetWorkspace(run.ID, wsKey, branch)
+	}
+	sourceSnapshotPath := storage.SourcePath(project.ID, issue.ID)
+	if err := e.seedWorkspace(ctx, project.ID, issue.ID, sourceSnapshotPath); err != nil {
+		return err
+	}
+	return e.runs.SetWorkspace(run.ID, wsKey, "")
+}
+
+// commitImplementerWorkspace stages and commits (and optionally pushes/PRs).
+func (e *Engine) commitImplementerWorkspace(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, run *sqlite.Run) error {
+	gitCfg, err := e.projectGitConfig(project)
+	if err != nil {
+		return err
+	}
+	if !gitCfg.Enabled() {
+		return nil
+	}
+	wsKey := storage.WorkspacePath(project.ID, issue.ID)
+	abs := storage.Abs(e.cfg.StorageRoot, wsKey)
+	mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
+	msg := gorchgit.CommitMessage(issue.Title, issue.ID, run.ID)
+	created, err := mgr.CommitAll(ctx, abs, msg, gitCfg.AuthorName, gitCfg.AuthorEmail)
+	if err != nil {
+		return err
+	}
+	if !created {
+		return nil
+	}
+	branch := run.BranchName
+	if branch == "" {
+		branch = gorchgit.BranchName(issue.ID, run.ID)
+	}
+	if gitCfg.Push {
+		if err := mgr.Push(ctx, abs, branch); err != nil {
+			return err
+		}
+	}
+	if gitCfg.CreatePR {
+		body := fmt.Sprintf("Automated PR for issue #%d (run %d).", issue.ID, run.ID)
+		if err := mgr.CreatePR(ctx, abs, gitCfg.BaseBranch, issue.Title, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // snapshotSource copies sourcePath into the issue's source snapshot directory.
 func (e *Engine) snapshotSource(ctx context.Context, projectID, issueID int64, sourcePath string) error {
 	dest := storage.SourcePath(projectID, issueID)
@@ -970,6 +1173,28 @@ func (e *Engine) setProjectSourcePath(project *sqlite.Project, sourcePath string
 		return err
 	}
 	cfg["source_path"] = sourcePath
+	return e.writeProjectConfig(project, cfg)
+}
+
+// setProjectGitConfig stores git settings in projects.config_json.
+func (e *Engine) setProjectGitConfig(project *sqlite.Project, gitCfg gorchgit.Config) error {
+	cfg, err := e.projectConfig(project)
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(gitCfg)
+	if err != nil {
+		return err
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		return err
+	}
+	cfg["git"] = asMap
+	return e.writeProjectConfig(project, cfg)
+}
+
+func (e *Engine) writeProjectConfig(project *sqlite.Project, cfg map[string]any) error {
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal project config: %w", err)
@@ -992,6 +1217,71 @@ func (e *Engine) projectSourcePath(project *sqlite.Project) (string, error) {
 		return v, nil
 	}
 	return "", nil
+}
+
+// projectGitConfig extracts git config from projects.config_json.
+func (e *Engine) projectGitConfig(project *sqlite.Project) (gorchgit.Config, error) {
+	cfg, err := e.projectConfig(project)
+	if err != nil {
+		return gorchgit.Config{}, err
+	}
+	raw, ok := cfg["git"]
+	if !ok || raw == nil {
+		return gorchgit.Config{}, nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return gorchgit.Config{}, err
+	}
+	var out gorchgit.Config
+	if err := json.Unmarshal(b, &out); err != nil {
+		return gorchgit.Config{}, fmt.Errorf("parse project git config: %w", err)
+	}
+	return out, nil
+}
+
+// projectTestConfig extracts the immutable test command block from config_json.
+func (e *Engine) projectTestConfig(project *sqlite.Project) (tools.TestConfig, error) {
+	cfg, err := e.projectConfig(project)
+	if err != nil {
+		return tools.TestConfig{}, err
+	}
+	raw, ok := cfg["test"]
+	if !ok || raw == nil {
+		return tools.TestConfig{}, nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return tools.TestConfig{}, err
+	}
+	var wire struct {
+		Command    string   `json:"command"`
+		Image      string   `json:"image"`
+		Timeout    string   `json:"timeout"`
+		CPU        string   `json:"cpu"`
+		Memory     string   `json:"memory"`
+		SecretsEnv []string `json:"secrets_env"`
+		Runtime    string   `json:"runtime"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return tools.TestConfig{}, fmt.Errorf("parse project test config: %w", err)
+	}
+	out := tools.TestConfig{
+		Command:    wire.Command,
+		Image:      wire.Image,
+		CPU:        wire.CPU,
+		Memory:     wire.Memory,
+		SecretsEnv: wire.SecretsEnv,
+		Runtime:    wire.Runtime,
+	}
+	if wire.Timeout != "" {
+		d, err := time.ParseDuration(wire.Timeout)
+		if err != nil {
+			return tools.TestConfig{}, fmt.Errorf("parse test.timeout: %w", err)
+		}
+		out.Timeout = d
+	}
+	return out, nil
 }
 
 // projectConfig parses a project's config_json into a map.

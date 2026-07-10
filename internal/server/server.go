@@ -48,6 +48,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /auth/callback", s.handleOIDCCallback)
 	s.mux.HandleFunc("POST /logout", s.handleLogout)
 
+	// External webhook trigger (token auth, not session cookie)
+	s.mux.HandleFunc("POST /hooks/issues", s.handleWebhookIssue)
+
 	// API
 	s.mux.Handle("POST /api/issues", s.auth.Require(auth.RoleMember, http.HandlerFunc(s.handleSubmitIssue)))
 	s.mux.Handle("GET /api/issues", s.auth.Require(auth.RoleViewer, http.HandlerFunc(s.handleListIssues)))

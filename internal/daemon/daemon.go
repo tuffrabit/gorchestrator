@@ -6,20 +6,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/tuffrabit/gorchestrator/internal/adapters"
 	"github.com/tuffrabit/gorchestrator/internal/config"
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
+	"github.com/tuffrabit/gorchestrator/internal/trigger"
 )
 
 // Daemon owns the worker pool that claims queued issues and runs pipelines.
 type Daemon struct {
-	eng    *orchestrator.Engine
-	cfg    *config.Config
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	eng       *orchestrator.Engine
+	cfg       *config.Config
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	triggerWG sync.WaitGroup
+	triggers  []trigger.Port
+	closers   []func() error
 }
 
 // New creates a daemon bound to an engine.
@@ -46,7 +52,87 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go d.worker(runCtx, i)
 	}
 	log.Printf("daemon: started %d workers (max_concurrent_issues=%d)", n, n)
+
+	if err := d.startTriggers(runCtx); err != nil {
+		log.Printf("daemon: trigger start warning: %v", err)
+	}
 	return nil
+}
+
+func (d *Daemon) startTriggers(ctx context.Context) error {
+	wanted := map[string]struct{}{}
+	for _, name := range d.cfg.Triggers.Adapters {
+		wanted[name] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	out := make(chan trigger.Submission, 32)
+	d.triggerWG.Add(1)
+	go d.consumeSubmissions(ctx, out)
+
+	for _, ac := range d.cfg.Adapters {
+		if _, ok := wanted[ac.Name]; !ok {
+			continue
+		}
+		path := ac.ManifestPath
+		if path == "" {
+			continue
+		}
+		m, err := adapters.LoadManifest(path)
+		if err != nil {
+			log.Printf("daemon: trigger adapter %s: %v", ac.Name, err)
+			continue
+		}
+		if m.Port != "trigger" {
+			log.Printf("daemon: adapter %s port=%s, want trigger", ac.Name, m.Port)
+			continue
+		}
+		bin := m.Binary
+		if !filepath.IsAbs(bin) {
+			// already resolved by LoadManifest
+		}
+		sup, err := adapters.NewSupervisor(bin, adapters.SupervisorConfig{})
+		if err != nil {
+			log.Printf("daemon: start trigger %s: %v", ac.Name, err)
+			continue
+		}
+		t := trigger.NewAdapterTrigger(ac.Name, sup)
+		d.triggers = append(d.triggers, t)
+		d.closers = append(d.closers, t.Close)
+		d.triggerWG.Add(1)
+		go func(tp trigger.Port) {
+			defer d.triggerWG.Done()
+			if err := tp.Start(ctx, out); err != nil && ctx.Err() == nil {
+				log.Printf("daemon: trigger %s stopped: %v", tp.Name(), err)
+			}
+		}(t)
+		log.Printf("daemon: trigger adapter %s started", ac.Name)
+	}
+	return nil
+}
+
+func (d *Daemon) consumeSubmissions(ctx context.Context, in <-chan trigger.Submission) {
+	defer d.triggerWG.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sub, ok := <-in:
+			if !ok {
+				return
+			}
+			_, err := d.eng.SubmitIssue(ctx, orchestrator.RunOptions{
+				ProjectName: sub.Project,
+				IssueTitle:  sub.Title,
+				Source:      sub.Source,
+				ExternalID:  sub.ExternalID,
+			})
+			if err != nil {
+				log.Printf("daemon: submit from trigger %s: %v", sub.Source, err)
+			}
+		}
+	}
 }
 
 // Shutdown stops claiming new work, waits up to timeout for in-flight phases,
@@ -85,6 +171,19 @@ func (d *Daemon) Shutdown(timeout time.Duration) {
 		case <-done:
 		case <-time.After(2 * time.Second):
 		}
+	}
+	for _, c := range d.closers {
+		_ = c()
+	}
+	// Wait briefly for trigger goroutines.
+	trigDone := make(chan struct{})
+	go func() {
+		d.triggerWG.Wait()
+		close(trigDone)
+	}()
+	select {
+	case <-trigDone:
+	case <-time.After(2 * time.Second):
 	}
 }
 

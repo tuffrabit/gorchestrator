@@ -18,15 +18,22 @@ import (
 
 // AnthropicModel is an ADK model.LLM that calls the Anthropic Messages API.
 type AnthropicModel struct {
-	model   string
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	model       string
+	apiKey      string
+	baseURL     string
+	client      *http.Client
+	temperature *float64
+	maxTokens   int
 }
 
 // NewAnthropicModel creates an Anthropic model.LLM.
 // If baseURL is empty, it defaults to https://api.anthropic.com/v1.
 func NewAnthropicModel(modelName, apiKeyEnv, baseURL string, timeout time.Duration) model.LLM {
+	return NewAnthropicModelWithOptions(modelName, apiKeyEnv, baseURL, timeout, nil, 0)
+}
+
+// NewAnthropicModelWithOptions creates an Anthropic model with temperature/max_tokens.
+func NewAnthropicModelWithOptions(modelName, apiKeyEnv, baseURL string, timeout time.Duration, temperature *float64, maxTokens int) model.LLM {
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com/v1"
 	}
@@ -39,10 +46,12 @@ func NewAnthropicModel(modelName, apiKeyEnv, baseURL string, timeout time.Durati
 		apiKey = os.Getenv(apiKeyEnv)
 	}
 	return &AnthropicModel{
-		model:   modelName,
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		client:  &http.Client{Timeout: timeout},
+		model:       modelName,
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		client:      &http.Client{Timeout: timeout},
+		temperature: temperature,
+		maxTokens:   maxTokens,
 	}
 }
 
@@ -135,10 +144,17 @@ func (m *AnthropicModel) buildRequestBody(req *model.LLMRequest) (map[string]any
 		return nil, err
 	}
 
+	maxTok := 4096
+	if m.maxTokens > 0 {
+		maxTok = m.maxTokens
+	}
 	body := map[string]any{
 		"model":      modelName,
-		"max_tokens": 4096,
+		"max_tokens": maxTok,
 		"messages":   messages,
+	}
+	if m.temperature != nil {
+		body["temperature"] = *m.temperature
 	}
 	if system != "" {
 		body["system"] = system

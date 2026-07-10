@@ -53,20 +53,17 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 		}
 	}
 
-	sourcePath, err := e.projectSourcePath(project)
-	if err != nil {
-		return nil, err
+	source := opts.Source
+	if source == "" {
+		source = "manual"
 	}
-
-	issue, err := e.issues.CreateQueued(project.ID, opts.IssueTitle, opts.DryRun)
+	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID)
 	if err != nil {
 		return nil, fmt.Errorf("create issue: %w", err)
 	}
 
-	if sourcePath != "" {
-		if err := e.snapshotSource(ctx, project.ID, issue.ID, sourcePath); err != nil {
-			return nil, fmt.Errorf("snapshot source: %w", err)
-		}
+	if err := e.prepareIssueSource(ctx, project, issue); err != nil {
+		return nil, fmt.Errorf("prepare source: %w", err)
 	}
 
 	e.Publish(Event{

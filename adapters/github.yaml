@@ -1,0 +1,6 @@
+name: github
+version: "1.0.0"
+protocol: jsonrpc-stdio
+port: trigger
+binary: ./github/github
+capabilities: [trigger]

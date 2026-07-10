@@ -41,10 +41,12 @@ You have access to these tools:
 - grep_search: search file contents
 - write_file: create new files in the workspace
 - update_file: overwrite existing files in the workspace
+- run_test: execute the project's immutable test command in a container sandbox; use it for test-and-fix loops
 
 Rules:
 1. Edit only within the implementer's workspace.
 2. Match the existing code style and include tests where the plan asks for them.
-3. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.
-4. If the implementation is incomplete, call finish_task with done=false and explain what is missing.`
+3. Prefer run_test after meaningful changes when tests are configured; fix failures and re-run.
+4. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.
+5. If the implementation is incomplete, call finish_task with done=false and explain what is missing.`
 }

@@ -1,6 +1,6 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-09 (Phase 3 complete)  
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-09 (Phase 4 plan solidified)  
 > **Status:** Living document — single source of truth  
 > **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
 >
@@ -15,6 +15,7 @@
 | 2026-07-09 | Phase 3 plan solidification. Closed §17 Q5 (notifications: console + Slack webhook + SMTP email) and Q6 (OIDC-only MVP; SAML deferred). Recorded local auth mode for dev/test, issue-row queue model, and HTMX/SSE promoted hard for Phase 3. |
 | 2026-07-09 | Dashboard UX: vertical expandable status-tinted issue cards (not kanban); dark-only theme (greys/blues + neon pink); multi-expand; adjudication on expanded card; artifact slide-out drawer; submit from top-bar drawer. See §11.5. |
 | 2026-07-09 | Phase 3 complete: `serve` daemon, HTMX dashboard, local+OIDC auth, SSE, notifications (console/Slack/email), human retry on failed/cancelled, OpenAI-compatible tool schema normalization for llama.cpp-class servers. |
+| 2026-07-09 | Phase 4 plan solidification. Closed §17 Q9 (agent config merge layers) and Q12 (adapters own credentials via env). Git worktree model; S3-only storage this phase (Azure deferred); MCP per-agent server allowlists with external triggers; seven session-sized parts A–G. See `phase_4.md`. |
 
 ---
 
@@ -275,18 +276,19 @@ project:
 
 The agent never touches git. The orchestrator handles the entire git lifecycle:
 
-1. **Branch Creation:** Orchestrator creates a unique branch per implementer run:
+1. **Bare clone cache:** Per project at `{storage_root}/repos/{project_id}.git`. Fetch before each run. Validated at project registration (`git` on PATH; optional `gh`).
+2. **Source worktree:** At issue creation, orchestrator creates a read-only worktree at `projects/{pid}/issues/{iid}/source/` checked out to `base_branch` (replaces the §6.6 snapshot copy when git is configured).
+3. **Branch + implementer worktree:** Per implementer run:
    ```bash
-   git checkout -b ai-implementer/{issue_id}-{timestamp}
+   git worktree add -b ai-implementer/{issue_id}-{run_id} implementation/workspace <base>
    ```
-2. **Workspace Copy:** Orchestrator copies repo files into the configured storage location under a workspace path:
-   ```
-   workspaces/{issue_id}/implementer-{run_id}/
-   ```
-3. **Agent Execution:** Implementer receives `read_file`, `write_file`, `update_file` tools scoped to that workspace path. The agent sees relative paths (e.g., `src/auth.go`) but the orchestrator resolves them to the workspace absolute path.
-4. **Post-Execution:** Orchestrator stages changes, commits with a structured message, and optionally pushes. The human decides whether to merge.
+   Branch name uses SQLite `runs.id` as `{run_id}`. Workspace path remains `implementation/workspace` (path helper); parallel runs use distinct branches/worktrees.
+4. **Agent Execution:** Implementer receives `read_file`, `write_file`, `update_file` (and `run_test`) tools scoped to that workspace path. The agent sees relative paths; the orchestrator resolves them. Agents never run git.
+5. **Post-Execution:** Orchestrator stages changes, creates a **single structured commit** per run (§17 Q13), optionally pushes (`git.push`, default false), optionally opens a PR via `gh` (`git.create_pr`, default false). The human decides whether to merge.
 
-**Parallel Implementers:** Each implementer run gets its own branch and workspace directory. No collision. The orchestrator tracks `workspace_id` and `branch_name` in SQLite.
+**Local-only projects:** If `git.repo_url` is unset but `source_path` is set, the Phase 2 snapshot path is retained.
+
+**Parallel Implementers:** Each implementer run gets its own branch and workspace. No collision. The orchestrator tracks `workspace_id` and `branch_name` in SQLite.
 
 ### 6.5 Test Execution (`run_test` Tool)
 
@@ -662,12 +664,12 @@ Small, native Go toolset available to agents based on agent type:
 
 ### 12.2 MCP Adapter Port
 
-- Users can connect any MCP server for custom tools
-- MCP tools are explicitly registered in agent config (not dynamically discovered)
-- MCP is natively an external process protocol; core implements the MCP client
-- Keeps core simple while supporting ecosystem extensibility
-- **MVP:** All MCP tools from enabled servers available to all agents
-- **Future:** Per-agent, per-tool permission granularity
+- Users can connect any MCP server for custom tools (stdio in Phase 4; streamable HTTP later if needed)
+- MCP servers are declared in project/global config (**deny by default**)
+- Core implements the MCP client (official Go SDK); tools from a server are discovered at connect time for schemas
+- **Phase 4:** Per-agent, per-**server** allowlists — an agent only receives tools from servers listed in its `mcp_servers` config. If a server is allowed, all of its tools are exposed (name-prefixed to avoid collisions)
+- **Phase 5:** Per-agent, per-**tool** permission granularity
+- MCP tool calls are recorded in `events.jsonl` like core tools
 
 ---
 
@@ -764,14 +766,14 @@ Small, native Go toolset available to agents based on agent type:
 ### Phase 4: Extensibility
 **Goal:** Users can plug in their own world. (See `phase_4.md`.)
 
-- Git workspace model: branch creation, workspace isolation, commit/push (replaces §6.6 snapshot copies)
+- Git workspace model: bare clone cache, worktrees, branch per run, single commit/optional push (replaces §6.6 snapshot copies when git configured)
 - `run_test` core tool — **container-isolated (acceptance criterion, §6.5)**, secrets injection per §17 Q15
 - MCP client: custom tools via MCP servers, **with per-agent server allowlists (§5.6)**
-- Trigger port formalized + adapters: GitHub Issues, Jira (external process); externally-triggered issues default to human adjudication before implementation
-- Storage adapters: S3, Azure Blob (external process)
-- Agent personality config: system prompts, temperature, tool subsets (the casting thesis, realized)
+- Trigger port formalized + adapters: HTTP webhook (built-in), GitHub Issues, Jira (external process); externally-triggered issues default to human adjudication before implementation
+- Storage adapter: **S3** (external process); Azure Blob deferred until the S3 pattern is proven
+- Agent personality config: system prompts, temperature, tool subsets (the casting thesis, realized; §17 Q9)
 - JSON-RPC client: restart with exponential backoff, streaming notifications
-- **Deliverable:** Users can connect Jira, plug in internal APIs via MCP, store artifacts in cloud, run test-and-fix loops safely
+- **Deliverable:** Users can connect Jira, plug in internal APIs via MCP, store artifacts in S3, run test-and-fix loops safely
 
 ### Phase 5: Guardrails
 **Goal:** The system protects itself and the user's wallet. (See `phase_5.md`.)
@@ -862,6 +864,10 @@ Small, native Go toolset available to agents based on agent type:
 | `cancelled` is a distinct status | Ctrl-C / shutdown is not a failure; it must not be reported as one. |
 | Empty output fails the loop | An attempt with neither a `write_output` call nor final model text fails immediately rather than being marked done and flagged later. |
 | Markdown docs are canonical | The spec is the living document; phase docs freeze at completion; HTML renderings are unmaintained presentation artifacts. |
+| Git worktree workspace model (Phase 4) | Bare clone cache + source/implementer worktrees replace per-issue file snapshots when git is configured; agents never run git. |
+| Adapter credentials stay in adapter env | External adapters authenticate to their backends via their own env/config; core does not mediate secrets into agent artifacts (§17 Q12). |
+| S3 first for cloud storage | Phase 4 ships S3 only; Azure Blob follows once the JSON-RPC storage pattern is proven. |
+| MCP per-agent server allowlists with triggers | Per-server grants land in Phase 4 alongside external triggers (§5.6); per-tool grants are Phase 5. |
 
 ---
 
@@ -882,16 +888,16 @@ Small, native Go toolset available to agents based on agent type:
 | 8 | Project/issue ID scheme | **Auto-increment integers** — *closed* | Decided de facto by Phase 1 code. |
 | 10 | Local LLM integration | **OpenAI-compatible endpoint** (`base_url` on the OpenAI implementation) — *closed* | Decided de facto by Phase 2 code; covers llama.cpp, Ollama, and most gateways. |
 | 11 | Adapter binary discovery | **Explicit registry in config** *(soft)* | Scanning a directory and spawning whatever executables appear there is a supply-chain risk. See §4.3. |
-| 13 | Git commit strategy | **Single commit per implementer run** *(soft)* | Granular commits are dashboard polish, not MVP. Revisit if review workflows demand it. |
+| 9 | YAML agent config schema | **Merge layers:** built-in defaults → global `default_model` → `agents.<type>` → per-issue overrides. Fields include model, temperature, max_tokens, system_prompt / system_prompt_append, core tool subset, mcp_servers, adjudication, token_budget (stored Phase 4; enforced Phase 5). *(soft; hard for Phase 4)* | Casting thesis; closed 2026-07-09 with Phase 4 plan. |
+| 12 | Adapter authentication | **Adapters own backend credentials** via process env and/or adapter-local config. Core never puts secrets in agent-visible artifacts. *(soft; hard for Phase 4)* | Matches Slack/email; applies to S3/Jira/GitHub. Closed 2026-07-09 with Phase 4 plan. |
+| 13 | Git commit strategy | **Single commit per implementer run** *(soft; hard for Phase 4)* | Granular commits are dashboard polish, not MVP. Revisit if review workflows demand it. |
 | 15 | Test command secrets | **Maintainer-only secrets config, injected into the test container environment, never rendered into any agent-readable artifact** *(soft)* | `task.json` is agent-readable; secrets must never flow through it. See §6.5. |
 
 ### 17.2 Still Open
 
 | # | Question | Notes |
 |---|----------|-------|
-| 3 | Codebase search tool | Pure-Go grep is implemented; tree-sitter / vector semantic search remain candidates for Phase 4+. |
-| 9 | YAML config schema | Per-project vs. per-issue vs. per-agent-type defaults with overrides — firm up in Phase 2 Part 2 when per-agent config lands. |
-| 12 | Adapter authentication | How external adapters authenticate to their backends (AWS credentials for S3, API keys for Jira) — decide in Phase 4. Email/Slack adapters in Phase 3 own their credentials via adapter env/config (preview of the pattern). |
+| 3 | Codebase search tool | Pure-Go grep is implemented; tree-sitter / vector semantic search remain candidates for later phases (not Phase 4). |
 | 14 | Workspace cleanup / retention | Auto-delete vs. archive for audit — decide by Phase 6. |
 
 ---

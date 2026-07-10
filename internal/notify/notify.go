@@ -121,24 +121,27 @@ func NotifyBadOutput(ctx context.Context, d *Dispatcher, issueID int64, phase, e
 	}
 }
 
-// AdapterSink sends notifications via a JSON-RPC stdio adapter (port: notification).
+// AdapterSink sends notifications via a supervised JSON-RPC stdio adapter
+// (port: notification). The supervisor restarts the child on crash.
 type AdapterSink struct {
-	client *adapters.Client
-	name   string
+	sup  *adapters.Supervisor
+	name string
 }
 
-// NewAdapterSink spawns the adapter binary from a loaded manifest.
+// NewAdapterSink spawns the adapter binary from a loaded manifest under a
+// restart supervisor so a dead Slack/email process does not permanently
+// disable notifications.
 func NewAdapterSink(m *adapters.Manifest) (*AdapterSink, error) {
-	c, err := adapters.NewClient(m.Binary)
+	sup, err := adapters.NewSupervisor(m.Binary, adapters.SupervisorConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("start notify adapter %s: %w", m.Name, err)
 	}
-	return &AdapterSink{client: c, name: m.Name}, nil
+	return &AdapterSink{sup: sup, name: m.Name}, nil
 }
 
 // Send implements Port.
 func (a *AdapterSink) Send(ctx context.Context, n Notification) error {
-	_, err := a.client.Call(ctx, "notification.send", map[string]any{
+	_, err := a.sup.Call(ctx, "notification.send", map[string]any{
 		"kind":      n.Kind,
 		"recipient": n.Recipient,
 		"subject":   n.Subject,
@@ -151,10 +154,10 @@ func (a *AdapterSink) Send(ctx context.Context, n Notification) error {
 	return nil
 }
 
-// Close stops the adapter process.
+// Close stops the supervised adapter process.
 func (a *AdapterSink) Close() error {
-	if a.client != nil {
-		return a.client.Close()
+	if a.sup != nil {
+		return a.sup.Close()
 	}
 	return nil
 }

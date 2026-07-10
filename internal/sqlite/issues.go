@@ -24,6 +24,8 @@ type Issue struct {
 	Status       string
 	CurrentPhase string
 	DryRun       bool
+	Source       string // manual | webhook | github | jira | ...
+	ExternalID   string
 	CreatedAt    string
 	UpdatedAt    string
 }
@@ -48,23 +50,34 @@ func NewIssueRepo(db *sql.DB) *IssueRepo {
 
 // Create inserts an issue as in_progress (CLI path) and returns it.
 func (r *IssueRepo) Create(projectID int64, title string) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusInProgress, false)
+	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "")
 }
 
 // CreateQueued inserts an issue with status queued for the daemon worker pool.
 func (r *IssueRepo) CreateQueued(projectID int64, title string, dryRun bool) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun)
+	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, "manual", "")
+}
+
+// CreateQueuedFrom creates a queued issue with provenance (webhook/github/jira).
+func (r *IssueRepo) CreateQueuedFrom(projectID int64, title string, dryRun bool, source, externalID string) (*Issue, error) {
+	if source == "" {
+		source = "manual"
+	}
+	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, source, externalID)
 }
 
 // CreateWithStatus inserts an issue with the given status and dry-run flag.
-func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryRun bool) (*Issue, error) {
+func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryRun bool, source, externalID string) (*Issue, error) {
 	dry := 0
 	if dryRun {
 		dry = 1
 	}
+	if source == "" {
+		source = "manual"
+	}
 	res, err := r.db.Exec(
-		`INSERT INTO issues (project_id, title, status, current_phase, dry_run) VALUES (?, ?, ?, 'research', ?)`,
-		projectID, title, status, dry,
+		`INSERT INTO issues (project_id, title, status, current_phase, dry_run, source, external_id) VALUES (?, ?, ?, 'research', ?, ?, ?)`,
+		projectID, title, status, dry, source, externalID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert issue: %w", err)
@@ -79,7 +92,7 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 // Get fetches an issue by id.
 func (r *IssueRepo) Get(id int64) (*Issue, error) {
 	row := r.db.QueryRow(`
-		SELECT id, project_id, title, status, current_phase, dry_run, created_at, updated_at
+		SELECT id, project_id, title, status, current_phase, dry_run, source, external_id, created_at, updated_at
 		FROM issues WHERE id = ?`, id)
 	return scanIssue(row)
 }
@@ -160,7 +173,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 	}
 	args = append(args, limit, f.Offset)
 	q := fmt.Sprintf(`
-		SELECT id, project_id, title, status, current_phase, dry_run, created_at, updated_at
+		SELECT id, project_id, title, status, current_phase, dry_run, source, external_id, created_at, updated_at
 		FROM issues
 		%s
 		ORDER BY updated_at DESC, id DESC
@@ -176,7 +189,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 // ListNonTerminal returns issues that are not in a terminal status.
 func (r *IssueRepo) ListNonTerminal() ([]*Issue, error) {
 	rows, err := r.db.Query(`
-		SELECT id, project_id, title, status, current_phase, dry_run, created_at, updated_at
+		SELECT id, project_id, title, status, current_phase, dry_run, source, external_id, created_at, updated_at
 		FROM issues
 		WHERE status NOT IN (?, ?, ?)
 		ORDER BY id ASC`,
@@ -201,7 +214,7 @@ func (r *IssueRepo) Requeue(id int64) error {
 func scanIssue(row *sql.Row) (*Issue, error) {
 	i := &Issue{}
 	var dry int
-	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Status, &i.CurrentPhase, &dry, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -216,7 +229,7 @@ func scanIssues(rows *sql.Rows) ([]*Issue, error) {
 	for rows.Next() {
 		i := &Issue{}
 		var dry int
-		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Status, &i.CurrentPhase, &dry, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		i.DryRun = dry != 0
