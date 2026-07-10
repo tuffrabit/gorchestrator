@@ -6,15 +6,29 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
 )
 
+// multiFlag collects repeated -attach values.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return fmt.Sprint([]string(*m)) }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
+
 // Run executes the `run` subcommand.
 func Run(fs *flag.FlagSet, args []string) error {
-	issue := fs.String("issue", "", "issue title/body")
+	issue := fs.String("issue", "", "issue title (short label)")
+	body := fs.String("body", "", "optional issue description (longer context for agents)")
+	bodyFile := fs.String("body-file", "", "optional path to a file whose contents are the description")
+	var attach multiFlag
+	fs.Var(&attach, "attach", "optional text attachment file (repeatable; extension must be text-like)")
 	project := fs.String("project", "", "project name (must be declared under projects: in config YAML)")
 	dryRun := fs.Bool("dry-run", false, "use the dry-run LLM adapter")
 	configPath := fs.String("config", "", "path to config yaml (default: ~/.config/gorchestrator/config.yaml)")
@@ -25,6 +39,26 @@ func Run(fs *flag.FlagSet, args []string) error {
 
 	if *issue == "" || *project == "" {
 		return fmt.Errorf("--issue and --project are required")
+	}
+
+	description := *body
+	if *bodyFile != "" {
+		data, err := os.ReadFile(*bodyFile)
+		if err != nil {
+			return fmt.Errorf("read --body-file: %w", err)
+		}
+		description = string(data)
+	}
+	var attachments []orchestrator.AttachmentFile
+	for _, p := range attach {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("read attachment %s: %w", p, err)
+		}
+		attachments = append(attachments, orchestrator.AttachmentFile{
+			Name: filepath.Base(p),
+			Data: data,
+		})
 	}
 
 	var cfg *config.Config
@@ -50,9 +84,11 @@ func Run(fs *flag.FlagSet, args []string) error {
 	}()
 
 	opts := orchestrator.RunOptions{
-		ProjectName: *project,
-		IssueTitle:  *issue,
-		DryRun:      *dryRun,
+		ProjectName:  *project,
+		IssueTitle:   *issue,
+		Description:  description,
+		Attachments:  attachments,
+		DryRun:       *dryRun,
 	}
 
 	return orchestrator.Run(ctx, cfg, opts)

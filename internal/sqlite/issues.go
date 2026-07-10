@@ -21,6 +21,7 @@ type Issue struct {
 	ID               int64
 	ProjectID        int64
 	Title            string
+	Description      string // optional; mirrored to issue.md on submit
 	Status           string
 	CurrentPhase     string
 	DryRun           bool
@@ -85,7 +86,7 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 		agentFlavorsJSON = "{}"
 	}
 	res, err := r.db.Exec(
-		`INSERT INTO issues (project_id, title, status, current_phase, dry_run, source, external_id, agent_flavors_json) VALUES (?, ?, ?, 'research', ?, ?, ?, ?)`,
+		`INSERT INTO issues (project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json) VALUES (?, ?, '', ?, 'research', ?, ?, ?, ?)`,
 		projectID, title, status, dry, source, externalID, agentFlavorsJSON,
 	)
 	if err != nil {
@@ -101,9 +102,20 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 // Get fetches an issue by id.
 func (r *IssueRepo) Get(id int64) (*Issue, error) {
 	row := r.db.QueryRow(`
-		SELECT id, project_id, title, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
+		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
 		FROM issues WHERE id = ?`, id)
 	return scanIssue(row)
+}
+
+// SetDescription updates the issue description column.
+// Callers that also maintain issue.md must write the file in the same flow
+// so SQLite and filesystem stay aligned (see Engine.persistIssueContext).
+func (r *IssueRepo) SetDescription(id int64, description string) error {
+	_, err := r.db.Exec(
+		`UPDATE issues SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		description, id,
+	)
+	return err
 }
 
 // UpdateStatus updates the status and current phase of an issue.
@@ -182,7 +194,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 	}
 	args = append(args, limit, f.Offset)
 	q := fmt.Sprintf(`
-		SELECT id, project_id, title, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
+		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
 		FROM issues
 		%s
 		ORDER BY updated_at DESC, id DESC
@@ -198,7 +210,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 // ListNonTerminal returns issues that are not in a terminal status.
 func (r *IssueRepo) ListNonTerminal() ([]*Issue, error) {
 	rows, err := r.db.Query(`
-		SELECT id, project_id, title, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
+		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
 		FROM issues
 		WHERE status NOT IN (?, ?, ?)
 		ORDER BY id ASC`,
@@ -259,7 +271,7 @@ func (r *IssueRepo) Delete(id int64) error {
 func scanIssue(row *sql.Row) (*Issue, error) {
 	i := &Issue{}
 	var dry int
-	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -277,7 +289,7 @@ func scanIssues(rows *sql.Rows) ([]*Issue, error) {
 	for rows.Next() {
 		i := &Issue{}
 		var dry int
-		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		i.DryRun = dry != 0

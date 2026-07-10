@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -251,6 +252,10 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	}
 	project := r.FormValue("project")
 	title := r.FormValue("title")
+	description := strings.TrimSpace(r.FormValue("description"))
+	if description == "" {
+		description = strings.TrimSpace(r.FormValue("body"))
+	}
 	if r.FormValue("source") != "" || r.FormValue("source_path") != "" {
 		http.Error(w, "source/source_path is not accepted; configure projects.<name>.source_path in YAML", http.StatusUnprocessableEntity)
 		return
@@ -266,9 +271,16 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 			flavors[typ] = v
 		}
 	}
+	attachments, err := collectFormAttachments(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
 		ProjectName:  project,
 		IssueTitle:   title,
+		Description:  description,
+		Attachments:  attachments,
 		DryRun:       dryRun,
 		AgentFlavors: flavors,
 	})
@@ -287,7 +299,8 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 		uid = &u.ID
 	}
 	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
-		"project": project, "title": title, "dry_run": dryRun,
+		"project": project, "title": title, "has_description": description != "",
+		"attachment_count": len(attachments), "dry_run": dryRun,
 		"agent_flavors": parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
 	})
 	view, _ := s.eng.GetIssue(r.Context(), issue.ID)
@@ -302,6 +315,38 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	if err := render(w, "partials/issue_card.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// collectFormAttachments reads multipart files named "attachments".
+func collectFormAttachments(r *http.Request) ([]orchestrator.AttachmentFile, error) {
+	if r.MultipartForm == nil || r.MultipartForm.File == nil {
+		return nil, nil
+	}
+	headers := r.MultipartForm.File["attachments"]
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	var out []orchestrator.AttachmentFile
+	for _, fh := range headers {
+		if fh == nil || fh.Filename == "" {
+			continue
+		}
+		f, err := fh.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open attachment %q: %w", fh.Filename, err)
+		}
+		// Hard cap slightly above orchestrator max so we fail fast on huge uploads.
+		data, err := io.ReadAll(io.LimitReader(f, 2*1024*1024+1))
+		_ = f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read attachment %q: %w", fh.Filename, err)
+		}
+		if len(data) > 2*1024*1024 {
+			return nil, fmt.Errorf("attachment %q is too large", fh.Filename)
+		}
+		out = append(out, orchestrator.AttachmentFile{Name: fh.Filename, Data: data})
+	}
+	return out, nil
 }
 
 // submitFormData builds template data for the New-issue drawer.
@@ -321,6 +366,7 @@ func (s *Server) submitFormData(r *http.Request, selectedProject, title string, 
 		"Projects":        projects,
 		"SelectedProject": selectedProject,
 		"Title":           title,
+		"Description":     "",
 		"DryRun":          dryRun,
 		"CSRF":            auth.CSRFToken(r),
 		"FlavorSelects":   s.flavorSelectsForProject(selectedProject),

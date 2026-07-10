@@ -41,6 +41,8 @@ type IssueView struct {
 	Attempt     int
 	PhaseStatus string      // filesystem result status for current phase
 	Phases      []PhaseStep // research → plan → implementation strip
+	// Attachments are basenames under attachments/ (issue context uploads).
+	Attachments []string
 }
 
 // SubmitIssue creates the issue (snapshot source if configured), sets status
@@ -68,6 +70,10 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID, castJSON)
 	if err != nil {
 		return nil, fmt.Errorf("create issue: %w", err)
+	}
+
+	if err := e.persistIssueContext(ctx, issue, opts.IssueTitle, opts.Description, opts.Attachments); err != nil {
+		return nil, fmt.Errorf("persist issue context: %w", err)
 	}
 
 	if err := e.prepareIssueSource(ctx, project, issue); err != nil {
@@ -438,6 +444,10 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		}
 		phases = e.buildPhaseSteps(ctx, project.ID, issue)
 	}
+	var atts []string
+	if project != nil {
+		atts, _ = e.listAttachmentNames(ctx, project.ID, issue.ID)
+	}
 	return &IssueView{
 		Issue:       issue,
 		ProjectName: name,
@@ -445,6 +455,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		Attempt:     attempt,
 		PhaseStatus: phaseStatus,
 		Phases:      phases,
+		Attachments: atts,
 	}, nil
 }
 

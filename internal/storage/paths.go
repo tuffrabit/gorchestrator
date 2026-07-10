@@ -53,6 +53,22 @@ func OutputPath(projectID, issueID int64, phase string) string {
 	return AttemptOutputPath(projectID, issueID, phase, 1)
 }
 
+// IssueMarkdownPath is the orchestrator-written issue title + description artifact.
+func IssueMarkdownPath(projectID, issueID int64) string {
+	return path.Join(IssueDir(projectID, issueID), "issue.md")
+}
+
+// AttachmentsDir is the directory for user-uploaded issue context files.
+func AttachmentsDir(projectID, issueID int64) string {
+	return path.Join(IssueDir(projectID, issueID), "attachments")
+}
+
+// AttachmentPath returns the storage key for one attachment under AttachmentsDir.
+// name must already be a sanitized basename (no path separators).
+func AttachmentPath(projectID, issueID int64, name string) string {
+	return path.Join(AttachmentsDir(projectID, issueID), name)
+}
+
 // SourcePath returns the relative path to the read-only source snapshot for an issue.
 func SourcePath(projectID, issueID int64) string {
 	return path.Join(IssueDir(projectID, issueID), "source")

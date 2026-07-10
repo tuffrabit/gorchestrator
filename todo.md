@@ -1,8 +1,8 @@
 # TODO
 
 - ~~view each agent's output/error via drawer, not just indeterminate state~~ (phase tabs + per-phase result/output/activity; implementer workspace tree)
-- allow file upload in new issue prompt
-- difference between issue title and issue description/prompt?
+- ~~allow file upload in new issue prompt~~ (text-like attachments on submit)
+- ~~difference between issue title and issue description/prompt?~~ (optional description + issue.md)
 - ~~download implementer output~~ (workspace.zip when implementation done)
 - project should be configurable not as issue input — planned: `phase_4_project_refactor.md` / spec §6.0
 - agents should be configurable per project — planned: flavors in `phase_4_project_refactor.md` / spec §8.2

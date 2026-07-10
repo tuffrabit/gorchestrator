@@ -2,6 +2,8 @@
 <form hx-post="/partials/submit"
   hx-target="#issue-feed"
   hx-swap="afterbegin settle:0s"
+  hx-encoding="multipart/form-data"
+  enctype="multipart/form-data"
   hx-on::after-request="if(event.detail.successful){ closeDrawer(); }">
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
   <div class="form-row">
@@ -22,11 +24,22 @@
     <label for="title">Title</label>
     <input id="title" name="title" required placeholder="Add OIDC login" value="{{.Title}}">
   </div>
+  <div class="form-row">
+    <label for="description">Description <span class="card-meta">(optional)</span></label>
+    <textarea id="description" name="description" rows="6"
+      placeholder="The meat of the issue: problem, acceptance criteria, constraints…">{{.Description}}</textarea>
+  </div>
+  <div class="form-row">
+    <label for="attachments">Attachments <span class="card-meta">(optional, text files)</span></label>
+    <input id="attachments" name="attachments" type="file" multiple
+      accept=".txt,.md,.markdown,.html,.htm,.json,.jsonl,.yaml,.yml,.xml,.csv,.tsv,.log,.toml,.ini,.cfg,.conf,.rst,.tex,.diff,.patch,.go,.py,.js,.ts,.tsx,.jsx,.css,.sql,.sh,.bash,.env,.properties">
+    <p class="card-meta" style="margin-top:0.35rem">Text-like extensions only (e.g. .md, .txt, .log, .json). Max 20 files, 1&nbsp;MB each.</p>
+  </div>
   <div id="agent-flavors">
     {{template "partials/submit_flavors.html" .}}
   </div>
-  <div class="form-row">
-    <label><input type="checkbox" name="dry_run" value="1" {{if .DryRun}}checked{{end}}> Dry run</label>
+  <div class="form-row form-row-checkbox">
+    <label class="checkbox-label"><input type="checkbox" name="dry_run" value="1" {{if .DryRun}}checked{{end}}> Dry run</label>
   </div>
   <button class="btn btn-primary" type="submit">Submit issue</button>
 </form>

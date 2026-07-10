@@ -1,6 +1,6 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-10 (project registry + agent flavors)  
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-10 (issue description + attachments; per-phase artifact drawer)  
 > **Status:** Living document — single source of truth  
 > **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
 >
@@ -17,6 +17,7 @@
 | 2026-07-09 | Phase 3 complete: `serve` daemon, HTMX dashboard, local+OIDC auth, SSE, notifications (console/Slack/email), human retry on failed/cancelled, OpenAI-compatible tool schema normalization for llama.cpp-class servers. |
 | 2026-07-09 | Phase 4 plan solidification. Closed §17 Q9 (agent config merge layers) and Q12 (adapters own credentials via env). Git worktree model; S3-only storage this phase (Azure deferred); MCP per-agent server allowlists with external triggers; seven session-sized parts A–G. See `phase_4.md`. |
 | 2026-07-10 | **Project registry + agent flavors.** Projects are YAML-declared only (no create-on-submit/CLI). `source_path` / git / test / agent flavors live under `projects.<name>` in config. Named agent **flavors** of the three core types; submit drawer selects a flavor per stage when a type has more than one. Per-issue cast frozen at submit. Project membership / invites deferred. See §6.0, §8.2, §11.5, §17 Q9/Q16; plan in `phase_4_project_refactor.md`. |
+| 2026-07-10 | **Issue input + multi-phase artifacts (post Phase 4 polish).** Optional issue **description** + text-like **attachments** at submit (`issue.md` + `attachments/` on disk; description also in SQLite). Agent context inlines title/description and lists attachment paths. Artifact drawer is **phase-scoped** (Research / Plan / Implementation tabs); implementer **Workspace** tree with per-file expand diffs; **workspace.zip** download when implementation is `done`. Full unified Diff tab removed. See §7.1, §8.2.5, §8.3, §11.5. |
 
 ---
 
@@ -409,6 +410,8 @@ The full git workspace model above lands in Phase 4. From Phase 2 onward, the or
 
 ```
 projects/{project_id}/issues/{issue_id}/
+├── issue.md                 ← orchestrator writes at submit: title + optional description + attachment index
+├── attachments/             ← optional user-uploaded text-like context files (extension-gated at upload)
 ├── source/                  ← read-only project source snapshot (orchestrator-created; §6.6)
 ├── research/
 │   ├── task.json            ← orchestrator writes: instructions, model config, loop/adjudication config
@@ -426,19 +429,22 @@ projects/{project_id}/issues/{issue_id}/
     └── workspace/           ← implementer's mutable copy of source (Phase 2); git checkout (Phase 4)
 ```
 
-*(Revised 2026-07-08: added `source/`, `events.jsonl`, and the `attempts/` layout; removed the separate `adjudication/` phase directory — adjudication is a boundary evaluation (§9), not a phase, and its record lives in `feedback.md` + SQLite decisions.)*
+*(Revised 2026-07-08: added `source/`, `events.jsonl`, and the `attempts/` layout; removed the separate `adjudication/` phase directory — adjudication is a boundary evaluation (§9), not a phase, and its record lives in `feedback.md` + SQLite decisions. Revised 2026-07-10: `issue.md` + `attachments/` for submit-time human context.)*
 
 ### 7.2 The Minimal Contract
 
-- **task.json** — Orchestrator writes. Contains: agent type, system prompt reference, model config, tool list, adjudication/loop config, input context (paths to issue text and previous accepted outputs), readable path allowlist. **Never contains secrets** — it is agent-readable.
+- **issue.md** — Orchestrator writes at issue create (submit / CLI / webhook / trigger). Contains the title, optional description body, and a list of attachment paths. Dual-written with the SQLite `issues.description` column in one `persistIssueContext` flow so they cannot drift. Agents receive the description **inlined** in the user message and may also `read_file` this path.
+- **attachments/** — Optional text-like files uploaded at submit (extension allowlist only at upload time — no content sniffing). Basenames are sanitized; agents get attachment paths listed in context and may open them with tools. Not copied into the implementer workspace.
+- **task.json** — Orchestrator writes. Contains: agent type, system prompt reference, model config, tool list, adjudication/loop config, input context (paths to `issue.md`, attachments, and previous accepted outputs), readable path allowlist. **Never contains secrets** — it is agent-readable.
 - **result.json** — Orchestrator writes **at phase start** (`status: in_progress`) and again on completion. Contains: status, error message (if any), attempt count, loop count, tokens consumed, duration, done_rationale (self adjudication only), pointer to the latest attempt, timestamp. Writing it at phase start is what makes crash detection possible (§9.4).
 - **events.jsonl** — Orchestrator writes, append-only, one JSON object per line: model turns, tool calls and results (size-capped), and per-call token usage. This is the substrate for the Phase 3 activity stream, token accounting, debugging, and the audit trail. Without it, agent runs are black boxes.
 - **output.*** — Agent writes, into the current attempt directory. **Completely free-form.** Content is determined by the agent's system prompt and the underlying LLM. The orchestrator never parses this file. The next agent receives the content of the accepted attempt's output as input context.
 - **feedback.md** — Orchestrator writes into an attempt directory when an adjudicator rejects it: the decision and the feedback/rationale. The next attempt receives this content in its input context (§8.3).
+- **implementation/workspace/** — Implementer deliverable tree. When implementation `result.json` status is `done`, members/viewers may download the full tree as `GET /api/issues/{id}/workspace.zip`.
 
 **Critical rule:** No agent reads or parses `result.json` or `events.jsonl`. Only the orchestrator manages status. Agents only read their `task.json` inputs and write their `output.*`.
 
-**Authority rule:** where filesystem and SQLite disagree, **the filesystem is authoritative**. SQLite is a queryable index over filesystem truth, reconciled at startup (§9.4, §10.3).
+**Authority rule:** where filesystem and SQLite disagree, **the filesystem is authoritative**. SQLite is a queryable index over filesystem truth, reconciled at startup (§9.4, §10.3). Exception for convenience: issue **description** is dual-written at submit only via a single orchestrator path (DB + `issue.md`); it is not independently edited after create in MVP.
 
 ### 7.3 Status Values
 
@@ -525,13 +531,25 @@ At issue creation the submitter's choices (or defaults) are persisted on the iss
 See also §11.5. The New-issue drawer:
 
 - **Project:** required select of YAML-registered projects only (no free text, no create-by-typing).
-- **Title / dry-run:** as today.
+- **Title:** required short label (feed card, PR subjects).
+- **Description:** optional longer textarea — the “meat” of the issue (acceptance criteria, constraints, problem statement). API/trigger field name is `body` (alias `description`).
+- **Attachments:** optional multi-file upload of **text-like extensions only** (e.g. `.md`, `.txt`, `.log`, `.json`, `.yaml`, `.go`, …). Gate is extension-at-upload only (no content sniffing). Multipart form on the dashboard; CLI `--attach` / `--body-file` supported.
+- **Dry run:** checkbox.
 - **Source path:** **not present** (project YAML only).
 - **Per-stage agent flavor:** one control per core type **only when** that project type has `len(flavors) > 1`; otherwise hidden.
 
 ### 8.3 Context Flow
 
-The default context recipe for each phase is: **the original issue title/body, plus the entire content of the immediately-previous phase's accepted `output.*`**. (The first phase receives only the issue.) Per-agent config may add further inputs — e.g., give the implementer the research output as well as the plan. No automatic summarization or distillation by the orchestrator — the human's job is to configure agents such that Agent N's output is useful as Agent N+1's input.
+The default context recipe for each phase is:
+
+1. **Issue title** (always).
+2. **Issue description** inlined when present (optional).
+3. **Attachment paths** listed when present (`attachments/{name}` — agents open with `read_file` / `list_directory`; large files are not dumped wholesale into the first turn).
+4. **Immediately-previous phase’s accepted `output.*`** in full (research → plan → implementation). The first phase receives only (1)–(3).
+
+`task.json` `input_context_paths` includes `issue.md`, each attachment key, and the previous accepted output path. Per-agent config may add further inputs — e.g., give the implementer the research output as well as the plan. No automatic summarization or distillation by the orchestrator — the human's job is to configure agents such that Agent N's output is useful as Agent N+1's input.
+
+Webhook / external triggers already carry a `body` field; it is persisted as the issue description the same way as the dashboard (no longer dropped at the `SubmitIssue` boundary).
 
 Two additional context rules (revised 2026-07-08):
 
@@ -644,7 +662,7 @@ Configuration and operation via YAML files and CLI commands. No web interface.
 Capabilities (what the human can do):
 
 - **Real-time issue feed:** live list of issues with phase, status, attempts, token burn (Server-Sent Events; §17 Q4)
-- **Artifact viewer:** rendered Markdown, syntax-highlighted code/JSON, activity from `events.jsonl`, workspace diff — primarily in a **slide-out drawer** (§11.5)
+- **Artifact viewer:** rendered Markdown, syntax-highlighted code/JSON, activity from `events.jsonl`, per-phase artifacts and implementer Workspace tree — primarily in a **slide-out drawer** (§11.5)
 - **Adjudication UI:** pass/fail/retry **plus a first-class feedback text field** on the **expanded issue card**, available at any handoff boundary regardless of configuration (§9.2, §9.3)
 - **Token burn display:** per-run and cumulative — from `runs` / `events.jsonl`
 - **Notification center:** pending human gates, admin alerts on failures
@@ -672,13 +690,13 @@ The primary surface is a **single vertical feed** of **issue cards**, newest or 
 |---------|------|
 | **Top bar** | Brand, primary nav (Issues, Notifications with badge count), **New issue** (member+), user menu (role, logout) |
 | **Issue feed** (`/`) | Vertical stack of expandable cards; default home after login |
-| **Expanded card** | Inline summary of current phase + truncated `result.json` fields + adjudication |
-| **Artifact drawer** | Right-hand slide-out for full `result.json`, `output.*`, `events.jsonl`, markdown render, workspace diff |
-| **Submit drawer** | Right-hand slide-out form opened from **New issue**: **project select** (YAML-registered only), title, dry-run, and **per-stage agent flavor selects only when that stage has multiple flavors** (§8.2.5). No free-text project. No source path field. |
+| **Expanded card** | Inline summary of current phase + truncated `result.json` fields; optional **description** + **attachment list**; adjudication |
+| **Artifact drawer** | Right-hand slide-out: **phase-scoped** Result / Output (or Workspace) / Activity for any of research · plan · implementation |
+| **Submit drawer** | Right-hand slide-out form opened from **New issue**: project select (YAML-registered only), title, optional description + text attachments, dry-run, and **per-stage agent flavor selects only when that stage has multiple flavors** (§8.2.5). No free-text project. No source path field. |
 | **Notifications** (`/notifications`) | Pending human gates + recent notification rows (same dark shell) |
 | **Login** (`/login`) | Minimal centered card; no marketing chrome |
 
-Deep link: `/issues/{id}` renders the feed with that card **pre-expanded** (and optional `?drawer=result|output|events|diff` to open the artifact drawer on load). There is no separate full-page issue detail layout in Phase 3 — expansion + drawer *are* the detail experience.
+Deep link: `/issues/{id}` renders the feed with that card **pre-expanded** (and optional `?drawer=result|output|activity&phase=research|plan|implementation` to open the artifact drawer on load). Legacy `?drawer=diff` maps to implementation Workspace. There is no separate full-page issue detail layout — expansion + drawer *are* the detail experience.
 
 #### 11.5.2 Issue card — collapsed (default)
 
@@ -697,14 +715,15 @@ No action buttons on the collapsed face except the expand control (adjudication 
 
 Expanded body (below the header, same status-tinted panel):
 
-1. **Phase strip** — research → plan → implementation as three steps; completed = check, current = neon-pink pulse/dot, future = dim. Clicking a completed step can open the drawer focused on that phase’s artifacts when available.
+1. **Phase strip** — research → plan → implementation as three steps; completed = check, current = neon-pink pulse/dot, future = dim (display of pipeline state; phase selection for artifacts lives in the drawer).
 2. **Result summary** — truncated fields from the current phase `result.json`: `status`, `attempt`, `loop_count`, `tokens_used`, `duration_ms`, `error` / `done_rationale` (one short paragraph max; overflow ellipsis).
-3. **Artifact actions** — text buttons/links:
-   - **Full result.json** → opens drawer on JSON tab
-   - **Output** → opens drawer on rendered output (`output.md` / latest attempt)
-   - **Activity** → opens drawer on `events.jsonl` stream (tail-friendly)
-   - **Diff** → opens drawer on source vs workspace unified diff (when implementation workspace exists; otherwise hidden/disabled)
-4. **Adjudication block** (member+; always shown for the current phase when a decision is meaningful per §9.3 — especially `waiting_human`, and for manual intervene):
+3. **Issue description** (when present) and **attachment basenames** (when present).
+4. **Artifact actions** — text buttons/links open the drawer for the **current phase** by default:
+   - **result.json** → Result tab
+   - **output** → Output tab (research/plan markdown) or current-phase view
+   - **activity** → Activity (`events.jsonl`)
+   - **workspace** → Implementation phase, Workspace tree (per-file diffs)
+5. **Adjudication block** (member+; always shown for the current phase when a decision is meaningful per §9.3 — especially `waiting_human`, and for manual intervene):
    - Feedback **textarea** first-class (placeholder encourages “why”)
    - **Pass** / **Fail** / **Retry** buttons
    - Empty feedback on Fail/Retry: client-side warning, still submittable; server may echo a warning
@@ -716,10 +735,15 @@ Live updates: when SSE reports a status/phase change for an expanded card, the h
 
 - **Position:** fixed to the **right**, full viewport height, width ~min(520px, 92vw) on desktop; near-full width on small viewports.
 - **Behavior:** slides in over a dimmed scrim; **Esc** or scrim click or ✕ closes; body scroll lock while open; focus trapped while open.
-- **Artifact drawer tabs:** `Result` | `Output` | `Activity` | `Diff` (tabs omitted when N/A). Content is server-rendered HTML partials (goldmark for Markdown; `<pre>` + highlight.js for JSON/code). Large payloads: stream or size-cap with “truncated” notice rather than melting the browser.
-- **Submit drawer:** form fields only (no tabs); success closes drawer and inserts/refreshes the new card at the top of the feed via HTMX. Fields:
+- **Phase tabs (artifact drawer):** `Research` | `Plan` | `Implementation` — always visible; switching phase keeps the content tab. Opening the drawer without an explicit phase lands on the issue’s **current phase**.
+- **Content tabs (artifact drawer):** `Result` | `Output` | `Activity` for research/plan; for implementation, Output is labeled **Workspace** (directory tree of `implementation/workspace/`, changed files marked; expand a file to lazy-load a **per-file** source-vs-workspace diff). There is **no** full unified Diff tab (removed — per-file tree is the model).
+- **Download:** when implementation phase `result.json` status is `done`, Workspace view shows **Download workspace (.zip)** (`GET /api/issues/{id}/workspace.zip`, full tree, viewer+). Not available before implementation is done.
+- Content is server-rendered HTML partials (goldmark for Markdown; `<pre>` + highlight.js for JSON/code). Large payloads: size-cap with “truncated” notice.
+- **Submit drawer:** form fields only (no tabs); multipart-capable; success closes drawer and inserts/refreshes the new card at the top of the feed via HTMX. Fields:
   - **Project** — `<select>` of registered projects (required). Changing project may HTMX-refresh the flavor fields for that project.
   - **Title** — required text.
+  - **Description** — optional textarea.
+  - **Attachments** — optional multi-file (text-like extensions only).
   - **Agent flavors** — zero to three selects (`researcher` / `planner` / `implementer`), each shown only when the selected project defines more than one flavor for that type; values default to the project's `default` for the type.
   - **Dry run** — checkbox.
   - **Not included:** source path (project YAML), free-text project name, create-project affordances.
@@ -893,7 +917,7 @@ Small, native Go toolset available to agents based on agent type:
 
 - **Daemonization first:** `gorchestrator serve` — embeddable engine, issue-row queue + worker pool, graceful shutdown, startup recovery scan (§9.4). This is a named workstream, not an implied side effect of the dashboard.
 - Web dashboard: Go HTTP server + HTMX; **vertical expandable status-tinted issue cards** (not kanban); **dark-only** blue-grey + neon pink theme (§11.5, §17 Q1)
-- Real-time feed via SSE: card re-tint/chips; full artifacts in a **right slide-out drawer** (`result.json`, output, `events.jsonl`, diff) (§17 Q4)
+- Real-time feed via SSE: card re-tint/chips; full artifacts in a **right slide-out drawer** (per-phase Result / Output / Activity; implementation Workspace tree) (§17 Q4; later refined 2026-07-10 — §11.5)
 - Adjudication UI on the **expanded card**: pass/fail/retry **with feedback field** at waiting/failed/cancelled boundaries
 - HumanAdjudicator: pauses, notifies, worker exits; decision re-queues and a new worker runs (in-process; CLI `resume` remains for headless)
 - User/team model: SQLite-backed roles (admin, member, viewer); OIDC built-in; **local auth mode for dev/test** (not production)
@@ -922,11 +946,20 @@ Small, native Go toolset available to agents based on agent type:
 - **Out of scope here:** project membership, invites, SSO polish, admin config GUI
 - **Deliverable:** Only YAML-registered projects accept work; multi-flavor projects expose casting at issue create; retries honor the frozen cast
 
+### Post–Phase 4 polish (landed 2026-07-10; not a numbered phase)
+**Goal:** Close dashboard and issue-input gaps that Phase 3/4 left incomplete so Phase 5 guardrails attach to a real human input model.
+
+- Multi-phase artifact drawer (phase tabs + Result/Output/Activity; implementation Workspace tree with per-file diffs; `workspace.zip` when implementation is done) — §11.5
+- Optional issue **description** + text **attachments** at submit; `issue.md` + `attachments/` dual-write with SQLite description — §7.1, §8.2.5, §8.3
+- Webhook/trigger `body` wired into description (no longer dropped)
+- **Do not regress in Phase 5+:** plans that touch submit, context, retention, or the artifact drawer must preserve these contracts (see `phase_5.md` / `phase_6.md` “Landed foundations”)
+
 ### Phase 5: Guardrails
 **Goal:** The system protects itself and the user's wallet. (See `phase_5.md`.)
 
-- Token budget enforcement: hard stop + notification, checked per model call against `events.jsonl` usage
+- Token budget enforcement: hard stop + notification, checked per model call against `events.jsonl` usage (budgets attach to **YAML-registered projects** and frozen issue casts — not free-text project names)
 - Effort estimation: Planner tags high/med/low, high requires human confirmation
+- Scope detection at submit uses **title + description + attachment paths/text signals** (not title alone)
 - Scope detection: basic heuristics to catch overly broad issues
 - Admin escalation rules: configurable thresholds
 - MCP permission granularity: per-agent, per-**tool** allowlists (tightening Phase 4's per-server grants)
@@ -1021,11 +1054,23 @@ Small, native Go toolset available to agents based on agent type:
 | Dashboard is a vertical expandable-card feed | Not a kanban board. Status-tinted cards, multi-expand, adjudication on the expanded card, full artifacts in a right drawer. Dark-only theme: blue-greys + neon pink accent (§11.5). |
 | `cancelled` is a distinct status | Ctrl-C / shutdown is not a failure; it must not be reported as one. |
 | Empty output fails the loop | An attempt with neither a `write_output` call nor final model text fails immediately rather than being marked done and flagged later. |
-| Markdown docs are canonical | The spec is the living document; phase docs freeze at completion; HTML renderings are unmaintained presentation artifacts. |
+| Markdown docs are canonical | The spec is the living document; phase docs freeze at completion; HTML renderings are presentation companions (regenerate when MD changes). |
 | Git worktree workspace model (Phase 4) | Bare clone cache + source/implementer worktrees replace per-issue file snapshots when git is configured; agents never run git. |
 | Adapter credentials stay in adapter env | External adapters authenticate to their backends via their own env/config; core does not mediate secrets into agent artifacts (§17 Q12). |
 | S3 first for cloud storage | Phase 4 ships S3 only; Azure Blob follows once the JSON-RPC storage pattern is proven. |
 | MCP per-agent server allowlists with triggers | Per-server grants land in Phase 4 alongside external triggers (§5.6); per-tool grants are Phase 5. |
+
+**Added 2026-07-10 (issue input + multi-phase artifacts):**
+
+| Decision | Rationale |
+|----------|-----------|
+| Title + optional description | Feed needs a short label; agents need the meat. Description is optional so webhook/CLI stay simple. |
+| Description dual-write (SQLite + `issue.md`) | Single `persistIssueContext` path keeps UI and agent memory aligned; FS remains the agent-readable artifact. |
+| Text-like attachments by extension only | Cheap upload gate; no content sniffing. Cheaters who rename binaries own the fallout. |
+| Inline description + attachment paths in agent context | Matches §8.3; avoids stuffing large files into the first turn. |
+| Phase-scoped artifact drawer | Completed research/plan artifacts must remain viewable after the pipeline advances; hard-wiring the drawer to `current_phase` was a bug. |
+| Implementer Workspace tree + per-file diffs | Implementer has no `write_output`; the workspace *is* the deliverable. Full unified Diff tab removed as redundant. |
+| `workspace.zip` only when implementation is done | Avoids partial downloads mid-run; available to viewer+. |
 
 ---
 

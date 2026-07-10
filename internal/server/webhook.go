@@ -54,6 +54,7 @@ func (s *Server) handleWebhookIssue(w http.ResponseWriter, r *http.Request) {
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
 		ProjectName: body.Project,
 		IssueTitle:  body.Title,
+		Description: body.Body,
 		Source:      "webhook",
 	})
 	if err != nil {

@@ -54,6 +54,22 @@
       <span>tokens={{.Issue.TokenTotal}}</span>
       <span>updated={{$issue.UpdatedAt}}</span>
     </div>
+    {{if $issue.Description}}
+    <div class="issue-description">
+      <div class="issue-description-label">Description</div>
+      <pre class="issue-description-body">{{$issue.Description}}</pre>
+    </div>
+    {{end}}
+    {{if .Issue.Attachments}}
+    <div class="issue-attachments">
+      <div class="issue-description-label">Attachments</div>
+      <ul class="issue-attachment-list">
+        {{range .Issue.Attachments}}
+        <li><code>attachments/{{.}}</code></li>
+        {{end}}
+      </ul>
+    </div>
+    {{end}}
     <div class="artifact-actions">
       <button class="btn" type="button"
         onclick="openArtifactDrawer({{$issue.ID}}, 'result')">result.json</button>

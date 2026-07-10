@@ -125,6 +125,7 @@ func (d *Daemon) consumeSubmissions(ctx context.Context, in <-chan trigger.Submi
 			_, err := d.eng.SubmitIssue(ctx, orchestrator.RunOptions{
 				ProjectName: sub.Project,
 				IssueTitle:  sub.Title,
+				Description: sub.Body,
 				Source:      sub.Source,
 				ExternalID:  sub.ExternalID,
 			})

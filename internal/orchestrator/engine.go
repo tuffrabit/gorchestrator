@@ -316,6 +316,11 @@ func (e *Engine) Close() error {
 type RunOptions struct {
 	ProjectName string
 	IssueTitle  string
+	// Description is optional longer issue text (UI: Description; API/triggers: body).
+	// Persisted to SQLite and issue.md together via persistIssueContext.
+	Description string
+	// Attachments are optional text-like files included in issue context.
+	Attachments []AttachmentFile
 	DryRun      bool
 	// Source is the trigger provenance: manual | webhook | github | jira | ...
 	Source string
@@ -343,6 +348,10 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 	issue, err := e.issues.CreateWithCast(project.ID, opts.IssueTitle, castJSON)
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)
+	}
+
+	if err := e.persistIssueContext(ctx, issue, opts.IssueTitle, opts.Description, opts.Attachments); err != nil {
+		return fmt.Errorf("persist issue context: %w", err)
 	}
 
 	if err := e.prepareIssueSource(ctx, project, issue); err != nil {
@@ -538,7 +547,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			Phase: phaseName, Status: sqlite.StatusInProgress,
 		})
 
-		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, issue.Title)
+		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, issue.Title, issue.Description)
 		if err != nil {
 			return fmt.Errorf("build input for %s: %w", phaseName, err)
 		}
@@ -1102,7 +1111,12 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 		allowlist = append(allowlist, storage.WorkspacePath(projectID, issueID))
 	}
 
-	inputPaths := []string{fmt.Sprintf("Issue title: <issue %d>", issueID)}
+	inputPaths := []string{storage.IssueMarkdownPath(projectID, issueID)}
+	if names, err := e.listAttachmentNames(ctx, projectID, issueID); err == nil {
+		for _, name := range names {
+			inputPaths = append(inputPaths, storage.AttachmentPath(projectID, issueID, name))
+		}
+	}
 	if phase != "research" {
 		prev := previousPhase(phase)
 		if prev != "" {
@@ -1126,9 +1140,12 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 	}, nil
 }
 
-// buildBaseInput composes the issue plus the previous accepted phase output.
-func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, phase, issueTitle string) (string, error) {
-	input := fmt.Sprintf("Issue: %s", issueTitle)
+// buildBaseInput composes the issue (title, description, attachment paths)
+// plus the previous accepted phase output.
+func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, phase, issueTitle, description string) (string, error) {
+	// Prefer SQLite description; fall back to empty if unset (legacy issues).
+	names, _ := e.listAttachmentNames(ctx, projectID, issueID)
+	input := buildIssueUserInput(issueTitle, description, names)
 	prev := previousPhase(phase)
 	if prev == "" {
 		return input, nil

@@ -5,7 +5,8 @@
 > **Prerequisite:** Phase 4 Parts A–G in tree (git, `run_test`, MCP, triggers, S3, agent personality fields, JSON-RPC supervisor). Full suite green before starting this refactor is preferred but not a hard gate if residual Phase 4 polish is isolated.  
 > **Scope:** Make projects and agent casting first-class YAML configuration. Remove create-on-submit / CLI `GetOrCreate`. Named flavors of the three core agent types; freeze cast on the issue; submit drawer selects project + optional flavors.  
 > **Spec anchors:** §6.0, §8.2, §10.1, §10.3, §11.5, §17 Q9 / Q16.  
-> **Out of scope:** Project membership / invites, admin config GUI, SSO polish, Phase 5 budgets.
+> **Out of scope:** Project membership / invites, admin config GUI, SSO polish, Phase 5 budgets.  
+> **Follow-on (also landed 2026-07-10, outside this plan’s original scope):** optional issue description + text attachments; multi-phase artifact drawer + workspace.zip — see `spec.md` revision log and Phase 5/6 “Landed foundations”.
 
 ---
 

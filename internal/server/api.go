@@ -18,6 +18,8 @@ import (
 type submitIssueRequest struct {
 	Project      string            `json:"project"`
 	Title        string            `json:"title"`
+	Body         string            `json:"body"`         // optional description (trigger/API name)
+	Description  string            `json:"description"`  // alias for body
 	Source       string            `json:"source"`       // rejected if set
 	SourcePath   string            `json:"source_path"`  // rejected if set
 	DryRun       bool              `json:"dry_run"`
@@ -46,9 +48,14 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	desc := strings.TrimSpace(req.Description)
+	if desc == "" {
+		desc = strings.TrimSpace(req.Body)
+	}
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
 		ProjectName:  req.Project,
 		IssueTitle:   req.Title,
+		Description:  desc,
 		DryRun:       req.DryRun,
 		AgentFlavors: req.AgentFlavors,
 	})
@@ -70,6 +77,7 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
 		"project":       req.Project,
 		"title":         req.Title,
+		"has_description": desc != "",
 		"dry_run":       req.DryRun,
 		"agent_flavors": parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
 	})
@@ -386,7 +394,13 @@ func viewToJSON(v *orchestrator.IssueView) map[string]any {
 	if v == nil || v.Issue == nil {
 		return nil
 	}
-	return issueToJSON(v.Issue, v.ProjectName, v.TokenTotal, v.Attempt, v.PhaseStatus)
+	m := issueToJSON(v.Issue, v.ProjectName, v.TokenTotal, v.Attempt, v.PhaseStatus)
+	if len(v.Attachments) > 0 {
+		m["attachments"] = v.Attachments
+	} else {
+		m["attachments"] = []string{}
+	}
+	return m
 }
 
 func issueToJSON(i *sqlite.Issue, project string, tokens, attempt int, phaseStatus string) map[string]any {
@@ -395,6 +409,7 @@ func issueToJSON(i *sqlite.Issue, project string, tokens, attempt int, phaseStat
 		"project_id":     i.ProjectID,
 		"project":        project,
 		"title":          i.Title,
+		"description":    i.Description,
 		"status":         i.Status,
 		"current_phase":  i.CurrentPhase,
 		"dry_run":        i.DryRun,
@@ -437,7 +452,10 @@ func isSubmitClientError(msg string) bool {
 		strings.Contains(msg, "no projects declared") ||
 		strings.Contains(msg, "flavor") ||
 		strings.Contains(msg, "agent_flavors") ||
-		strings.Contains(msg, "has no ")
+		strings.Contains(msg, "has no ") ||
+		strings.Contains(msg, "attachment") ||
+		strings.Contains(msg, "description exceeds") ||
+		strings.Contains(msg, "at most ")
 }
 
 func jsonMarshal(v any) ([]byte, error) {

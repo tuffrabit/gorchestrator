@@ -4,9 +4,11 @@ gorchestrator is a tight human + AI agent collaboration platform for software en
 
 ## Current status
 
-**Phase 3 is complete.** The system runs as a long-lived daemon (`gorchestrator serve`) with a worker pool, HTTP API, OIDC/local auth, HTMX dashboard (expandable status-tinted issue cards, artifact drawer, SSE live updates), and notification sinks (console + optional Slack/email adapters). CLI one-shot `run` / `resume` still work without a daemon.
+**Phases 1–3 are complete.** **Phase 4 extensibility and the project-registry/flavors refactor are largely in tree** (git workspaces, container `run_test`, MCP allowlists, triggers, S3 adapter path, YAML projects + agent flavors). Post–Phase 4 polish also landed: optional issue **description** + text **attachments**, multi-phase artifact drawer (Workspace tree + `workspace.zip` when implementation is done).
 
-Phases 1–2 remain available as the embeddable engine and CLI path under the same binary.
+The system runs as a long-lived daemon (`gorchestrator serve`) with a worker pool, HTTP API, OIDC/local auth, HTMX dashboard, and notification sinks (console + optional Slack/email adapters). CLI one-shot `run` / `resume` still work without a daemon.
+
+**Next:** Phase 5 guardrails (`phase_5.md`) — budgets, effort gate, scope detection — must **not** regress the landed foundations called out in that plan.
 
 ## Quick start
 
@@ -27,6 +29,11 @@ Projects must be declared under `projects:` in config YAML before use (no create
 ```bash
 # Full pipeline for a YAML-registered project (dry-run LLM)
 ./gorchestrator run --issue="add auth" --project=foo --dry-run
+
+# Optional description and text attachments
+./gorchestrator run --issue="add auth" --project=foo \
+  --body="Users cannot sign in after SSO change." \
+  --attach=./notes.md --dry-run
 
 # Resume a phase waiting for human adjudication
 ./gorchestrator resume --project=foo --issue=1 --decision=pass --feedback="looks good"
@@ -51,11 +58,12 @@ export OPENAI_API_KEY='sk-local'   # often ignored by local servers
 
 From the dashboard:
 
-1. **+ New** — submit an issue (required project select from YAML registry, title, optional agent flavor selects when a stage has multiple flavors, dry-run).
-2. Expand a card — phase strip, artifacts, Pass / Fail / Retry with feedback.
-3. **Notifications** — pending human gates and recent alerts.
+1. **+ New** — submit an issue (required project from YAML registry, title, optional **description** and text **attachments**, optional agent flavor selects when a stage has multiple flavors, dry-run).
+2. Expand a card — phase strip, description/attachments if present, artifact buttons, Pass / Fail / Retry with feedback.
+3. Open the **artifact drawer** — phase tabs (research / plan / implementation); Result / Output / Activity; for implementation, **Workspace** tree with per-file diffs and zip download when that phase is done.
+4. **Notifications** — pending human gates and recent alerts.
 
-Artifacts live under `~/.config/gorchestrator/storage/projects/{project_id}/issues/{issue_id}/` (`source/`, per-phase `task.json`, `result.json`, `events.jsonl`, `attempts/`).
+Artifacts live under `~/.config/gorchestrator/storage/projects/{project_id}/issues/{issue_id}/` (`issue.md`, `attachments/`, `source/`, per-phase `task.json`, `result.json`, `events.jsonl`, `attempts/`, `implementation/workspace/`).
 
 ## Configuration highlights
 
@@ -124,5 +132,9 @@ Dashboard static assets (vendored, no build step):
 |-------|--------|--------|
 | 1 | Engine / CLI | Complete |
 | 2 | ADK pipeline, adjudication, crash recovery | Complete |
-| 3 | Daemon, dashboard, auth, notifications | **Complete** |
-| 4+ | Extensibility (MCP, triggers, git, …) | Planned — see `spec.md` / `phase_4.md` |
+| 3 | Daemon, dashboard, auth, notifications | Complete |
+| 4 | Extensibility (git, run_test, MCP, triggers, S3, …) | In tree — see `phase_4.md` |
+| 4 refactor | YAML project registry + agent flavors | Complete — see `phase_4_project_refactor.md` |
+| Post-4 polish | Description/attachments; multi-phase drawer; workspace.zip | Complete — see `spec.md` §7 / §8.3 / §11.5 |
+| 5 | Guardrails (budgets, effort, scope) | Draft — see `phase_5.md` (do not regress polish) |
+| 6 | Polish & ship | Draft — see `phase_6.md` |
