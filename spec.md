@@ -1,6 +1,6 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-09 (Phase 4 plan solidified)  
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-10 (project registry + agent flavors)  
 > **Status:** Living document — single source of truth  
 > **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
 >
@@ -16,6 +16,7 @@
 | 2026-07-09 | Dashboard UX: vertical expandable status-tinted issue cards (not kanban); dark-only theme (greys/blues + neon pink); multi-expand; adjudication on expanded card; artifact slide-out drawer; submit from top-bar drawer. See §11.5. |
 | 2026-07-09 | Phase 3 complete: `serve` daemon, HTMX dashboard, local+OIDC auth, SSE, notifications (console/Slack/email), human retry on failed/cancelled, OpenAI-compatible tool schema normalization for llama.cpp-class servers. |
 | 2026-07-09 | Phase 4 plan solidification. Closed §17 Q9 (agent config merge layers) and Q12 (adapters own credentials via env). Git worktree model; S3-only storage this phase (Azure deferred); MCP per-agent server allowlists with external triggers; seven session-sized parts A–G. See `phase_4.md`. |
+| 2026-07-10 | **Project registry + agent flavors.** Projects are YAML-declared only (no create-on-submit/CLI). `source_path` / git / test / agent flavors live under `projects.<name>` in config. Named agent **flavors** of the three core types; submit drawer selects a flavor per stage when a type has more than one. Per-issue cast frozen at submit. Project membership / invites deferred. See §6.0, §8.2, §11.5, §17 Q9/Q16; plan in `phase_4_project_refactor.md`. |
 
 ---
 
@@ -243,11 +244,83 @@ This does not make the system injection-proof — no LLM pipeline is. The spec's
 
 ---
 
-## 6. Git Workspace Model
+## 6. Project Registry, Configuration & Git
 
-### 6.1 Philosophy
+### 6.0 Project Registry (YAML Source of Truth)
 
-The core implementer agent and toolset are geared around a **targeted, pre-existing git repository**. No agent can create a new git repository or GitHub/Bitbucket project via core tools. Repository management is a human responsibility.
+*(Added 2026-07-10. Closes the accidental "type a project name at issue create" model.)*
+
+**YAML is the sole configuration surface for projects.** There is no admin config GUI in this phase; a future admin UI may edit the same YAML-backed model, but until then maintainers edit `config.yaml` (or an included projects file) and restart/reload the process.
+
+#### 6.0.1 Lifecycle
+
+1. Maintainer declares zero or more projects under the top-level `projects:` map in YAML.
+2. On process start (daemon `serve` and CLI engine init), the orchestrator **upserts** the SQLite project registry from that map: create missing rows by name, refresh `config_json` from YAML for existing names. SQLite holds a **runtime index** (stable `project_id`, timestamps, synced config blob) — it is not an editor.
+3. Issue submission (dashboard, API, CLI, webhook, external triggers) **resolves a project by name** against the registry. Unknown name → **hard error**. There is no `GetOrCreate` on user paths.
+4. Projects are **never** created by free-text issue input, CLI flags alone, or trigger payloads. Registration is always YAML → sync.
+
+#### 6.0.2 What belongs in project YAML
+
+| Block | Purpose |
+|-------|---------|
+| `source_path` | Local source directory for snapshot-mode projects (§6.6) |
+| `git` | Remote repo, base branch, auth mode, push/PR flags (§6.3) |
+| `test` | Immutable `run_test` command, image, limits, secrets env names (§6.5) |
+| `agents` | Named **flavors** of core agent types + defaults (§8.2) |
+| `trust_external` | Optional override for untrusted-input implementer gate (§5.6) |
+
+`source_path` is **not** collected on the submit form. When it returns to a UI, that UI is admin-only config — not member issue creation.
+
+#### 6.0.3 Illustrative project map
+
+```yaml
+projects:
+  auth-service:
+    source_path: ""              # omit or empty when using git
+    git:
+      repo_url: "git@github.com:myorg/auth-service.git"
+      base_branch: "develop"
+      push: false
+      create_pr: false
+      auth:
+        type: ssh_key            # ssh_key | token | gh_cli
+        ssh_key_path: "/secrets/deploy_key"
+    test:
+      command: "go test ./..."
+      timeout: 60s
+      image: "golang:1.22"
+      secrets_env: []
+    agents:
+      researcher:
+        default: thorough
+        flavors:
+          thorough:
+            model: { provider: openai, model: o3-mini }
+            system_prompt_append: "Prefer root-cause depth over speed."
+          cheap:
+            model: { provider: openai, model: gpt-4o-mini }
+      planner:
+        default: standard
+        flavors:
+          standard: {}           # inherits global + built-in only
+      implementer:
+        default: coder
+        flavors:
+          coder:
+            model: { provider: anthropic, model: claude-sonnet-4 }
+    # trust_external: false
+```
+
+A project with **no** `agents` block uses global/built-in agent config only (§8.2) and shows **no** flavor pickers on submit.
+
+#### 6.0.4 Authorization (current vs deferred)
+
+- **Current:** Global roles only (`admin` / `member` / `viewer`). All authenticated users see all YAML-registered projects. Sufficient for local/dev testing.
+- **Deferred:** Per-project membership and email invites. When added, membership is expected to live in YAML (or an admin surface that writes YAML-equivalent config) and to filter list/submit/decide by project. Do not invent a second parallel config authority.
+
+### 6.1 Git Philosophy
+
+The core implementer agent and toolset are geared around a **targeted, pre-existing git repository**. No agent can create a new git repository or GitHub/Bitbucket project via core tools. Repository management is a human responsibility. Project registration (including git settings) is maintainer configuration (§6.0), not an agent or member action.
 
 ### 6.2 Prerequisites
 
@@ -258,18 +331,20 @@ The core implementer agent and toolset are geared around a **targeted, pre-exist
 
 ### 6.3 Project-Level Git Configuration
 
+Git settings live under `projects.<name>.git` in YAML (synced into `projects.config_json`). Example:
+
 ```yaml
-project:
-  name: "auth-service"
-  git:
-    repo_url: "git@github.com:myorg/auth-service.git"
-    base_branch: "develop"
-    auth:
-      type: "ssh_key"  # or "token", "gh_cli"
-      ssh_key_path: "/secrets/deploy_key"
-    # or:
-    # type: "gh_cli"
-    # profile: "work"  # uses `gh auth switch` or env var
+projects:
+  auth-service:
+    git:
+      repo_url: "git@github.com:myorg/auth-service.git"
+      base_branch: "develop"
+      auth:
+        type: "ssh_key"  # or "token", "gh_cli"
+        ssh_key_path: "/secrets/deploy_key"
+      # or:
+      # type: "gh_cli"
+      # profile: "work"
 ```
 
 ### 6.4 Implementer Workspace Lifecycle (Orchestrator-Managed)
@@ -295,17 +370,18 @@ The agent never touches git. The orchestrator handles the entire git lifecycle:
 The implementer has access to a `run_test` core tool that executes the project's pre-configured test command in a sandboxed subprocess.
 
 ```yaml
-project:
-  test_command: "go test ./..."
-  test_timeout: "60s"
-  # Or more complex:
-  # test_command: "docker run --rm -v $(pwd):/app myproject-test-runner"
-  # test_command: "./scripts/run-integration-tests.sh"
-  # test_command: "python -m pytest tests/"
+projects:
+  auth-service:
+    test:
+      command: "go test ./..."
+      timeout: 60s
+      image: "golang:1.22"       # required when command is set
+      secrets_env: []
+      # runtime: auto | docker | podman
 ```
 
 **Properties:**
-- Command is **immutable** — defined in project config, not modifiable by the agent
+- Command is **immutable** — defined in project YAML, not modifiable by the agent or by issue submit
 - Executed against the implementer's workspace
 - Agent receives stdout/stderr (size-capped) but cannot modify the command
 - Enables implementer test-and-fix loops without opening arbitrary shell access
@@ -320,10 +396,10 @@ project:
 
 The full git workspace model above lands in Phase 4. From Phase 2 onward, the orchestrator provides read-only source access so research, planning, and implementation operate on the real codebase instead of a vacuum:
 
-- Per project, configuration points at a local source directory (or a repository to clone once).
-- On issue creation, the orchestrator copies it to `projects/{pid}/issues/{iid}/source/` (excluding `.git`) as an immutable snapshot.
+- Per project, YAML configuration points at a local `source_path` (or git settings — §6.0 / §6.3). Source is **not** supplied at issue submit time.
+- On issue creation, the orchestrator copies `source_path` to `projects/{pid}/issues/{iid}/source/` (excluding `.git`) as an immutable snapshot when git is not configured.
 - The snapshot is in every agent's read allowlist. The implementer's `workspace/` is seeded as a **copy of the snapshot**, so implementation edits real code.
-- Phase 4 replaces snapshot copies with git-managed branch checkouts (and eliminates the per-issue copy overhead).
+- Phase 4 replaces snapshot copies with git-managed branch checkouts when `git.repo_url` is set (and eliminates the per-issue copy overhead).
 
 ---
 
@@ -390,14 +466,68 @@ Agent types are **structs in the Go codebase**, not generic configurations. Each
 | **Planner** | Implementation planning, dependency analysis, effort estimation, task decomposition | Fast, structured, good at planning | `read_file`, `list_directory`, `grep_search`, `write_output` |
 | **Implementer** | Code generation, file writing, test scaffolding, spreadsheet creation | Coding-competent, instruction-following | `read_file`, `list_directory`, `grep_search`, `write_file`, `update_file`, `run_test` |
 
-### 8.2 Agent Configuration (YAML)
+### 8.2 Agent Configuration (YAML) — Global Defaults, Project Flavors, Issue Cast
 
-Per-project or per-issue YAML overrides:
-- LLM model/provider
-- Temperature, max tokens, token budget
-- System prompt override or extension
-- Tool subset (enable/disable specific tools)
-- Boundary configuration: `adjudicator`, `max_attempts`, `loops` (§9.1)
+*(Revised 2026-07-10. Extends the Phase 4 casting schema with **named flavors** per project. Agent **types** remain the three Go structs in §8.1 — flavors are configuration of those types, not new agent types.)*
+
+#### 8.2.1 Configurable fields (per flavor / override)
+
+- LLM model/provider (and `base_url` / `api_key_env` where applicable)
+- Temperature, max tokens, token budget (`token_budget` stored Phase 4; enforced Phase 5)
+- System prompt override (`system_prompt`) or extension (`system_prompt_append`)
+- Core tool subset (`tools` allowlist; empty = all default for type)
+- MCP server allowlist (`mcp_servers`)
+- Boundary configuration: `adjudicator`, `max_attempts`, `loops`, `rubric` (§9.1)
+
+#### 8.2.2 Named flavors (per project, per core type)
+
+Under `projects.<name>.agents.<type>`:
+
+| Field | Meaning |
+|-------|---------|
+| `default` | Flavor name used when the submitter does not choose (or when there is only one flavor / no picker) |
+| `flavors` | Map of flavor name → `AgentConfig` overlay for that core type |
+
+Rules:
+
+- Only core types may appear: `researcher`, `planner`, `implementer`.
+- **No flavors / no `agents` block:** use global + built-in only; **no** submit pickers for that project.
+- **Exactly one flavor** for a type: always use it (or the named `default`); **no** picker for that stage.
+- **More than one flavor** for a type: submit UI shows a select for that stage; `default` is pre-selected.
+- Flavor names are project-local strings (e.g. `thorough`, `cheap`, `coder`).
+
+#### 8.2.3 Merge order
+
+Resolved **per phase** when building `task.json` / the agent run:
+
+1. Built-in type defaults (`defaultAgentConfig`)
+2. Global `default_model` + global `agents.<type>`
+3. Selected **project flavor** for that type (if any)
+4. **Frozen issue cast** (flavor names chosen at submit — see §8.2.4)
+5. Orchestrator policy overrides (e.g. external trigger → force implementer `adjudicator: human` unless `trust_external`)
+
+Changing project YAML after an issue is submitted must **not** silently retarget in-flight issues: the issue's frozen cast remains authoritative for flavor selection until a human explicitly resubmits or a future "re-cast" action exists.
+
+#### 8.2.4 Issue cast (frozen at submit)
+
+At issue creation the submitter's choices (or defaults) are persisted on the issue, e.g. `agent_flavors_json`:
+
+```json
+{"researcher":"thorough","planner":"standard","implementer":"coder"}
+```
+
+- CLI/API/webhook may omit flavors; missing stages resolve to the project `default` (or pure global/built-in when no project flavors).
+- Invalid flavor name for the project → hard error at submit.
+- Retries, crash recovery, and resume use the same frozen cast.
+
+#### 8.2.5 Submit UX (member)
+
+See also §11.5. The New-issue drawer:
+
+- **Project:** required select of YAML-registered projects only (no free text, no create-by-typing).
+- **Title / dry-run:** as today.
+- **Source path:** **not present** (project YAML only).
+- **Per-stage agent flavor:** one control per core type **only when** that project type has `len(flavors) > 1`; otherwise hidden.
 
 ### 8.3 Context Flow
 
@@ -471,10 +601,10 @@ Recovery behavior must be covered by a kill-mid-phase → restart → verify-rec
 
 ### 10.1 SQLite (Application State)
 
-- Project registry (project_id, name, created_at, config_ref, git_config_json)
-- Issue queue (issue_id, project_id, title, status, current_phase, created_at, updated_at)
+- Project registry (project_id, name, created_at, **config_json** synced from YAML `projects.<name>` — §6.0)
+- Issue queue (issue_id, project_id, title, status, current_phase, created_at, updated_at, dry_run, source, external_id, **agent_flavors_json** frozen cast — §8.2.4)
 - Agent run history (run_id, issue_id, agent_type, model, tokens_used, duration, result_status, timestamp, workspace_id, branch_name)
-- User/team accounts, roles, SSO mappings
+- User/team accounts, roles, SSO mappings (global roles today; project membership deferred — §6.0.4)
 - Audit log (user_id, action, target_issue, timestamp, details)
 - Notification queue (notification_id, issue_id, agent_type, status, recipient, sent_at)
 - Human decision queue (decision_id, issue_id, phase, requested_at, decided_at, decision, **feedback**, decided_by)
@@ -486,13 +616,14 @@ Recovery behavior must be covered by a kill-mid-phase → restart → verify-rec
 - Read-only source snapshots (`source/`, §6.6)
 - Workspace directories (`workspaces/{issue_id}/implementer-{run_id}/`)
 - Per-phase run transcripts (`events.jsonl`)
-- Configuration files (YAML)
+- Configuration files (YAML) — **source of truth for projects, agents, server, auth, adapters**
 - Logs (optional, per-project)
 - Dashboard static assets
 
 ### 10.3 Authority & Concurrency (added 2026-07-08)
 
 - **Filesystem is authoritative** for phase/agent state. SQLite is a queryable index over filesystem truth, reconciled at startup (§9.4). When they disagree, the filesystem wins. (Both store status; a crash between the two writes can make them diverge — this rule resolves it.)
+- **YAML is authoritative** for project definition and agent flavor catalogs (§6.0, §8.2). SQLite project rows are a synced index; issue rows hold the **frozen cast** chosen at submit so runs remain stable if YAML later changes.
 - SQLite is opened with `PRAGMA journal_mode=WAL`, a `busy_timeout`, and `PRAGMA foreign_keys=ON`. Foreign keys are silently unenforced in SQLite without the pragma, and WAL + busy timeout are prerequisites for the multi-goroutine daemon.
 - Schema changes use **versioned migrations**, not accreting `CREATE TABLE IF NOT EXISTS` statements — `IF NOT EXISTS` cannot evolve existing tables.
 
@@ -517,7 +648,7 @@ Capabilities (what the human can do):
 - **Adjudication UI:** pass/fail/retry **plus a first-class feedback text field** on the **expanded issue card**, available at any handoff boundary regardless of configuration (§9.2, §9.3)
 - **Token burn display:** per-run and cumulative — from `runs` / `events.jsonl`
 - **Notification center:** pending human gates, admin alerts on failures
-- **Submit issue:** from the top bar (member+), not from a board column
+- **Submit issue:** from the top bar (member+), not from a board column — project select from YAML registry; optional per-stage agent flavor selects (§8.2.5, §11.5)
 
 Layout, visual language, and interaction details are normative in **§11.5**.
 
@@ -525,6 +656,7 @@ Layout, visual language, and interaction details are normative in **§11.5**.
 
 - Admin users always receive notifications on "bad" agent output (errors, timeouts, exceptions, empty outputs)
 - Configurable admin escalation rules (Phase 5)
+- **Project and agent configuration** remain YAML-only for now (§6.0). Future admin GUI may edit the same model; it does not invent a second store.
 
 ### 11.5 Dashboard UX (Phase 3) — Layout, Theme & Interaction
 
@@ -542,7 +674,7 @@ The primary surface is a **single vertical feed** of **issue cards**, newest or 
 | **Issue feed** (`/`) | Vertical stack of expandable cards; default home after login |
 | **Expanded card** | Inline summary of current phase + truncated `result.json` fields + adjudication |
 | **Artifact drawer** | Right-hand slide-out for full `result.json`, `output.*`, `events.jsonl`, markdown render, workspace diff |
-| **Submit drawer** | Right-hand slide-out form (project, title, optional source, dry-run) opened from **New issue** |
+| **Submit drawer** | Right-hand slide-out form opened from **New issue**: **project select** (YAML-registered only), title, dry-run, and **per-stage agent flavor selects only when that stage has multiple flavors** (§8.2.5). No free-text project. No source path field. |
 | **Notifications** (`/notifications`) | Pending human gates + recent notification rows (same dark shell) |
 | **Login** (`/login`) | Minimal centered card; no marketing chrome |
 
@@ -585,7 +717,12 @@ Live updates: when SSE reports a status/phase change for an expanded card, the h
 - **Position:** fixed to the **right**, full viewport height, width ~min(520px, 92vw) on desktop; near-full width on small viewports.
 - **Behavior:** slides in over a dimmed scrim; **Esc** or scrim click or ✕ closes; body scroll lock while open; focus trapped while open.
 - **Artifact drawer tabs:** `Result` | `Output` | `Activity` | `Diff` (tabs omitted when N/A). Content is server-rendered HTML partials (goldmark for Markdown; `<pre>` + highlight.js for JSON/code). Large payloads: stream or size-cap with “truncated” notice rather than melting the browser.
-- **Submit drawer:** form fields only (no tabs); success closes drawer and inserts/refreshes the new card at the top of the feed via HTMX.
+- **Submit drawer:** form fields only (no tabs); success closes drawer and inserts/refreshes the new card at the top of the feed via HTMX. Fields:
+  - **Project** — `<select>` of registered projects (required). Changing project may HTMX-refresh the flavor fields for that project.
+  - **Title** — required text.
+  - **Agent flavors** — zero to three selects (`researcher` / `planner` / `implementer`), each shown only when the selected project defines more than one flavor for that type; values default to the project's `default` for the type.
+  - **Dry run** — checkbox.
+  - **Not included:** source path (project YAML), free-text project name, create-project affordances.
 - **Stacking:** only one drawer at a time; opening submit while artifact is open replaces it (and vice versa).
 
 #### 11.5.5 Theme — dark only
@@ -703,7 +840,7 @@ Small, native Go toolset available to agents based on agent type:
 
 ## 14. Implementation Phases
 
-*(Revised 2026-07-08: Phase 2 is restructured into three sub-phases — Part 1 (ADK migration, complete), Project Cleanup (bug fixes + spec alignment), and Part 2 (pipeline). Read-only source access moved into Phase 2. Daemonization named as Phase 3's first workstream. Webhook/email example adapters moved out of Phase 2 to the phases where they are actually wired. Each phase has a detailed plan document: `phase_1.md`, `phase_2.md`, `phase_2_cleanup.md`, `phase_3.md` … `phase_6.md`.)*
+*(Revised 2026-07-08: Phase 2 is restructured into three sub-phases — Part 1 (ADK migration, complete), Project Cleanup (bug fixes + spec alignment), and Part 2 (pipeline). Read-only source access moved into Phase 2. Daemonization named as Phase 3's first workstream. Webhook/email example adapters moved out of Phase 2 to the phases where they are actually wired. Each phase has a detailed plan document: `phase_1.md`, `phase_2.md`, `phase_2_cleanup.md`, `phase_3.md`, `phase_4.md`, `phase_4_project_refactor.md`, `phase_5.md`, `phase_6.md`.)*
 
 ### Phase 1: The Engine (CLI-Only) — ✅ Complete
 **Goal:** A running system that can accept a trigger, run a no-op agent, and write artifacts to storage.
@@ -774,6 +911,16 @@ Small, native Go toolset available to agents based on agent type:
 - Agent personality config: system prompts, temperature, tool subsets (the casting thesis, realized; §17 Q9)
 - JSON-RPC client: restart with exponential backoff, streaming notifications
 - **Deliverable:** Users can connect Jira, plug in internal APIs via MCP, store artifacts in S3, run test-and-fix loops safely
+
+### Phase 4 Project Refactor — YAML registry + agent flavors
+**Goal:** Make project and agent casting first-class configuration before Phase 5 guardrails attach to accidental project strings. (See `phase_4_project_refactor.md`.)
+
+- Projects declared only in YAML; registry upserted at process start; **no create-on-submit or CLI GetOrCreate** (§6.0, §17 Q16)
+- Project blocks own `source_path` / `git` / `test` / `agents` / `trust_external`; submit GUI no longer mutates project config
+- Named **flavors** of the three core agent types per project; merge layers include project flavor + frozen issue cast (§8.2, §17 Q9)
+- Submit drawer: project select + conditional per-stage flavor selects; cast persisted on the issue
+- **Out of scope here:** project membership, invites, SSO polish, admin config GUI
+- **Deliverable:** Only YAML-registered projects accept work; multi-flavor projects expose casting at issue create; retries honor the frozen cast
 
 ### Phase 5: Guardrails
 **Goal:** The system protects itself and the user's wallet. (See `phase_5.md`.)
@@ -860,6 +1007,17 @@ Small, native Go toolset available to agents based on agent type:
 | Issue row is the daemon queue | No separate jobs table: workers claim issues with `status=queued`. Human gates set `waiting_human` and free the worker; decisions re-queue. Filesystem remains authoritative for phase state. |
 | OIDC-only + local dev auth | Phase 3 ships built-in OIDC and a non-production local password mode for tests/first-boot. SAML stays an unimplemented external adapter. |
 | Notifications: console + Slack + email | Console is built-in; Slack webhook and SMTP email are the first real JSON-RPC notification adapters. |
+
+**Added 2026-07-10 (project registry + agent flavors):**
+
+| Decision | Rationale |
+|----------|-----------|
+| YAML is source of truth for projects | Projects own git, test, agent casting, and (later) budgets. Creating them via free-text issue submit made config accidental. Registry is upserted from `projects:` at process start; SQLite is a runtime index only. |
+| No GetOrCreate on user paths | CLI, API, dashboard, and triggers hard-fail on unknown project names. Registration is always maintainer YAML. |
+| Named agent flavors of core types only | Casting thesis without inventing free-form agent types. Go structs remain the only identities; flavors are named model/prompt overlays per project. |
+| Freeze cast on the issue at submit | Changing project YAML mid-flight must not retarget in-progress issues. Retries and crash recovery reuse the same flavor names. |
+| Source path off the submit form | Project configuration, not issue input. Future admin UI may edit it; members do not. |
+| Project membership deferred | Local/dev testing uses global roles. Invites/SSO multi-tenant scoping land later without a second config authority. |
 | Dashboard is a vertical expandable-card feed | Not a kanban board. Status-tinted cards, multi-expand, adjudication on the expanded card, full artifacts in a right drawer. Dark-only theme: blue-greys + neon pink accent (§11.5). |
 | `cancelled` is a distinct status | Ctrl-C / shutdown is not a failure; it must not be reported as one. |
 | Empty output fails the loop | An attempt with neither a `write_output` call nor final model text fails immediately rather than being marked done and flagged later. |
@@ -888,10 +1046,11 @@ Small, native Go toolset available to agents based on agent type:
 | 8 | Project/issue ID scheme | **Auto-increment integers** — *closed* | Decided de facto by Phase 1 code. |
 | 10 | Local LLM integration | **OpenAI-compatible endpoint** (`base_url` on the OpenAI implementation) — *closed* | Decided de facto by Phase 2 code; covers llama.cpp, Ollama, and most gateways. |
 | 11 | Adapter binary discovery | **Explicit registry in config** *(soft)* | Scanning a directory and spawning whatever executables appear there is a supply-chain risk. See §4.3. |
-| 9 | YAML agent config schema | **Merge layers:** built-in defaults → global `default_model` → `agents.<type>` → per-issue overrides. Fields include model, temperature, max_tokens, system_prompt / system_prompt_append, core tool subset, mcp_servers, adjudication, token_budget (stored Phase 4; enforced Phase 5). *(soft; hard for Phase 4)* | Casting thesis; closed 2026-07-09 with Phase 4 plan. |
+| 9 | YAML agent config schema | **Merge layers:** built-in defaults → global `default_model` → global `agents.<type>` → **project flavor** → **frozen issue cast** → orchestrator policy. Fields: model, temperature, max_tokens, system_prompt / system_prompt_append, core tool subset, mcp_servers, adjudication, token_budget (stored Phase 4; enforced Phase 5). **Named flavors** of core types only (no free-form agent types). Submit selects a flavor per stage when `len(flavors) > 1`. *(hard for Phase 4 project refactor)* | Casting thesis; extended 2026-07-10. See §8.2 and `phase_4_project_refactor.md`. |
 | 12 | Adapter authentication | **Adapters own backend credentials** via process env and/or adapter-local config. Core never puts secrets in agent-visible artifacts. *(soft; hard for Phase 4)* | Matches Slack/email; applies to S3/Jira/GitHub. Closed 2026-07-09 with Phase 4 plan. |
 | 13 | Git commit strategy | **Single commit per implementer run** *(soft; hard for Phase 4)* | Granular commits are dashboard polish, not MVP. Revisit if review workflows demand it. |
 | 15 | Test command secrets | **Maintainer-only secrets config, injected into the test container environment, never rendered into any agent-readable artifact** *(soft)* | `task.json` is agent-readable; secrets must never flow through it. See §6.5. |
+| 16 | Project lifecycle & config authority | **YAML-only project registration.** Upsert registry at process start from `projects:` map. Submit/CLI/API/triggers hard-fail on unknown project. No GetOrCreate. `source_path`/git/test/agents live in project YAML, not the submit form. *(hard for Phase 4 project refactor)* | Projects are administrative entities (git, budgets, casting), not accidental strings. Membership/invites deferred. See §6.0 and `phase_4_project_refactor.md`. Closed 2026-07-10. |
 
 ### 17.2 Still Open
 
@@ -899,6 +1058,7 @@ Small, native Go toolset available to agents based on agent type:
 |---|----------|-------|
 | 3 | Codebase search tool | Pure-Go grep is implemented; tree-sitter / vector semantic search remain candidates for later phases (not Phase 4). |
 | 14 | Workspace cleanup / retention | Auto-delete vs. archive for audit — decide by Phase 6. |
+| 17 | Project membership & invites | Deferred. Global roles only until multi-user SSO/email invite work. When landed: YAML (or admin UI writing the same model) scopes members/viewers per project; admin still sees all. |
 
 ---
 

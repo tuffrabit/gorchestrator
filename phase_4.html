@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>gorchestrator — Phase 4 Implementation Plan</title>
     <style>
+
         :root {
             --bg: #0f1117;
             --surface: #161b22;
@@ -19,6 +20,7 @@
             --warning: #d29922;
             --danger: #f85149;
             --code-bg: #0d1117;
+            --pink: #ff2d95;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -26,97 +28,103 @@
             background: var(--bg);
             color: var(--text);
             line-height: 1.7;
-            max-width: 900px;
+            max-width: 960px;
             margin: 0 auto;
             padding: 40px 24px;
         }
         h1 {
-            font-size: 2.2rem;
+            font-size: 2rem;
             color: var(--text-bright);
-            margin-bottom: 8px;
+            margin-bottom: 12px;
             font-weight: 600;
         }
-        .subtitle {
-            color: var(--text-muted);
-            font-size: 1.05rem;
-            margin-bottom: 32px;
-        }
-        .meta {
-            display: flex;
-            gap: 24px;
-            font-size: 0.9rem;
-            color: var(--text-muted);
-            margin-bottom: 40px;
-            padding-bottom: 24px;
-            border-bottom: 1px solid var(--border);
-        }
         h2 {
-            font-size: 1.5rem;
+            font-size: 1.45rem;
             color: var(--text-bright);
             margin: 40px 0 16px;
             padding-bottom: 8px;
             border-bottom: 1px solid var(--border);
             font-weight: 600;
         }
-        p { margin-bottom: 14px; }
-        .highlight-box {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 20px 24px;
-            margin: 20px 0;
-        }
-        .highlight-box p:last-child { margin-bottom: 0; }
-        .security-box {
-            background: var(--code-bg);
-            border: 1px solid var(--danger);
-            border-radius: 8px;
-            padding: 16px 20px;
-            margin: 16px 0;
-        }
-        .security-box .label { color: var(--danger); font-weight: 600; }
-        .status-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 4px;
-            font-size: 0.8rem;
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
             font-weight: 600;
         }
-        .status-draft { background: var(--warning); color: #000; }
-        .phase-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 24px;
-            margin: 16px 0;
-        }
-        .phase-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
-        }
-        .phase-number {
-            background: var(--accent-soft);
-            color: #fff;
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
+        h4 {
             font-size: 1rem;
-            flex-shrink: 0;
-        }
-        .phase-number.sec { background: var(--danger); }
-        .phase-title {
-            font-size: 1.2rem;
-            font-weight: 600;
             color: var(--text-bright);
+            margin: 20px 0 10px;
+            font-weight: 600;
         }
-        ul { margin: 12px 0 12px 24px; }
+        p { margin-bottom: 14px; }
+        blockquote {
+            background: var(--surface);
+            border-left: 3px solid var(--pink);
+            padding: 12px 18px;
+            margin: 16px 0;
+            color: var(--text-muted);
+            border-radius: 0 8px 8px 0;
+        }
+        blockquote p { margin-bottom: 8px; }
+        blockquote p:last-child { margin-bottom: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.88rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        ul, ol { margin: 12px 0 16px 24px; }
         li { margin-bottom: 6px; }
+        li > ul, li > ol { margin-top: 6px; margin-bottom: 6px; }
+        code {
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.88em;
+            color: var(--accent);
+        }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 18px;
+            margin: 16px 0;
+            overflow-x: auto;
+            line-height: 1.5;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            color: var(--text-muted);
+            font-size: 0.84rem;
+            white-space: pre;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 36px 0;
+        }
+        strong { color: var(--text-bright); }
+        em { color: var(--text-muted); }
+        a { color: var(--pink); text-decoration: none; }
+        a:hover { text-decoration: underline; }
         .footer {
             margin-top: 60px;
             padding-top: 24px;
@@ -125,139 +133,957 @@
             font-size: 0.9rem;
             text-align: center;
         }
-        code {
-            font-family: 'SF Mono', Monaco, monospace;
-            background: var(--code-bg);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 0.9em;
-            color: var(--accent);
+        .canon-banner {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--pink);
+            border-radius: 0 8px 8px 0;
+            padding: 12px 16px;
+            margin-bottom: 28px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
         }
+
     </style>
 </head>
 <body>
-
-<h1>gorchestrator</h1>
-<p class="subtitle">Phase 4 Implementation Plan — Extensibility</p>
-
-<div class="meta">
-    <span>📅 July 8, 2026</span>
-    <span>📝 Status: <span class="status-badge status-draft">Draft</span></span>
-    <span>🎯 Prerequisite: Phase 3 complete</span>
-</div>
-
+<div class="canon-banner">Companion rendering of <code>phase_4.md</code>. <strong>Markdown is canonical</strong> — on any conflict, the <code>.md</code> wins.</div>
+<h1>Phase 4 Implementation Plan — Extensibility</h1>
+<blockquote>
+<p><strong>Status:</strong> Implementation landed (Parts A–G in tree; full suite green). Polish/edge cases may remain.  </p>
+<p><strong>Approved plan frozen from session 2026-07-09.</strong><br />
+<strong>Prerequisite:</strong> Phase 3 complete (daemon, dashboard, auth, notifications).<br />
+<strong>Scope:</strong> Real git workspaces, container-sandboxed <code>run_test</code>, MCP tools with per-agent server allowlists, external triggers, S3 storage, agent personality config, JSON-RPC client completion.  </p>
+<p><strong>Follow-on (before Phase 5):</strong> YAML project registry + named agent flavors — see <code>phase_4_project_refactor.md</code> (approved 2026-07-10). That plan supersedes free-text project create and completes the casting layers described in §17 Q9 / Q16.  </p>
+</blockquote>
+<hr />
+<h2>Context</h2>
+<p>Phases 1–3 delivered a full Research → Plan → Implement pipeline, crash recovery, and a daemon + dashboard. Source access is still the §6.6 <strong>snapshot interim</strong> (<code>source/</code> copy without <code>.git</code>; implementer workspace seeded by copy). There is no <code>run_test</code> tool, no MCP client, no TriggerPort, no cloud storage, and the JSON-RPC client cannot restart dead adapters or receive streaming notifications.</p>
+<p>Phase 4 is when users plug in <em>their</em> world: a real repo, sandboxed tests, internal APIs via MCP, issues from Jira/GitHub, and optional S3 for artifacts.</p>
+<hr />
 <h2>Goal</h2>
-
-<p>An issue filed in Jira flows into the daemon, the pipeline runs against a real git branch, the implementer iterates through container-sandboxed test-and-fix loops using an internal API exposed over MCP, and the resulting branch is pushed for human review.</p>
-
-<h2>Workstreams</h2>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">A</div>
-        <div class="phase-title">Git Workspace Model (replaces §6.6 snapshots)</div>
-    </div>
-    <ul>
-        <li>Project git config (spec §6.3): <code>repo_url</code>, <code>base_branch</code>, auth mode (<code>ssh_key</code> / <code>token</code> / <code>gh_cli</code>); environment prerequisites validated at project registration, not mid-run.</li>
-        <li>Clone cache per project; fetch before each run.</li>
-        <li>Branch per implementer run: <code>ai-implementer/{issue_id}-{run_id}</code>; workspace = checkout (replaces per-issue snapshot copies).</li>
-        <li>Post-run: stage, single structured commit (§17 Q13), optional push; human decides merge. Optional PR via <code>gh</code>.</li>
-        <li>Parallel implementers: branch + workspace per run, tracked in SQLite.</li>
-        <li>Symlink/containment hardening from cleanup assumed — real repos contain symlinks.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number sec">B</div>
-        <div class="phase-title">run_test — container sandbox is the acceptance criterion</div>
-    </div>
-    <div class="security-box">
-        <span class="label">Security posture (spec §6.5):</span> the command executes code the implementer just wrote — arbitrary code execution by proxy. Container required: no network, workspace-only mount, CPU/memory/time limits. <strong>No bare-subprocess fallback</strong> — without a container runtime, <code>run_test</code> refuses to run.
-    </div>
-    <ul>
-        <li>Size-capped stdout/stderr returned to the agent; test-and-fix loop covered by an integration test.</li>
-        <li>Secrets injected from maintainer-only config into the container env; never rendered into <code>task.json</code> or any agent-readable artifact (§17 Q15).</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">C</div>
-        <div class="phase-title">MCP Client</div>
-    </div>
-    <ul>
-        <li>MCP over stdio; servers declared in project config; <strong>deny by default</strong>.</li>
-        <li><strong>Per-agent, per-server allowlists ship in this phase</strong> — required to land <em>with</em> external triggers, not after (spec §5.6). Per-tool granularity remains Phase 5.</li>
-        <li>Tools registered explicitly in agent config; MCP calls recorded in <code>events.jsonl</code> like core tools.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">D</div>
-        <div class="phase-title">Trigger Port + External Triggers</div>
-    </div>
-    <ul>
-        <li>Formalize <code>TriggerPort</code> (deferred from Phase 1); built-in webhook endpoint on the daemon.</li>
-        <li>External process adapters: GitHub Issues, Jira (JSON-RPC stdio, long-running listeners).</li>
-        <li><strong>Untrusted input posture (spec §5.6):</strong> externally-triggered issues default to <code>adjudicator: human</code> on the implementation boundary; overridable per project, but the default is the safe one.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">E</div>
-        <div class="phase-title">Storage &amp; Agent Config</div>
-    </div>
-    <ul>
-        <li>S3 external storage adapter — first real consumer of slash-canonical port keys and the <code>events.jsonl</code> write path.</li>
-        <li>Agent personality config (the casting thesis, realized): per-agent model/provider, temperature, prompt override, tool subsets — per-project defaults with per-issue overrides (settles §17 Q9).</li>
-        <li>Adapter authentication pattern (§17 Q12): adapters own their backend credentials via their own config/env — never through the core's agent-visible artifacts.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">F</div>
-        <div class="phase-title">JSON-RPC Client Completion</div>
-    </div>
-    <ul>
-        <li>Restart with exponential backoff on adapter death (deferred from cleanup).</li>
-        <li>Streaming notifications for long-running adapter events (trigger feeds).</li>
-    </ul>
-</div>
-
-<h2>Tests</h2>
-
+<pre><code class="language-text">External issue (webhook / GitHub / Jira)
+  → daemon queue
+  → pipeline on a real git branch checkout
+  → implementer test-and-fix via containerized run_test
+  → optional MCP tools under per-agent server allowlist
+  → single structured commit (+ optional push / PR)
+  → human review
+</code></pre>
+<p>Hands-free except configured human gates. Externally-triggered issues default to a human gate before implementation.</p>
+<hr />
+<h2>Decisions (close open questions + resolve draft ambiguities)</h2>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Decision</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>§17 Q9 — YAML agent schema</td>
+<td><strong>Per-agent map with merge layers:</strong> global <code>default_model</code> → <code>agents.&lt;type&gt;</code> defaults → per-issue overrides (issue <code>config_json</code> / submit options). Fields: <code>model</code>, <code>temperature</code>, <code>max_tokens</code>, <code>system_prompt</code> (full override), <code>system_prompt_append</code>, <code>tools</code> (core subset), <code>mcp_servers</code>, <code>adjudicator</code> / <code>max_attempts</code> / <code>loops</code> / <code>rubric</code>, <code>token_budget</code> (<strong>stored only</strong>; enforcement Phase 5).</td>
+<td>Spec §8.2; casting thesis. Existing <code>config.Agent</code> merge is the seed — extend, don't rewrite.</td>
+</tr>
+<tr>
+<td>§17 Q12 — Adapter auth</td>
+<td><strong>Adapters own backend credentials</strong> via process env and/or adapter-local config files. Core never injects secrets into agent-visible artifacts (<code>task.json</code>, <code>events.jsonl</code> payloads). JSON-RPC params may carry non-secret operational data only.</td>
+<td>Matches Slack/email (<code>SLACK_WEBHOOK_URL</code>, SMTP env). Same for S3 (<code>AWS_*</code> / endpoint env), Jira/GitHub tokens.</td>
+</tr>
+<tr>
+<td>§17 Q13 — Git commits</td>
+<td><strong>Single commit per implementer run</strong> (soft → hard for this phase). Structured message template (below).</td>
+<td>Soft decision; granular commits are Phase 6 polish.</td>
+</tr>
+<tr>
+<td>§17 Q15 — Test secrets</td>
+<td><strong>Maintainer-only</strong> <code>test.secrets_env: [NAME,…]</code> — host env values injected into the container; never written into <code>task.json</code> / events (tool result may say <code>secrets: N injected</code> without values).</td>
+<td>Soft decision; agent-readable artifacts must stay clean.</td>
+</tr>
+<tr>
+<td>§17 Q3 — Search tool</td>
+<td><strong>Out of scope.</strong> Keep pure-Go <code>grep_search</code>.</td>
+<td>Phase 4+ candidates remain deferred.</td>
+</tr>
+<tr>
+<td>§17 Q14 — Retention</td>
+<td><strong>Out of scope.</strong> Phase 6.</td>
+<td>Unchanged.</td>
+</tr>
+<tr>
+<td>Git layout vs §6.6</td>
+<td><strong>Replace snapshot copies with git worktrees.</strong> Per-project <strong>bare clone cache</strong>; per-issue read-only <code>source/</code> worktree on <code>base_branch</code>; per-implementer-run worktree at <code>implementation/workspace</code> on <code>ai-implementer/{issue_id}-{run_id}</code>. Drop <code>.git</code>-less rsync snapshots when git is configured.</td>
+<td>Eliminates copy overhead; matches draft workstream A; still uses existing path helpers for agent allowlists.</td>
+</tr>
+<tr>
+<td>Local-only source</td>
+<td>If project has <strong>no</strong> <code>git.repo_url</code> but has <code>source_path</code>, keep Phase 2 snapshot behavior. Git path is opt-in per project.</td>
+<td>CLI/dev fixtures and non-remote monorepos must not regress.</td>
+</tr>
+<tr>
+<td>Branch name</td>
+<td><code>ai-implementer/{issue_id}-{run_id}</code> (run_id = SQLite <code>runs.id</code>).</td>
+<td>Stable, unique, audit-friendly (prefer over timestamp in §6.4 example).</td>
+</tr>
+<tr>
+<td>Push / PR defaults</td>
+<td><code>git.push: false</code> by default; <code>git.create_pr: false</code> by default. Enable per project. PR only when <code>auth.type: gh_cli</code> (or <code>gh</code> available + remote is GitHub).</td>
+<td>Safe default; human owns merge.</td>
+</tr>
+<tr>
+<td>Commit message</td>
+<td><code>ai-implementer: {title}\n\nIssue: #{id}\nRun: {run_id}\nAgent: implementer</code></td>
+<td>Single structured form for review.</td>
+</tr>
+<tr>
+<td><code>run_test</code> runtime</td>
+<td><strong>Docker or Podman</strong> (prefer <code>docker</code> if both on PATH). <strong>No bare-subprocess fallback.</strong> Refuse with clear error if neither present.</td>
+<td>Spec §6.5 hard requirement.</td>
+</tr>
+<tr>
+<td>Test container image</td>
+<td><strong>Required</strong> when <code>test.command</code> is set: <code>test.image</code> (e.g. <code>golang:1.22</code>). No magic default language image.</td>
+<td>Avoids silent wrong runtime; projects own their toolchain.</td>
+</tr>
+<tr>
+<td>Container isolation</td>
+<td><code>--network=none</code>, bind-mount workspace <strong>read-write</strong> at <code>/workspace</code>, cwd <code>/workspace</code>, CPU/memory/time limits from config, stdout/stderr size-capped (default 64KiB each).</td>
+<td>Spec §6.5.</td>
+</tr>
+<tr>
+<td>Dry-run + <code>run_test</code></td>
+<td>In dry-run, <code>run_test</code> returns a stub success without spawning a container.</td>
+<td>Keeps pipeline tests offline.</td>
+</tr>
+<tr>
+<td>MCP SDK</td>
+<td><strong>Official</strong> <code>github.com/modelcontextprotocol/go-sdk</code> for stdio client. Fixture test server may use the same SDK.</td>
+<td>Prefer official over community; stdio is enough (streamable HTTP later).</td>
+</tr>
+<tr>
+<td>MCP permission (Phase 4)</td>
+<td><strong>Per-agent, per-server allowlists.</strong> If server allowed, all tools from that server are exposed. Per-tool allowlists → Phase 5. Servers deny-by-default (not connected unless configured).</td>
+<td>Spec §5.5 / §5.6 — must land <em>with</em> external triggers.</td>
+</tr>
+<tr>
+<td>MCP registration</td>
+<td>Servers declared in config; tools discovered at connect time for schema, but <strong>only servers on the agent allowlist</strong> enter the agent's tool registry. No global "all agents get all MCP tools."</td>
+<td>Aligns §12.2 "explicit" with §5.5 Phase 4 model.</td>
+</tr>
+<tr>
+<td>TriggerPort</td>
+<td>Formal port: long-running sources emit <code>IssueSubmission</code> into the daemon queue via <code>SubmitIssue</code>. Built-in: existing CLI/API/dashboard + <strong>HTTP webhook</strong>. External: GitHub Issues + Jira (JSON-RPC stdio listeners).</td>
+<td>Spec §3.3 / draft D.</td>
+</tr>
+<tr>
+<td>Webhook auth</td>
+<td>Shared secret: header <code>X-Gorch-Token: &lt;token&gt;</code> (or <code>Authorization: Bearer &lt;token&gt;</code>) compared with constant-time equality to <code>triggers.webhook.token_env</code>.</td>
+<td>Minimal; no HMAC body signing required for MVP.</td>
+</tr>
+<tr>
+<td>Untrusted input default</td>
+<td>Issues whose <code>source</code> is <code>webhook</code> / <code>github</code> / <code>jira</code> / other external → <strong>force <code>implementer</code> adjudicator to <code>human</code></strong> unless project sets <code>triggers.trust_external: true</code> (or per-source override). Research/plan keep project agent config.</td>
+<td>Spec §5.6; gate at highest-blast boundary.</td>
+</tr>
+<tr>
+<td>Trigger adapters ship</td>
+<td><strong>Both</strong> GitHub Issues and Jira as external adapters (thin, env-auth). Plus a <strong>fixture</strong> JSON-RPC trigger for tests.</td>
+<td>Goal narrative needs both; fixture covers restart/backoff without network.</td>
+</tr>
+<tr>
+<td>S3 vs Azure</td>
+<td><strong>S3 only</strong> this phase (JSON-RPC storage adapter). Azure Blob follow-on after pattern proven.</td>
+<td>Draft out-of-scope; overrides broader Phase 4 bullet in §14.</td>
+</tr>
+<tr>
+<td>WASM adapters</td>
+<td><strong>Still deferred.</strong></td>
+<td>Spec §4.6.</td>
+</tr>
+<tr>
+<td>JSON-RPC restart</td>
+<td>Supervised client: on process death, exponential backoff restart (cap e.g. 60s), re-<code>initialize</code>, fail in-flight calls; optional max-restart window then permanent error + notify.</td>
+<td>Deferred from cleanup; needed for long-running triggers.</td>
+</tr>
+<tr>
+<td>JSON-RPC notifications</td>
+<td>Client demux: responses (with <code>id</code>) → pending map; notifications (<code>id</code> absent) → registered handler channel.</td>
+<td>Required for trigger feed events.</td>
+</tr>
+<tr>
+<td>Diff drawer</td>
+<td>Prefer <code>git diff base...HEAD</code> in workspace when git-managed; fall back to source-vs-workspace file walk.</td>
+<td>Phase 3 diff remains useful for non-git projects.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Sequencing (seven session-sized parts)</h2>
+<p>Dependency order (do not rearrange casually):</p>
+<pre><code class="language-text">A JSON-RPC client completion
+    ↓
+B Git workspace model ──────────────┐
+    ↓                               │
+C run_test (container)              │
+    ↓                               │
+D Agent personality config          │
+    ↓                               │
+E MCP client + per-agent allowlists │
+    ↓                               │
+F TriggerPort + webhook + GH/Jira + untrusted defaults
+    ↓
+G S3 storage adapter
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Workstream</th>
+<th>Depends on</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A</strong></td>
+<td>F (JSON-RPC)</td>
+<td>—</td>
+<td>Unblocks durable external adapters + trigger streams.</td>
+</tr>
+<tr>
+<td><strong>B</strong></td>
+<td>A (Git)</td>
+<td>—</td>
+<td>Independent of A; can parallelize with A in one long session.</td>
+</tr>
+<tr>
+<td><strong>C</strong></td>
+<td>B (<code>run_test</code>)</td>
+<td>B</td>
+<td>Needs real workspace path; isolation is acceptance criterion.</td>
+</tr>
+<tr>
+<td><strong>D</strong></td>
+<td>E (agent config)</td>
+<td>—</td>
+<td>Soft-depends on existing config; lands before MCP so allowlists have a home.</td>
+</tr>
+<tr>
+<td><strong>E</strong></td>
+<td>C (MCP)</td>
+<td>A (process patterns optional), D</td>
+<td><strong>Must complete before or with F</strong> (§5.6).</td>
+</tr>
+<tr>
+<td><strong>F</strong></td>
+<td>D (Triggers)</td>
+<td>A, E</td>
+<td>External triggers without MCP allowlists are out of policy.</td>
+</tr>
+<tr>
+<td><strong>G</strong></td>
+<td>E (S3)</td>
+<td>A</td>
+<td>First real non-FS StoragePort consumer; slash-canonical keys already exist.</td>
+</tr>
+</tbody>
+</table>
+<p>Parts <strong>A</strong> and <strong>B</strong> may run in parallel. <strong>C</strong> after <strong>B</strong>. <strong>D</strong> can overlap <strong>B/C</strong>. <strong>E</strong> after <strong>D</strong>. <strong>F</strong> after <strong>A+E</strong>. <strong>G</strong> after <strong>A</strong>, optionally parallel with <strong>C–F</strong>.</p>
+<hr />
+<h2>Part A — JSON-RPC client completion</h2>
+<h3>Behavior</h3>
+<ol>
+<li><strong>Supervised lifecycle</strong> wrapping <code>adapters.Client</code>:<br />
+   - Spawn + <code>initialize</code> (existing).<br />
+   - On unexpected exit: exponential backoff restart (e.g. 1s → 2s → 4s … cap 60s).<br />
+   - In-flight <code>Call</code>s fail with a typed error; new calls wait for reconnect or fail if supervisor is stopped.<br />
+   - After prolonged failure (configurable window, default 10m), mark adapter dead, log, optional console notify — do not spin forever silently.</li>
+<li><strong>Notification demux</strong> in <code>readLoop</code>:<br />
+   - Message with <code>id</code> → response path (existing).<br />
+   - Message without <code>id</code> (or notification shape) → fan-out to <code>Subscribe(method) &lt;-chan Notification</code> or a single <code>Notifications() &lt;-chan</code>.</li>
+<li><strong>Env passthrough</strong> when spawning: optional <code>Cmd.Env</code> from adapter config so credentials stay in the child (Q12).</li>
+<li>Wire notification adapters (Slack/email) through the supervisor so a crashed Slack adapter restarts instead of killing the daemon path.</li>
+</ol>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/adapters/jsonrpc.go</code></td>
+<td>Demux notifications; optional env; extract dial/spawn</td>
+</tr>
+<tr>
+<td><code>internal/adapters/supervisor.go</code></td>
+<td><strong>New</strong> — restart/backoff supervisor</td>
+</tr>
+<tr>
+<td><code>internal/adapters/jsonrpc_test.go</code></td>
+<td>Kill child → restart; notification delivery</td>
+</tr>
+<tr>
+<td><code>internal/notify/notify.go</code></td>
+<td>Use supervisor for adapter sinks</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
 <ul>
-    <li>End-to-end: webhook-submitted issue → pipeline on a fixture git repo → branch with commit exists; push against a local bare repo.</li>
-    <li><code>run_test</code>: container enforced (refusal without runtime), timeout kill, no-network assertion, secrets absent from all artifacts.</li>
-    <li>MCP: fixture server; allowlisted agent sees tools, non-allowlisted does not; calls recorded in events.</li>
-    <li>Trigger adapter killed → restarted with backoff.</li>
-    <li>S3 adapter round-trip (e.g., MinIO) — keys identical across host platforms.</li>
+<li>Fixture adapter exits → restarted; subsequent <code>Call</code> succeeds.</li>
+<li>Fixture sends JSON-RPC notification → received on channel within timeout.</li>
+<li>Backoff does not tight-loop (assert minimum delay under test with injectable clock if needed).</li>
 </ul>
-
-<h2>Success Criteria</h2>
-
+<hr />
+<h2>Part B — Git workspace model</h2>
+<h3>Project config (in <code>projects.config_json</code> and/or global YAML project registry)</h3>
+<pre><code class="language-yaml"># Illustrative project-level git block (stored in projects.config_json or future projects.yaml)
+git:
+  repo_url: &quot;git@github.com:myorg/auth-service.git&quot;
+  base_branch: &quot;main&quot;
+  push: false
+  create_pr: false
+  auth:
+    type: ssh_key          # ssh_key | token | gh_cli
+    ssh_key_path: &quot;&quot;       # for ssh_key; empty → agent default keys
+    # token_env: GORCH_GIT_TOKEN
+    # gh_profile: work
+</code></pre>
 <ul>
-    <li>Jira/GitHub issue → reviewed branch, hands-free except configured human gates.</li>
-    <li>Implementer completes a test-and-fix loop inside the sandbox.</li>
-    <li>An internal API is used by an agent via MCP under a per-agent server allowlist.</li>
-    <li>Externally-triggered issues stop at a human gate before implementation by default.</li>
+<li>Validate at project registration / first use: <code>git</code> on PATH; for <code>gh_cli</code>/<code>create_pr</code>, <code>gh</code> on PATH; <code>repo_url</code> + <code>base_branch</code> non-empty.</li>
+<li><strong>Do not</strong> clone mid-agent-turn; clone/fetch is orchestrator-side only.</li>
 </ul>
-
-<h2>Out of Scope</h2>
-
+<h3>Layout</h3>
+<pre><code class="language-text">{storage_root}/
+  repos/{project_id}.git          ← bare clone cache
+  projects/{pid}/issues/{iid}/
+    source/                       ← worktree @ base_branch (read-only for agents)
+    implementation/
+      workspace/                  ← worktree @ ai-implementer/{iid}-{run_id}
+</code></pre>
+<h3>Lifecycle (orchestrator-managed; agent never runs git)</h3>
+<ol>
+<li><strong>EnsureCache:</strong> <code>git clone --bare</code> if missing; else <code>git fetch --all --prune</code>.</li>
+<li><strong>Issue create (git projects):</strong> create/update <code>source/</code> worktree at <code>base_branch</code> (replace <code>snapshotSource</code> copy). Non-git projects keep existing snapshot.</li>
+<li><strong>Implementer attempt start:</strong> remove prior workspace worktree if present; <code>git worktree add -b ai-implementer/{issue_id}-{run_id} …</code> from cache at <code>base_branch</code>.</li>
+<li><strong>Post-implementer success:</strong> <code>git add -A</code>; single commit with structured message (author: configurable <code>git.author_name</code> / <code>git.author_email</code> defaults <code>gorchestrator</code> / <code>gorchestrator@localhost</code>); if <code>push</code>, push branch; if <code>create_pr</code>, <code>gh pr create</code>.</li>
+<li><strong>Retry / crash re-run:</strong> new <code>run</code> row → new branch name → fresh worktree (do not reuse dirty failed workspace).</li>
+<li><strong>SQLite:</strong> <code>runs.workspace_id</code>, <code>runs.branch_name</code> (migration 6).</li>
+</ol>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/git/</code></td>
+<td><strong>New</strong> package: cache, worktree, commit, push, pr helpers via <code>os/exec</code></td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code></td>
+<td>Replace/branch <code>snapshotSource</code> / <code>seedWorkspace</code>; post-phase commit</td>
+</tr>
+<tr>
+<td><code>internal/sqlite/db.go</code></td>
+<td>Migration 6: <code>workspace_id</code>, <code>branch_name</code> on <code>runs</code></td>
+</tr>
+<tr>
+<td><code>internal/sqlite/runs.go</code></td>
+<td>Persist new columns</td>
+</tr>
+<tr>
+<td><code>internal/storage/paths.go</code></td>
+<td>Optional <code>RepoCachePath(projectID)</code>; keep <code>SourcePath</code> / <code>WorkspacePath</code></td>
+</tr>
+<tr>
+<td><code>internal/server/drawer.go</code></td>
+<td>Git-aware diff when <code>.git</code> / worktree present</td>
+</tr>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td>Global git author defaults if useful; project git stays in <code>config_json</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
 <ul>
-    <li>Token budgets, effort estimation, scope detection → Phase 5</li>
-    <li>Per-tool MCP granularity → Phase 5</li>
-    <li>Azure Blob (follow-on once the S3 pattern is proven)</li>
+<li>Fixture bare remote (local) → clone cache → issue → source worktree has files; implementer workspace is separate branch; commit exists after phase.</li>
+<li>Parallel-ish: two run IDs → two branch names, no worktree collision.</li>
+<li>Symlink escape still rejected by existing path tools (regression).</li>
+<li>Non-git <code>source_path</code> path unchanged.</li>
 </ul>
+<hr />
+<h2>Part C — <code>run_test</code> tool (container sandbox)</h2>
+<h3>Config</h3>
+<pre><code class="language-yaml"># Per-project (config_json) or documented in config.example
+test:
+  command: &quot;go test ./...&quot;
+  timeout: 60s
+  image: &quot;golang:1.22&quot;       # required if command set
+  cpu: &quot;1&quot;
+  memory: &quot;512m&quot;
+  secrets_env: []            # host env names injected into container
+  # runtime: auto | docker | podman
+</code></pre>
+<h3>Tool behavior</h3>
+<ul>
+<li>Implementer-only; immutable command from project config (agent cannot change argv).</li>
+<li>Resolve runtime; if none → tool error string (not panic): <code>run_test unavailable: no container runtime (docker/podman)</code>.</li>
+<li>Run approximately:<br />
+<code>text
+  docker run --rm --network=none \
+    --cpus=… --memory=… \
+    -v {absWorkspace}:/workspace:rw -w /workspace \
+    -e SECRET=… (from secrets_env) \
+    {image} sh -c '{test.command}'</code></li>
+<li>Enforce wall-clock timeout; kill container on expiry.</li>
+<li>Cap stdout/stderr; return combined summary to the model.</li>
+<li>Record tool call in <code>events.jsonl</code> <strong>without</strong> secret values.</li>
+</ul>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/tools/run_test.go</code></td>
+<td><strong>New</strong> tool</td>
+</tr>
+<tr>
+<td><code>internal/tools/tools.go</code></td>
+<td>Add to <code>NewImplementerRegistry</code></td>
+</tr>
+<tr>
+<td><code>internal/tools/bound.go</code> or <code>BoundTools</code></td>
+<td>Add test config + abs workspace host path</td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code></td>
+<td>Pass test config + host workspace path into BoundTools</td>
+</tr>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td>Types for test block if global; project-level via config_json parsers</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>No runtime → clear refusal.</li>
+<li>Fake/<code>docker</code> shim or integration tag: timeout kill; network isolation assertion (optional best-effort); secrets not in events/task.json.</li>
+<li>Scripted failing-then-passing test in workspace → implementer loop can observe both (integration / dry-run hybrid as practical).</li>
+</ul>
+<hr />
+<h2>Part D — Agent personality config</h2>
+<h3>Schema extensions (<code>config.AgentConfig</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>temperature</code></td>
+<td>float; passed into model request where provider supports it</td>
+</tr>
+<tr>
+<td><code>max_tokens</code></td>
+<td>completion cap hook</td>
+</tr>
+<tr>
+<td><code>system_prompt</code></td>
+<td>full override (existing)</td>
+</tr>
+<tr>
+<td><code>system_prompt_append</code></td>
+<td>appended after base/default prompt</td>
+</tr>
+<tr>
+<td><code>tools</code></td>
+<td>optional allowlist of <strong>core</strong> tool names for this agent; empty = all default for type</td>
+</tr>
+<tr>
+<td><code>mcp_servers</code></td>
+<td>list of MCP server names (Part E)</td>
+</tr>
+<tr>
+<td><code>token_budget</code></td>
+<td>int; persisted in task.json for visibility; <strong>not enforced</strong> until Phase 5</td>
+</tr>
+</tbody>
+</table>
+<h3>Merge order</h3>
+<ol>
+<li>Built-in defaults (<code>defaultAgentConfig</code>)</li>
+<li>Global <code>default_model</code> / tools</li>
+<li><code>agents.&lt;name&gt;</code> in YAML</li>
+<li>Per-issue overrides from <code>issues</code> metadata / submit payload / <code>projects.config_json</code> agent map (minimal surface: adjudicator + model + mcp_servers)</li>
+</ol>
+<p>Wire temperature/max_tokens into LLM request builders (<code>internal/llm/*</code>) where the API allows; no-op with log if provider ignores.</p>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td>Fields + merge</td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code></td>
+<td><code>buildTask</code>, registry filtering by <code>tools</code></td>
+</tr>
+<tr>
+<td><code>internal/llm/*.go</code></td>
+<td>Plumb temperature / max_tokens</td>
+</tr>
+<tr>
+<td><code>configs/config.example.yaml</code></td>
+<td>Document full agent block</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Override system prompt append; tool subset drops <code>grep_search</code> from registry; temperature present in outbound request (httptest fake).</li>
+</ul>
+<hr />
+<h2>Part E — MCP client + per-agent server allowlists</h2>
+<h3>Config</h3>
+<pre><code class="language-yaml">mcp_servers:
+  - name: internal-api
+    command: [&quot;my-mcp-server&quot;]
+    args: []
+    env: []                    # env var NAMES to pass through from host (values not logged)
+    # transport: stdio         # only stdio this phase
 
+agents:
+  implementer:
+    mcp_servers: [internal-api]
+  researcher:
+    mcp_servers: []            # deny
+</code></pre>
+<h3>Behavior</h3>
+<ol>
+<li>At engine/daemon start (or first use): for each configured server, spawn stdio MCP client via official Go SDK.</li>
+<li>When building an agent registry: core tools ± subset, <strong>plus</strong> tools from servers listed in that agent's <code>mcp_servers</code>.</li>
+<li>Tool names: prefix with server name to avoid collisions (<code>internal-api__tool_name</code>) in the ADK registry; strip/map on call.</li>
+<li>Every MCP tool call → <code>events.jsonl</code> like core tools (size-capped result).</li>
+<li>Supervisor-style restart for MCP processes (reuse Part A patterns where practical; MCP is not JSON-RPC-adapter but same process-care).</li>
+</ol>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/mcp/</code></td>
+<td><strong>New</strong> — client manager, allowlist filter, ADK tool wrappers</td>
+</tr>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td><code>mcp_servers</code> + agent field</td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code></td>
+<td>Attach MCP tools per agent</td>
+</tr>
+<tr>
+<td><code>go.mod</code></td>
+<td><code>github.com/modelcontextprotocol/go-sdk</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Fixture MCP server with one tool; allowlisted agent sees it; non-allowlisted does not.</li>
+<li>Call recorded in <code>events.jsonl</code>.</li>
+<li>Deny-by-default: empty config → no MCP tools.</li>
+</ul>
+<hr />
+<h2>Part F — TriggerPort + external triggers</h2>
+<h3>Port</h3>
+<pre><code class="language-go">// internal/trigger/port.go
+type Submission struct {
+    Project   string
+    Title     string
+    Body      string // optional issue text artifact
+    Source    string // &quot;manual&quot; | &quot;webhook&quot; | &quot;github&quot; | &quot;jira&quot; | ...
+    ExternalID string
+    Metadata  map[string]string
+}
+
+type Port interface {
+    // Name of the trigger source.
+    Name() string
+    // Start emits submissions until ctx is cancelled.
+    Start(ctx context.Context, out chan&lt;- Submission) error
+}
+</code></pre>
+<p>Daemon wires: for each submission → <code>SubmitIssue</code> with source tag; apply untrusted defaults (implementer adjudicator → human unless trusted).</p>
+<h3>Built-in webhook</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Auth</th>
+<th>Body</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST</code></td>
+<td><code>/hooks/issues</code></td>
+<td>shared token</td>
+<td><code>{ "project", "title", "body?" }</code> → <code>202</code> + issue id</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Registered <strong>outside</strong> session-cookie auth; uses trigger token.</li>
+<li>Rate-limit lightly (optional simple in-memory throttle) — nice-to-have, not blocker.</li>
+</ul>
+<h3>External adapters</h3>
+<table>
+<thead>
+<tr>
+<th>Adapter</th>
+<th>Port</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>adapters/github/</code> + yaml</td>
+<td><code>trigger</code></td>
+<td>Listen via API polling or webhook relay over JSON-RPC notifications; auth via <code>GITHUB_TOKEN</code></td>
+</tr>
+<tr>
+<td><code>adapters/jira/</code> + yaml</td>
+<td><code>trigger</code></td>
+<td>Same pattern; <code>JIRA_*</code> env</td>
+</tr>
+<tr>
+<td>Fixture in tests</td>
+<td><code>trigger</code></td>
+<td>Emits one issue then heartbeats; kill → supervisor restarts</td>
+</tr>
+</tbody>
+</table>
+<p>JSON-RPC methods (illustrative):</p>
+<ul>
+<li><code>initialize</code> → <code>{port: "trigger"}</code></li>
+<li>Notifications: <code>trigger.issue</code> with submission payload</li>
+<li>Optional requests: <code>trigger.health</code></li>
+</ul>
+<h3>Untrusted posture</h3>
+<ul>
+<li><code>Submission.Source != "manual" &amp;&amp; !project.TrustExternal</code> → issue flags <code>external=true</code>; engine forces implementer boundary <code>adjudicator=human</code>.</li>
+<li>Surface on dashboard card: chip "external" / "human gate required".</li>
+</ul>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/trigger/</code></td>
+<td><strong>New</strong> port, webhook helper, adapter sink</td>
+</tr>
+<tr>
+<td><code>internal/daemon/daemon.go</code></td>
+<td>Start trigger listeners</td>
+</tr>
+<tr>
+<td><code>internal/server/server.go</code></td>
+<td><code>/hooks/issues</code></td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/service.go</code></td>
+<td><code>SubmitIssue</code> accepts source + trust rules</td>
+</tr>
+<tr>
+<td><code>adapters/github/</code>, <code>adapters/jira/</code>, manifests</td>
+<td><strong>New</strong></td>
+</tr>
+<tr>
+<td><code>internal/sqlite/db.go</code></td>
+<td>Optional: <code>issues.source</code>, <code>issues.external_id</code> (migration 7)</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Webhook with bad token → 401; good token → queued issue.</li>
+<li>Fixture trigger notification → issue created; adapter kill → restart (Part A).</li>
+<li>External issue → implementer adjudicator is human even if YAML says <code>self</code>.</li>
+</ul>
+<hr />
+<h2>Part G — S3 storage adapter</h2>
+<h3>Scope</h3>
+<ul>
+<li>External JSON-RPC adapter implementing StoragePort methods: <code>storage.read</code>, <code>storage.write</code>, <code>storage.list</code>, <code>storage.exists</code>, <code>storage.mkdir</code>.</li>
+<li>Keys: <strong>slash-canonical</strong> relative paths as already defined (<code>internal/storage</code> port keys); adapter maps to <code>s3://bucket/{prefix}/{key}</code>.</li>
+<li>Core selects storage backend via config:</li>
+</ul>
+<pre><code class="language-yaml">storage:
+  backend: fs              # fs | adapter
+  # adapter: s3            # name from adapters: list with port: storage
+</code></pre>
+<p>Default remains FS. When adapter selected, <code>NewEngine</code> constructs a <code>storage.Port</code> that RPC-forwards (thin client wrapper), not only FS.</p>
+<h3>Auth</h3>
+<ul>
+<li>Adapter process env: <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_REGION</code>, <code>S3_BUCKET</code>, <code>S3_PREFIX</code>, optional <code>S3_ENDPOINT</code> (MinIO).</li>
+</ul>
+<h3>Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>adapters/s3/main.go</code>, <code>adapters/s3.yaml</code></td>
+<td><strong>New</strong></td>
+</tr>
+<tr>
+<td><code>internal/storage/rpc.go</code></td>
+<td><strong>New</strong> — Port over JSON-RPC client</td>
+</tr>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td><code>storage.backend</code></td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code></td>
+<td>Construct Port from config</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Round-trip against MinIO or <code>httptest</code> fake S3; keys identical on Linux path assumptions (forward-slash keys only).</li>
+<li>Existing FS tests remain default path.</li>
+</ul>
+<hr />
+<h2>Package layout (additions summary)</h2>
+<pre><code class="language-text">adapters/
+  github/     main.go + github.yaml
+  jira/       main.go + jira.yaml
+  s3/         main.go + s3.yaml
+internal/
+  adapters/   supervisor.go; jsonrpc notification demux
+  git/        cache, worktree, commit, push
+  mcp/        client manager + ADK wrappers
+  trigger/    port, webhook, adapter bridge
+  tools/      run_test.go
+  storage/    rpc.go
+  config/     agent/mcp/test/git/trigger/storage fields
+  sqlite/     migrations 6–7; runs + issues columns
+  orchestrator/  git lifecycle, submit source, MCP wiring
+  server/     /hooks/issues; drawer git diff
+  daemon/     start triggers + supervised adapters
+</code></pre>
+<hr />
+<h2>Schema migrations</h2>
+<p><strong>Migration 6 — run workspace tracking</strong></p>
+<pre><code class="language-sql">ALTER TABLE runs ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE runs ADD COLUMN branch_name TEXT NOT NULL DEFAULT '';
+</code></pre>
+<p><strong>Migration 7 — issue provenance</strong></p>
+<pre><code class="language-sql">ALTER TABLE issues ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE issues ADD COLUMN external_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_issues_external ON issues(source, external_id);
+</code></pre>
+<hr />
+<h2>Config surface (canonical example additions)</h2>
+<pre><code class="language-yaml">storage:
+  backend: fs                # fs | adapter
+  # adapter_name: s3
+
+mcp_servers: []
+# - name: internal-api
+#   command: [&quot;./bin/my-mcp&quot;]
+#   env: [API_TOKEN]
+
+triggers:
+  webhook:
+    enabled: true
+    token_env: GORCH_WEBHOOK_TOKEN
+  adapters: []               # names from adapters: with port: trigger
+  trust_external: false      # if true, skip forced human implementer gate
+
+# agents: ... extended fields (temperature, tools, mcp_servers, …)
+# adapters: ... existing registry; add github/jira/s3 manifests
+</code></pre>
+<p>Project-level (<code>projects.config_json</code>) holds <code>git</code>, <code>test</code>, optional per-project agent overrides and <code>trust_external</code>.</p>
+<hr />
+<h2>End-to-end tests (phase success)</h2>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Expectation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Webhook issue → pipeline on fixture git repo</td>
+<td>Branch + single commit exists; push mocked or local bare remote</td>
+</tr>
+<tr>
+<td><code>run_test</code></td>
+<td>Refusal without runtime; timeout; no secrets in artifacts</td>
+</tr>
+<tr>
+<td>MCP</td>
+<td>Allowlist enforced; events recorded</td>
+</tr>
+<tr>
+<td>Trigger adapter</td>
+<td>Emit issue; kill → backoff restart</td>
+</tr>
+<tr>
+<td>S3</td>
+<td>Round-trip MinIO/fake; slash keys stable</td>
+</tr>
+<tr>
+<td>External default gate</td>
+<td>Implementer waits on human</td>
+</tr>
+<tr>
+<td>Non-git project</td>
+<td>Snapshot path still works; no git required</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Success criteria</h2>
+<ol>
+<li>Jira/GitHub (or webhook) issue → reviewed branch, hands-free except configured gates.</li>
+<li>Implementer completes a test-and-fix loop inside the container sandbox.</li>
+<li>An internal API is used by an agent via MCP under a per-agent server allowlist.</li>
+<li>Externally-triggered issues stop at a human gate before implementation by default.</li>
+<li>JSON-RPC adapters survive child death via supervised restart.</li>
+<li>Optional S3 backend stores artifacts with portable keys.</li>
+</ol>
+<h2>Out of scope</h2>
+<ul>
+<li>Token budget <strong>enforcement</strong>, effort estimation, scope detection → Phase 5.</li>
+<li>MCP per-<strong>tool</strong> granularity → Phase 5.</li>
+<li>Azure Blob → follow-on.</li>
+<li>Workspace retention policies → Phase 6.</li>
+<li>Semantic/vector search (Q3) → later.</li>
+<li>WASM adapters → deferred.</li>
+<li>Multi-host / multi-daemon clone cache coordination.</li>
+</ul>
+<hr />
+<h2>Spec updates (on implementation / plan freeze)</h2>
+<ol>
+<li>Close §17 Q9 and Q12 as soft/hard decisions in the Decisions Log.</li>
+<li>Phase 4 bullet: storage adapters <strong>S3</strong> (Azure deferred).</li>
+<li>§6.4: document worktree + bare clone cache; branch naming <code>ai-implementer/{issue_id}-{run_id}</code>; note §6.6 interim replaced when git configured.</li>
+<li>§12.2: Phase 4 per-agent server allowlists (not MVP “all tools to all agents”).</li>
+<li>Revision log entry for Phase 4 plan solidification date.</li>
+</ol>
+<hr />
+<h2>Critical existing code to reuse</h2>
+<table>
+<thead>
+<tr>
+<th>Piece</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Engine pipeline / allowlists / seedWorkspace</td>
+<td><code>internal/orchestrator/engine.go</code></td>
+</tr>
+<tr>
+<td>SubmitIssue / Decide / queue</td>
+<td><code>internal/orchestrator/service.go</code></td>
+</tr>
+<tr>
+<td>Path helpers (slash-canonical)</td>
+<td><code>internal/storage/paths.go</code>, <code>port.go</code>, <code>fs.go</code></td>
+</tr>
+<tr>
+<td>JSON-RPC client + manifests</td>
+<td><code>internal/adapters/jsonrpc.go</code>, <code>manifest.go</code></td>
+</tr>
+<tr>
+<td>Notification adapter pattern (env auth)</td>
+<td><code>internal/notify/notify.go</code>, <code>adapters/slack/</code>, <code>adapters/email/</code></td>
+</tr>
+<tr>
+<td>Agent config merge</td>
+<td><code>internal/config/config.go</code> (<code>Agent</code>, <code>AgentConfig</code>)</td>
+</tr>
+<tr>
+<td>Implementer registry</td>
+<td><code>internal/tools/tools.go</code></td>
+</tr>
+<tr>
+<td>Path containment / symlinks</td>
+<td><code>internal/tools/paths.go</code>, write/read tools</td>
+</tr>
+<tr>
+<td>Daemon worker pool</td>
+<td><code>internal/daemon/daemon.go</code></td>
+</tr>
+<tr>
+<td>Runs / projects repos</td>
+<td><code>internal/sqlite/runs.go</code>, <code>projects.go</code>, <code>db.go</code> migrations</td>
+</tr>
+<tr>
+<td>Diff drawer</td>
+<td><code>internal/server/drawer.go</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Verification</h2>
+<pre><code class="language-bash">go test ./...
+# targeted as parts land:
+go test ./internal/adapters/ ./internal/git/ ./internal/tools/ ./internal/mcp/ ./internal/trigger/ ./internal/storage/ ./internal/orchestrator/ ./internal/daemon/
+</code></pre>
+<p>Integration: local bare git remote + optional Docker + MinIO for full Part G. CI without Docker should still pass unit tests (container tests skip or use build tags <code>integration</code>).</p>
+<hr />
+<h2>Implementation note</h2>
+<p>After approval, replace the draft body of repo <code>phase_4.md</code> with this plan (status → ready / in progress), and apply the listed <code>spec.md</code> decision closures when the phase starts or completes.</p>
 <div class="footer">
-    <p>Phase 4 draft — refine into session-sized parts before implementation. Canonical source: <code>phase_4.md</code></p>
+    <p>Canonical source: <code>phase_4.md</code></p>
 </div>
-
 </body>
 </html>

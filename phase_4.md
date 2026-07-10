@@ -5,6 +5,8 @@
 > **Approved plan frozen from session 2026-07-09.**  
 > **Prerequisite:** Phase 3 complete (daemon, dashboard, auth, notifications).  
 > **Scope:** Real git workspaces, container-sandboxed `run_test`, MCP tools with per-agent server allowlists, external triggers, S3 storage, agent personality config, JSON-RPC client completion.  
+>
+> **Follow-on (before Phase 5):** YAML project registry + named agent flavors — see `phase_4_project_refactor.md` (approved 2026-07-10). That plan supersedes free-text project create and completes the casting layers described in §17 Q9 / Q16.  
 
 ---
 

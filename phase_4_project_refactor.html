@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>gorchestrator — Phase 4 Project Refactor</title>
+    <style>
+
+        :root {
+            --bg: #0f1117;
+            --surface: #161b22;
+            --surface-hover: #1c2128;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --text-bright: #f0f6fc;
+            --accent: #58a6ff;
+            --accent-soft: #1f6feb;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --code-bg: #0d1117;
+            --pink: #ff2d95;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+        h1 {
+            font-size: 2rem;
+            color: var(--text-bright);
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+        h2 {
+            font-size: 1.45rem;
+            color: var(--text-bright);
+            margin: 40px 0 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
+            font-weight: 600;
+        }
+        h4 {
+            font-size: 1rem;
+            color: var(--text-bright);
+            margin: 20px 0 10px;
+            font-weight: 600;
+        }
+        p { margin-bottom: 14px; }
+        blockquote {
+            background: var(--surface);
+            border-left: 3px solid var(--pink);
+            padding: 12px 18px;
+            margin: 16px 0;
+            color: var(--text-muted);
+            border-radius: 0 8px 8px 0;
+        }
+        blockquote p { margin-bottom: 8px; }
+        blockquote p:last-child { margin-bottom: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.88rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        ul, ol { margin: 12px 0 16px 24px; }
+        li { margin-bottom: 6px; }
+        li > ul, li > ol { margin-top: 6px; margin-bottom: 6px; }
+        code {
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.88em;
+            color: var(--accent);
+        }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 18px;
+            margin: 16px 0;
+            overflow-x: auto;
+            line-height: 1.5;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            color: var(--text-muted);
+            font-size: 0.84rem;
+            white-space: pre;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 36px 0;
+        }
+        strong { color: var(--text-bright); }
+        em { color: var(--text-muted); }
+        a { color: var(--pink); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .footer {
+            margin-top: 60px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-align: center;
+        }
+        .canon-banner {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--pink);
+            border-radius: 0 8px 8px 0;
+            padding: 12px 16px;
+            margin-bottom: 28px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+    </style>
+</head>
+<body>
+<div class="canon-banner">Companion rendering of <code>phase_4_project_refactor.md</code>. <strong>Markdown is canonical</strong> — on any conflict, the <code>.md</code> wins.</div>
+<h1>Phase 4 Project Refactor — YAML Registry &amp; Agent Flavors</h1>
+<blockquote>
+<p><strong>Status:</strong> Approved plan (not yet implemented).<br />
+<strong>Approved:</strong> 2026-07-10<br />
+<strong>Prerequisite:</strong> Phase 4 Parts A–G in tree (git, <code>run_test</code>, MCP, triggers, S3, agent personality fields, JSON-RPC supervisor). Full suite green before starting this refactor is preferred but not a hard gate if residual Phase 4 polish is isolated.<br />
+<strong>Scope:</strong> Make projects and agent casting first-class YAML configuration. Remove create-on-submit / CLI <code>GetOrCreate</code>. Named flavors of the three core agent types; freeze cast on the issue; submit drawer selects project + optional flavors.<br />
+<strong>Spec anchors:</strong> §6.0, §8.2, §10.1, §10.3, §11.5, §17 Q9 / Q16.<br />
+<strong>Out of scope:</strong> Project membership / invites, admin config GUI, SSO polish, Phase 5 budgets.</p>
+</blockquote>
+<hr />
+<h2>Context</h2>
+<p>Phase 4 delivered extensibility (git workspaces, container <code>run_test</code>, MCP allowlists, triggers, S3, global agent personality fields). Two foundational gaps remain:</p>
+<ol>
+<li><strong>Projects are accidental.</strong> <code>SubmitIssue</code> / CLI <code>Run</code> call <code>GetOrCreate</code> on a free-text name. The submit drawer is a text input + datalist; members can invent projects and mutate <code>source_path</code> at submit time. Phase 5 budgets and escalation cannot attach cleanly to garbage project names.</li>
+<li><strong>Casting is incomplete.</strong> Spec casting thesis and §17 Q9 call for project + per-issue layers. Code merges only built-in → global <code>default_model</code> → global <code>agents.&lt;type&gt;</code>. There is no project flavor catalog and no submit-time selection UI.</li>
+</ol>
+<p>This refactor closes both <strong>before</strong> Phase 5. It does not add multi-tenant membership yet (deferred — local testing / global roles only).</p>
+<hr />
+<h2>Goal</h2>
+<pre><code class="language-text">Maintainer edits config.yaml projects: map
+  → process start upserts SQLite registry
+  → member opens New issue
+  → selects a registered project
+  → (if project has multiple flavors per stage) selects researcher / planner / implementer flavors
+  → issue stores frozen cast
+  → pipeline resolves agent config via merge layers including that cast
+</code></pre>
+<p>Unknown project names fail hard on every entry path (dashboard, API, CLI, webhook, external triggers). No project is ever created by issue traffic.</p>
+<hr />
+<h2>Decisions (frozen 2026-07-10)</h2>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>Decision</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Config authority</td>
+<td><strong>YAML only</strong> for project definition. No admin config GUI this cut.</td>
+<td>Matches product philosophy; GUI later edits the same model.</td>
+</tr>
+<tr>
+<td>Project create</td>
+<td><strong>No GetOrCreate</strong> on submit/CLI/API/triggers. Registry upsert from <code>projects:</code> at process start.</td>
+<td>Projects are administrative entities.</td>
+</tr>
+<tr>
+<td>Membership / invites</td>
+<td><strong>Deferred.</strong> Global roles only; all authenticated users see all registered projects.</td>
+<td>Local testing first; avoid building ACL twice.</td>
+</tr>
+<tr>
+<td>Agent model</td>
+<td><strong>Named flavors</strong> of core types only (<code>researcher</code> / <code>planner</code> / <code>implementer</code>). No free-form agent types.</td>
+<td>Casting without diluting Go identities.</td>
+</tr>
+<tr>
+<td>Flavor UI</td>
+<td>Show per-stage select <strong>only if</strong> <code>len(flavors) &gt; 1</code> for that type on the selected project. Zero or one flavor → no picker.</td>
+<td>Keeps the drawer simple.</td>
+</tr>
+<tr>
+<td>No project agents block</td>
+<td>Use global + built-in only; no flavor pickers.</td>
+<td>Correct default.</td>
+</tr>
+<tr>
+<td>Source path</td>
+<td><strong>Removed from submit GUI and submit payload semantics.</strong> Lives under project YAML.</td>
+<td>Config ≠ issue input.</td>
+</tr>
+<tr>
+<td>Cast persistence</td>
+<td>Freeze flavor names on the issue at submit (<code>agent_flavors_json</code>). Retries/crash recovery reuse them.</td>
+<td>YAML edits must not retarget in-flight work.</td>
+</tr>
+<tr>
+<td>CLI</td>
+<td><code>run --project=foo</code> requires <code>foo</code> in YAML registry. Fail if missing.</td>
+<td>Same rule as daemon.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Target config schema</h2>
+<pre><code class="language-yaml"># Global (existing)
+default_model: { ... }
+agents:
+  researcher: { ... }   # optional global defaults per type
+  planner: { ... }
+  implementer: { ... }
+
+# NEW: project registry (source of truth)
+projects:
+  acme:
+    source_path: /path/to/acme     # local snapshot mode; omit when using git
+    git:
+      repo_url: &quot;git@github.com:myorg/acme.git&quot;
+      base_branch: main
+      push: false
+      create_pr: false
+      auth:
+        type: ssh_key
+    test:
+      command: &quot;go test ./...&quot;
+      timeout: 60s
+      image: &quot;golang:1.22&quot;
+      secrets_env: []
+    trust_external: false
+    agents:
+      researcher:
+        default: thorough          # flavor name when submit omits choice
+        flavors:
+          thorough:
+            model: { provider: openai, model: o3-mini }
+            system_prompt_append: &quot;Prefer root-cause depth...&quot;
+          cheap:
+            model: { provider: openai, model: gpt-4o-mini }
+      planner:
+        default: standard
+        flavors:
+          standard: {}             # inherits global + built-in
+      implementer:
+        default: coder
+        flavors:
+          coder:
+            model: { provider: anthropic, model: claude-sonnet-4 }
+</code></pre>
+<h3>Merge order (per phase)</h3>
+<ol>
+<li>Built-in type defaults (<code>defaultAgentConfig</code>)</li>
+<li>Global <code>default_model</code> + global <code>agents.&lt;type&gt;</code></li>
+<li>Selected <strong>project flavor</strong> for that type (if any)</li>
+<li><strong>Frozen issue cast</strong> (flavor name → re-resolve overlay from project catalog at run time; name is frozen, not a deep-copied config blob — see note below)</li>
+<li>Orchestrator policy (e.g. external → force implementer <code>adjudicator: human</code> unless <code>trust_external</code>)</li>
+</ol>
+<p><strong>Freeze semantics:</strong> Persist <strong>flavor names</strong> on the issue, not a full resolved config snapshot. At run time, re-resolve name → overlay from the current YAML/synced project config. If a flavor name is <strong>missing</strong> after a YAML edit (deleted flavor), fail the phase clearly rather than silently falling back — the cast is intentional. (Optional later: snapshot full resolved config at submit for air-gapped audit; not required for this cut.)</p>
+<p><strong>Default resolution at submit:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Project type config</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No <code>agents</code> / no flavors for type</td>
+<td>Cast field empty or omit; resolve global+built-in only</td>
+</tr>
+<tr>
+<td>One flavor</td>
+<td>Always that flavor (or <code>default</code>); no UI control</td>
+</tr>
+<tr>
+<td>Multiple flavors</td>
+<td>UI select; default = <code>default</code> key; persist choice</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Sequencing (four session-sized parts)</h2>
+<pre><code class="language-text">A Config types + registry sync + kill GetOrCreate
+    ↓
+B Agent flavor merge + issue cast column
+    ↓
+C Submit API + drawer UX (project select, conditional flavors, no source)
+    ↓
+D Docs, example config, tests green, residual call-site cleanup
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>Workstream</th>
+<th>Depends on</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A</strong></td>
+<td>YAML <code>projects</code> map, sync, hard-fail unknown project</td>
+<td>—</td>
+</tr>
+<tr>
+<td><strong>B</strong></td>
+<td>Flavor schema, merge in <code>agentConfigForIssue</code>, persist cast</td>
+<td>A</td>
+</tr>
+<tr>
+<td><strong>C</strong></td>
+<td>Dashboard + API submit surface</td>
+<td>A, B</td>
+</tr>
+<tr>
+<td><strong>D</strong></td>
+<td><code>config.example.yaml</code>, README note, full test pass</td>
+<td>A–C</td>
+</tr>
+</tbody>
+</table>
+<p>Parts <strong>B</strong> and early <strong>C</strong> can overlap once A lands (API contract for cast can be stubbed).</p>
+<hr />
+<h2>Part A — Project registry from YAML</h2>
+<h3>Behavior</h3>
+<ol>
+<li>Add <code>config.ProjectConfig</code> (and nested git/test/agents types as needed) and <code>Config.Projects map[string]ProjectConfig</code>.</li>
+<li>On <code>NewEngine</code> / daemon start / CLI engine init: <strong><code>SyncProjects(cfg)</code></strong><br />
+   - For each YAML name: <code>GetByName</code> → if missing <code>Create</code> with marshaled config; if present <code>UpdateConfigJSON</code>.<br />
+   - Do <strong>not</strong> delete SQLite projects absent from YAML in v1 (orphan rows may hold historical issues). Document: rename = new project + leave old issues on old id; optional later prune command.</li>
+<li>Replace <code>GetOrCreate</code> on all user paths with <strong><code>GetByName</code> + error if nil</strong>:<br />
+   - <code>Engine.SubmitIssue</code>, <code>Engine.Run</code><br />
+   - Webhook / trigger adapters that pass project name<br />
+   - Any test helpers that assumed create-on-miss should declare projects in fixture config or call a test-only upsert helper.</li>
+<li>Stop mutating project config from submit/CLI <strong>source path</strong>:<br />
+   - Remove <code>SourcePath</code> from issue-submit semantics (CLI flag may remain temporarily as <strong>error with message</strong> "configure projects.<name>.source_path in YAML" or be deleted outright — prefer delete).<br />
+   - Keep internal <code>setProjectSourcePath</code> / <code>setProjectGitConfig</code> only if still needed for tests; prefer writing via sync from fixture YAML.</li>
+</ol>
+<h3>Files (expected)</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td><code>Projects</code> map + nested types; validation</td>
+</tr>
+<tr>
+<td><code>internal/sqlite/projects.go</code></td>
+<td><code>UpdateConfigJSON</code>; deprecate/remove <code>GetOrCreate</code> or restrict to sync</td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code> / <code>service.go</code></td>
+<td>Sync on init; hard-fail unknown project</td>
+</tr>
+<tr>
+<td><code>internal/cli/run.go</code></td>
+<td>Drop <code>--source</code> create/update behavior; require registered project</td>
+</tr>
+<tr>
+<td><code>internal/server/webhook.go</code>, <code>internal/daemon/daemon.go</code></td>
+<td>Same resolve rules</td>
+</tr>
+<tr>
+<td>Tests across orchestrator/server/daemon</td>
+<td>Fixture projects in YAML or explicit create</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Sync creates missing project; second start updates <code>config_json</code>.</li>
+<li><code>SubmitIssue</code> / <code>Run</code> with unknown project name → error; no new row.</li>
+<li>Known project → issue created; <code>source_path</code> from YAML used for snapshot when set.</li>
+<li>Webhook with unknown project → 4xx, not 500 inventing a project.</li>
+</ul>
+<hr />
+<h2>Part B — Agent flavors + frozen cast</h2>
+<h3>Behavior</h3>
+<ol>
+<li>Schema under <code>projects.&lt;name&gt;.agents.&lt;type&gt;</code>:<br />
+   - <code>default string</code><br />
+   - <code>flavors map[string]AgentConfig</code></li>
+<li>Migration: <code>issues.agent_flavors_json TEXT NOT NULL DEFAULT '{}'</code> (or NULL + treat empty as defaults).</li>
+<li><code>RunOptions</code> gains optional <code>AgentFlavors map[string]string</code> (keys: researcher/planner/implementer).</li>
+<li>At submit:<br />
+   - Validate each provided flavor exists on the project (or project has no flavors for that type → reject non-empty).<br />
+   - Fill missing keys from project <code>default</code> when flavors exist.<br />
+   - Persist JSON on the issue row.</li>
+<li><code>agentConfigForIssue</code>:<br />
+   - Start from <code>e.cfg.Agent(type)</code> (global merge).<br />
+   - If issue cast names a flavor, merge that flavor's <code>AgentConfig</code> on top.<br />
+   - Then apply external-trust implementer human-gate policy (existing).</li>
+<li>Expose a small read helper for the UI: given project name, return per-type flavor list + default (for Part C).</li>
+</ol>
+<h3>Files (expected)</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/config/config.go</code></td>
+<td>Project agent flavor types; merge helper <code>MergeAgent(base, overlay)</code></td>
+</tr>
+<tr>
+<td><code>internal/sqlite/db.go</code></td>
+<td>Migration N: <code>agent_flavors_json</code></td>
+</tr>
+<tr>
+<td><code>internal/sqlite/issues.go</code></td>
+<td>Persist/load cast</td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/engine.go</code></td>
+<td><code>agentConfigForIssue</code> uses project + cast</td>
+</tr>
+<tr>
+<td><code>internal/orchestrator/service.go</code></td>
+<td>Validate cast on <code>SubmitIssue</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Global-only project: pipeline uses global agent model/prompt.</li>
+<li>Project single flavor: always applied; no need for submit map.</li>
+<li>Project multi flavor: submit chooses <code>cheap</code>; researcher phase uses that model config (assert via <code>task.json</code> or dry-run / recorded config).</li>
+<li>Invalid flavor name → submit error.</li>
+<li>Retry after decide uses same cast (issue row unchanged).</li>
+<li>External issue still forces implementer human adjudicator unless <code>trust_external</code>.</li>
+</ul>
+<hr />
+<h2>Part C — Submit API + drawer UX</h2>
+<h3>Behavior</h3>
+<ol>
+<li><strong>API</strong> <code>POST /api/issues</code> body:</li>
+</ol>
+<p><code>json
+   {
+     "project": "acme",
+     "title": "Add OIDC login",
+     "dry_run": false,
+     "agent_flavors": {
+       "researcher": "thorough",
+       "planner": "standard",
+       "implementer": "coder"
+     }
+   }</code></p>
+<ul>
+<li><code>source</code> / <code>source_path</code> fields: <strong>reject or ignore with no config mutation</strong> (prefer reject 422 if present to fail loud during migration).</li>
+<li><code>agent_flavors</code> optional; defaults applied server-side.</li>
+</ul>
+<ol start="2">
+<li>
+<p><strong>GET</strong> helper for drawer (choose one):<br />
+   - Extend <code>GET /api/projects</code> to include flavor catalog per project, or<br />
+   - <code>GET /api/projects/{name}</code> with <code>{ name, agents: { researcher: { default, flavors: [names] }, ... } }</code><br />
+   Prefer expanding list payload modestly so the submit partial can render without N+1.</p>
+</li>
+<li>
+<p><strong>Drawer</strong> (<code>drawer_submit.html</code> + handlers):<br />
+   - Project: <strong>required <code>&lt;select&gt;</code></strong> of registered projects (not free text / datalist create).<br />
+   - Remove source path field.<br />
+   - On project change: HTMX swap of flavor field partial (or full form) so only multi-flavor stages appear.<br />
+   - Dry-run + title unchanged.<br />
+   - POST includes selected flavors.</p>
+</li>
+<li>
+<p><strong>AuthZ:</strong> unchanged global roles (<code>member+</code> submit). No membership filter yet.</p>
+</li>
+</ol>
+<h3>Files (expected)</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>internal/server/api.go</code></td>
+<td>Submit request shape; projects JSON includes flavors</td>
+</tr>
+<tr>
+<td><code>internal/server/dashboard.go</code></td>
+<td>Submit GET/POST partials</td>
+</tr>
+<tr>
+<td><code>internal/web/templates/partials/drawer_submit.html</code></td>
+<td>Select + conditional flavors</td>
+</tr>
+<tr>
+<td><code>internal/web/static/js/app.js</code> / CSS</td>
+<td>Minimal if HTMX-only; fix dry-run alignment if touching the form</td>
+</tr>
+<tr>
+<td><code>internal/server/server_test.go</code></td>
+<td>Submit rejects unknown project / invalid flavor; no source mutation</td>
+</tr>
+</tbody>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>HTML partial: multi-flavor project renders three selects; single-flavor / none hides them.</li>
+<li>POST form creates issue with expected <code>agent_flavors_json</code>.</li>
+<li>Viewer cannot submit (existing).</li>
+<li>Manual checklist: change project in drawer → flavor fields update; submit prepends card.</li>
+</ul>
+<hr />
+<h2>Part D — Docs, example config, cleanup</h2>
+<h3>Behavior</h3>
+<ol>
+<li><code>configs/config.example.yaml</code> — document <code>projects:</code> map with commented multi-flavor example.</li>
+<li><code>configs/config.local.example.yaml</code> if present — same pattern for local dev.</li>
+<li>README — short "Projects are declared in YAML" note; update any <code>run --project=foo</code> examples to imply pre-registration.</li>
+<li>Grep for remaining <code>GetOrCreate</code>, submit <code>source</code>, free-text project assumptions; eliminate or confine to tests.</li>
+<li>Full <code>go test ./...</code> green.</li>
+</ol>
+<h3>Optional (nice-to-have, same PR if cheap)</h3>
+<ul>
+<li><code>gorchestrator projects list</code> CLI dumping synced registry (debug).</li>
+<li>Audit detail includes <code>agent_flavors</code> on <code>submit_issue</code>.</li>
+</ul>
+<hr />
+<h2>Migration notes for existing local DBs</h2>
+<ul>
+<li>Existing SQLite projects <strong>not</strong> in YAML remain in the DB (historical issues) but <strong>cannot accept new issues</strong> until listed in YAML (sync will not delete them; submit requires name ∈ YAML after sync — if name exists only in DB but not YAML, behavior: <strong>sync does not remove</strong>, but if we only allow submit for names in <strong>current YAML map</strong>, orphan DB-only names also fail. Prefer: <strong>allow submit only for names present in YAML</strong> after sync; YAML is the allowlist for new work.)</li>
+<li>Operators who relied on type-to-create must add those projects to config before continuing Phase 4 testing.</li>
+<li><code>agent_flavors_json</code> defaults to <code>{}</code> for existing issues → resolve as global/built-in (and project default flavors if later YAML adds them — document that old issues with <code>{}</code> use <strong>current</strong> project defaults when flavors exist; acceptable for pre-prod).</li>
+</ul>
+<hr />
+<h2>Success criteria</h2>
+<ol>
+<li>Fresh config with <code>projects.acme</code> only: submit/CLI to <code>acme</code> works; to <code>other</code> fails with a clear error; no new <code>projects</code> row for <code>other</code>.</li>
+<li>Process restart re-syncs project <code>config_json</code> from YAML (e.g. change <code>source_path</code>, restart, new issue uses new path).</li>
+<li>Multi-flavor project: drawer shows selects; chosen flavors appear on the issue; <code>task.json</code> / agent run reflects the flavor model/prompt.</li>
+<li>Single-flavor / no-agents project: drawer has no agent UI; pipeline still runs.</li>
+<li>Source path cannot be set via submit GUI or API.</li>
+<li>Decide → retry reuses the same cast.</li>
+<li><code>go test ./...</code> green; no production path calls <code>GetOrCreate</code>.</li>
+</ol>
+<hr />
+<h2>Out of scope</h2>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Where it goes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Per-project membership / email invites</td>
+<td>Later; open question §17 Q17</td>
+</tr>
+<tr>
+<td>Admin config GUI</td>
+<td>Future; still YAML-backed</td>
+</tr>
+<tr>
+<td>Snapshotting full resolved AgentConfig on the issue</td>
+<td>Optional later for audit immutability</td>
+</tr>
+<tr>
+<td>Deleting orphan projects from SQLite when removed from YAML</td>
+<td>Later ops command</td>
+</tr>
+<tr>
+<td>Phase 5 budgets / escalation</td>
+<td>Phase 5 (now attaches to real projects)</td>
+</tr>
+<tr>
+<td>Changing core agent types or tool matrices</td>
+<td>Unchanged §5.2 / §8.1</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Relationship to Phase 4 / 5</h2>
+<ul>
+<li><strong>Phase 4 (<code>phase_4.md</code>):</strong> Implementation of A–G treated as landed; this document is a <strong>follow-on foundational refactor</strong>, not a rewrite of git/MCP/triggers.</li>
+<li><strong>Phase 5:</strong> Should not start until success criteria 1–2 and 5 at minimum are met (project identity is real). Flavor casting (3–4, 6) is strongly preferred so budgets can be per flavor later if desired.</li>
+</ul>
+<hr />
+<p><em>End of Phase 4 Project Refactor Plan</em></p>
+<div class="footer">
+    <p>Canonical source: <code>phase_4_project_refactor.md</code></p>
+</div>
+</body>
+</html>
