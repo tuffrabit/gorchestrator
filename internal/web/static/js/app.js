@@ -192,10 +192,16 @@ document.addEventListener('DOMContentLoaded', function () {
   } catch (e) { /* SSE unavailable */ }
 });
 
-// After HTMX inserts a card (e.g. submit afterbegin), drop any duplicate ids.
+// After HTMX inserts a card (e.g. submit afterbegin), drop the empty-state
+// placeholder and any duplicate ids. afterbegin alone leaves "No issues yet."
+// in place when the feed was empty on load.
 document.addEventListener('htmx:afterSwap', function (e) {
   var feed = document.getElementById('issue-feed');
   if (!feed || !e.target || (e.target !== feed && !feed.contains(e.target))) return;
+  if (feed.querySelector('.issue-card')) {
+    var empty = feed.querySelector(':scope > .empty');
+    if (empty) empty.remove();
+  }
   var seen = {};
   feed.querySelectorAll('.issue-card[id]').forEach(function (card) {
     if (seen[card.id]) {
