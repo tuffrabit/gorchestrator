@@ -70,12 +70,126 @@ function csrfToken() {
   return el ? el.value : '';
 }
 
+// --- Toasts (HTMX 4xx/5xx feedback) ---
+
+function ensureToastHost() {
+  var host = document.getElementById('toast-host');
+  if (host) return host;
+  host = document.createElement('div');
+  host.id = 'toast-host';
+  host.className = 'toast-host';
+  host.setAttribute('aria-live', 'assertive');
+  host.setAttribute('aria-relevant', 'additions');
+  (document.body || document.documentElement).appendChild(host);
+  return host;
+}
+
+// message: main body text. opts: { title, kind: 'error'|'client', durationMs }
+function showToast(message, opts) {
+  opts = opts || {};
+  var kind = opts.kind || 'error';
+  var title = opts.title || (kind === 'client' ? 'Request error' : 'Server error');
+  var duration = opts.durationMs != null ? opts.durationMs : 8000;
+  var text = String(message == null ? '' : message).trim();
+  if (!text) text = 'Something went wrong.';
+
+  var host = ensureToastHost();
+  var el = document.createElement('div');
+  el.className = 'toast toast-' + kind;
+  el.setAttribute('role', 'alert');
+
+  var body = document.createElement('div');
+  body.className = 'toast-body';
+  var titleEl = document.createElement('p');
+  titleEl.className = 'toast-title';
+  titleEl.textContent = title;
+  var msgEl = document.createElement('p');
+  msgEl.className = 'toast-message';
+  msgEl.textContent = text;
+  body.appendChild(titleEl);
+  body.appendChild(msgEl);
+
+  var dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'toast-dismiss';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.textContent = '✕';
+
+  function remove() {
+    if (el._toastTimer) clearTimeout(el._toastTimer);
+    if (!el.parentNode) return;
+    el.classList.add('toast-out');
+    setTimeout(function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 180);
+  }
+  dismiss.addEventListener('click', remove);
+
+  el.appendChild(body);
+  el.appendChild(dismiss);
+  host.appendChild(el);
+  if (duration > 0) {
+    el._toastTimer = setTimeout(remove, duration);
+  }
+  return el;
+}
+
+// Pull a human-readable message from XHR responseText (plain text or JSON error).
+function messageFromXHR(xhr) {
+  if (!xhr) return '';
+  var raw = (xhr.responseText || '').trim();
+  if (!raw) return (xhr.statusText || '').trim();
+  if (raw.charAt(0) === '{') {
+    try {
+      var j = JSON.parse(raw);
+      if (j && typeof j.error === 'string' && j.error) return j.error;
+      if (j && typeof j.message === 'string' && j.message) return j.message;
+    } catch (e) { /* not JSON */ }
+  }
+  // http.Error is plain text; ignore HTML error pages.
+  if (raw.charAt(0) === '<') return (xhr.statusText || '').trim();
+  if (raw.length > 400) return raw.slice(0, 400) + '…';
+  return raw;
+}
+
+function toastForHTTPError(xhr) {
+  if (!xhr) return;
+  var status = xhr.status | 0;
+  if (status < 400) return;
+  var isClient = status >= 400 && status < 500;
+  var title = isClient
+    ? ('Request failed' + (status ? ' (' + status + ')' : ''))
+    : ('Server error' + (status ? ' (' + status + ')' : ''));
+  var msg = messageFromXHR(xhr);
+  if (!msg) {
+    msg = isClient
+      ? 'The request could not be completed.'
+      : 'The server hit an error. Check logs and try again.';
+  }
+  showToast(msg, { title: title, kind: isClient ? 'client' : 'error' });
+}
+
 // Attach CSRF header to every HTMX request (forms also post csrf_token).
 document.addEventListener('htmx:configRequest', function (e) {
   var tok = csrfToken();
   if (tok) {
     e.detail.headers['X-CSRF-Token'] = tok;
   }
+});
+
+// Surface HTMX 4xx/5xx responses as toasts (e.g. submit validation / server faults).
+document.addEventListener('htmx:afterRequest', function (e) {
+  if (!e.detail || !e.detail.xhr) return;
+  if ((e.detail.xhr.status | 0) < 400) return;
+  toastForHTTPError(e.detail.xhr);
+});
+
+// Network failure (no HTTP response).
+document.addEventListener('htmx:sendError', function (e) {
+  showToast('Network error — could not reach the server.', {
+    title: 'Connection failed',
+    kind: 'error'
+  });
 });
 
 document.addEventListener('keydown', function (e) {
@@ -192,9 +306,25 @@ document.addEventListener('DOMContentLoaded', function () {
   } catch (e) { /* SSE unavailable */ }
 });
 
+// True when this HTMX event came from the New-issue submit form (POST only).
+function isIssueSubmitRequest(detail) {
+  if (!detail) return false;
+  var elt = detail.elt;
+  if (elt && elt.getAttribute) {
+    var post = elt.getAttribute('hx-post') || elt.getAttribute('data-hx-post') || '';
+    if (post === '/partials/submit') return true;
+  }
+  var verb = (detail.requestConfig && detail.requestConfig.verb) || '';
+  if (String(verb).toLowerCase() !== 'post') return false;
+  var path = (detail.pathInfo && (detail.pathInfo.requestPath || detail.pathInfo.finalRequestPath)) || '';
+  // Match POST /partials/submit but not GET /partials/submit or /partials/submit/flavors.
+  return /\/partials\/submit\/?$/.test(String(path));
+}
+
 // After HTMX inserts a card (e.g. submit afterbegin), drop the empty-state
 // placeholder and any duplicate ids. afterbegin alone leaves "No issues yet."
-// in place when the feed was empty on load.
+// in place when the feed was empty on load. Also close the submit drawer —
+// this path is reliable because the feed swap already succeeded.
 document.addEventListener('htmx:afterSwap', function (e) {
   var feed = document.getElementById('issue-feed');
   if (!feed || !e.target || (e.target !== feed && !feed.contains(e.target))) return;
@@ -210,20 +340,29 @@ document.addEventListener('htmx:afterSwap', function (e) {
       seen[card.id] = true;
     }
   });
+  // Submit form targets #issue-feed with afterbegin; close once the card is in.
+  // (afterSwap sets detail.elt to the target, so detect via requestConfig path.)
+  if (isIssueSubmitRequest(e.detail)) {
+    closeDrawer();
+  }
 });
 
 // Close the drawer after a successful issue *submission* (POST), not after the
 // GET that loads the submit form into #drawer-body (that would slam it shut).
 document.addEventListener('htmx:afterRequest', function (e) {
-  if (!e.detail || !e.detail.successful) return;
-  var path = (e.detail.pathInfo && e.detail.pathInfo.requestPath) || '';
-  if (String(path).indexOf('/partials/submit') === -1) return;
-  var verb = (e.detail.requestConfig && e.detail.requestConfig.verb) || '';
-  if (String(verb).toLowerCase() !== 'post') return;
+  if (!e.detail) return;
+  var ok = e.detail.successful;
+  if (ok === undefined && e.detail.xhr) {
+    ok = e.detail.xhr.status >= 200 && e.detail.xhr.status < 300;
+  }
+  if (!ok) return;
+  if (!isIssueSubmitRequest(e.detail)) return;
   closeDrawer();
 });
 
-// Server also sends HX-Trigger: close-drawer on successful POST /partials/submit.
-document.body.addEventListener('close-drawer', function () {
+// Server sends HX-Trigger / HX-Trigger-After-Swap: close-drawer on success.
+// Listen on document (not body) so the handler is registered even if this
+// script ever runs before <body> exists.
+document.addEventListener('close-drawer', function () {
   closeDrawer();
 });

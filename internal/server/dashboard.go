@@ -305,7 +305,10 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	})
 	view, _ := s.eng.GetIssue(r.Context(), issue.ID)
 	// Return the new card partial; HTMX can prepend it.
+	// After-Swap is the reliable close signal (requesting form is still in the
+	// drawer); plain HX-Trigger is kept as a belt-and-suspenders fallback.
 	w.Header().Set("HX-Trigger", "close-drawer")
+	w.Header().Set("HX-Trigger-After-Swap", "close-drawer")
 	data := map[string]any{
 		"Issue":    view,
 		"Expanded": false,
