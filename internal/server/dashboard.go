@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tuffrabit/gorchestrator/internal/auth"
+	"github.com/tuffrabit/gorchestrator/internal/config"
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
@@ -50,6 +51,7 @@ func (s *Server) renderFeed(w http.ResponseWriter, r *http.Request, expandID int
 		"FilterStatus":  f.Status,
 		"FilterProject": r.URL.Query().Get("project"),
 		"CanWrite":      u != nil && roleAtLeast(u.Role, auth.RoleMember),
+		"IsAdmin":       u != nil && roleAtLeast(u.Role, auth.RoleAdmin),
 	}
 	if err := render(w, "feed.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -73,6 +75,7 @@ func (s *Server) handleNotificationsPage(w http.ResponseWriter, r *http.Request)
 		"Gates":         gates,
 		"PendingGates":  pending,
 		"CanWrite":      u != nil && roleAtLeast(u.Role, auth.RoleMember),
+		"IsAdmin":       u != nil && roleAtLeast(u.Role, auth.RoleAdmin),
 	}
 	if err := render(w, "notifications.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -92,6 +95,7 @@ func (s *Server) handlePartialsIssues(w http.ResponseWriter, r *http.Request) {
 		"ExpandID": int64(0),
 		"CSRF":     auth.CSRFToken(r),
 		"CanWrite": u != nil && roleAtLeast(u.Role, auth.RoleMember),
+		"IsAdmin":  u != nil && roleAtLeast(u.Role, auth.RoleAdmin),
 	}
 	if err := render(w, "partials/issue_list.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -116,6 +120,7 @@ func (s *Server) handlePartialIssue(w http.ResponseWriter, r *http.Request) {
 		"Expanded": expanded,
 		"CSRF":     auth.CSRFToken(r),
 		"CanWrite": u != nil && roleAtLeast(u.Role, auth.RoleMember),
+		"IsAdmin":  u != nil && roleAtLeast(u.Role, auth.RoleAdmin),
 	}
 	if err := render(w, "partials/issue_card.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -466,6 +471,12 @@ func (s *Server) handlePartialDecide(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "decision must be pass|fail|retry (got empty or invalid — check submit button)", http.StatusUnprocessableEntity)
 		return
 	}
+	var budgetOverrides map[string]int
+	if prov := strings.TrimSpace(r.FormValue("budget_provider")); prov != "" {
+		if ceil, err := strconv.Atoi(strings.TrimSpace(r.FormValue("budget_ceiling"))); err == nil && ceil > 0 {
+			budgetOverrides = map[string]int{prov: ceil}
+		}
+	}
 	u := auth.UserFromContext(r.Context())
 	decidedBy := "dashboard"
 	var uid *int64
@@ -474,11 +485,12 @@ func (s *Server) handlePartialDecide(w http.ResponseWriter, r *http.Request) {
 		uid = &u.ID
 	}
 	if err := s.eng.Decide(r.Context(), orchestrator.DecideOptions{
-		IssueID:   id,
-		Decision:  decision,
-		Feedback:  feedback,
-		DecidedBy: decidedBy,
-		UserID:    uid,
+		IssueID:         id,
+		Decision:        decision,
+		Feedback:        feedback,
+		DecidedBy:       decidedBy,
+		UserID:          uid,
+		BudgetOverrides: budgetOverrides,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -552,4 +564,134 @@ var _ = template.HTML("")
 
 func fmtIssue(id int64) string {
 	return fmt.Sprintf("#%d", id)
+}
+
+func (s *Server) handlePermissionsPage(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	pending, _ := s.eng.Notifications().CountPendingHumanGates()
+	data := map[string]any{
+		"User":         u,
+		"CSRF":         auth.CSRFToken(r),
+		"PendingGates": pending,
+		"CanWrite":     u != nil && roleAtLeast(u.Role, auth.RoleMember),
+		"IsAdmin":      u != nil && roleAtLeast(u.Role, auth.RoleAdmin),
+		"Matrix":       s.permissionMatrix(),
+	}
+	if err := render(w, "permissions.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleAPIPermissions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"servers": s.permissionMatrix()})
+}
+
+// permissionMatrix builds a read-only view of MCP server → tools → agents.
+func (s *Server) permissionMatrix() []map[string]any {
+	cfg := s.eng.Cfg()
+	if cfg == nil {
+		return nil
+	}
+	// agent type → server allowlist from global defaults + project flavors
+	agentServers := map[string]map[string]struct{}{
+		"researcher":  {},
+		"planner":     {},
+		"implementer": {},
+	}
+	for _, typ := range []string{"researcher", "planner", "implementer"} {
+		ac := cfg.Agent(typ)
+		for _, name := range ac.MCPServers {
+			agentServers[typ][name] = struct{}{}
+		}
+	}
+	for _, pc := range cfg.Projects {
+		for _, typ := range []string{"researcher", "planner", "implementer"} {
+			pac, ok := pc.Agents[typ]
+			if !ok {
+				continue
+			}
+			for _, fl := range pac.Flavors {
+				for _, name := range fl.MCPServers {
+					agentServers[typ][name] = struct{}{}
+				}
+			}
+		}
+	}
+
+	var mgr interface {
+		DiscoveredTools(string) []string
+	}
+	if m := s.eng.MCP(); m != nil {
+		mgr = m
+	}
+
+	out := make([]map[string]any, 0, len(cfg.MCPServers))
+	for _, srv := range cfg.MCPServers {
+		// which agents can use this server
+		agents := []string{}
+		for typ, set := range agentServers {
+			if _, ok := set[srv.Name]; ok {
+				agents = append(agents, typ)
+			}
+		}
+		// tools: grant list or discovered
+		type toolRow struct {
+			Name        string
+			Constraints []config.MCPToolConstraint
+			Granted     bool
+		}
+		var tools []map[string]any
+		if len(srv.Tools) == 0 {
+			// all discovered tools
+			var names []string
+			if mgr != nil {
+				names = mgr.DiscoveredTools(srv.Name)
+			}
+			if len(names) == 0 {
+				tools = append(tools, map[string]any{"name": "(all tools from server)", "granted": true, "constraints": []any{}})
+			}
+			for _, n := range names {
+				tools = append(tools, map[string]any{"name": n, "granted": true, "constraints": []any{}})
+			}
+		} else {
+			for _, g := range srv.Tools {
+				tools = append(tools, map[string]any{
+					"name":        g.Name,
+					"granted":     true,
+					"constraints": g.Constraints,
+				})
+			}
+		}
+		out = append(out, map[string]any{
+			"name":    srv.Name,
+			"command": srv.Command,
+			"agents":  agents,
+			"tools":   tools,
+			"mode":    map[bool]string{true: "all_tools", false: "allowlist"}[len(srv.Tools) == 0],
+		})
+	}
+	return out
+}
+
+func (s *Server) handleEscalationPage(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	pending, _ := s.eng.Notifications().CountPendingHumanGates()
+	var rules any
+	var recent any
+	if esc := s.eng.Escalator(); esc != nil {
+		rules = esc.Rules()
+		recent = esc.Recent()
+	}
+	data := map[string]any{
+		"User":         u,
+		"CSRF":         auth.CSRFToken(r),
+		"PendingGates": pending,
+		"CanWrite":     u != nil && roleAtLeast(u.Role, auth.RoleMember),
+		"IsAdmin":      u != nil && roleAtLeast(u.Role, auth.RoleAdmin),
+		"Rules":        rules,
+		"Recent":       recent,
+	}
+	if err := render(w, "escalation.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }

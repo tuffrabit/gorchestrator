@@ -1,4 +1,5 @@
-// Package mcp implements an MCP client manager with per-agent server allowlists.
+// Package mcp implements an MCP client manager with per-agent server allowlists
+// and Phase 5 per-tool grants + simple argument constraints.
 package mcp
 
 import (
@@ -6,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -101,8 +103,43 @@ func (m *Manager) Close() error {
 	return first
 }
 
+// Configs returns a copy of configured MCP servers (for admin permissions view).
+func (m *Manager) Configs() []config.MCPServerConfig {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]config.MCPServerConfig, 0, len(m.cfgs))
+	for _, c := range m.cfgs {
+		out = append(out, c)
+	}
+	return out
+}
+
+// DiscoveredTools returns live tool names for a connected server (empty if not connected).
+func (m *Manager) DiscoveredTools(server string) []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ss, ok := m.sessions[server]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(ss.tools))
+	for _, t := range ss.tools {
+		if t != nil {
+			out = append(out, t.Name)
+		}
+	}
+	return out
+}
+
 // ToolsForAgent returns ADK tools for the servers listed in allowServers.
 // Tool names are prefixed as {server}__{tool} to avoid collisions.
+// When a server config lists Tools, only those tool names are wrapped.
 func (m *Manager) ToolsForAgent(allowServers []string) ([]tool.Tool, error) {
 	if m == nil || len(allowServers) == 0 {
 		return nil, nil
@@ -116,8 +153,22 @@ func (m *Manager) ToolsForAgent(allowServers []string) ([]tool.Tool, error) {
 		if !ok {
 			continue
 		}
+		cfg := m.cfgs[name]
+		allow := toolGrantIndex(cfg.Tools)
 		for _, t := range ss.tools {
-			adkTool, err := wrapMCPTool(ss, t)
+			if t == nil {
+				continue
+			}
+			if allow != nil {
+				if _, ok := allow[t.Name]; !ok {
+					continue
+				}
+			}
+			var grants []config.MCPToolConstraint
+			if allow != nil {
+				grants = allow[t.Name]
+			}
+			adkTool, err := wrapMCPTool(ss, t, grants)
 			if err != nil {
 				return nil, fmt.Errorf("wrap %s/%s: %w", name, t.Name, err)
 			}
@@ -125,6 +176,18 @@ func (m *Manager) ToolsForAgent(allowServers []string) ([]tool.Tool, error) {
 		}
 	}
 	return out, nil
+}
+
+// toolGrantIndex maps tool name → constraints. nil means "all tools, no constraints".
+func toolGrantIndex(grants []config.MCPToolGrant) map[string][]config.MCPToolConstraint {
+	if len(grants) == 0 {
+		return nil
+	}
+	out := make(map[string][]config.MCPToolConstraint, len(grants))
+	for _, g := range grants {
+		out[g.Name] = g.Constraints
+	}
+	return out
 }
 
 type mcpArgs struct {
@@ -137,7 +200,7 @@ type mcpResult struct {
 	IsError bool   `json:"is_error"`
 }
 
-func wrapMCPTool(ss *serverSession, t *mcp.Tool) (tool.Tool, error) {
+func wrapMCPTool(ss *serverSession, t *mcp.Tool, constraints []config.MCPToolConstraint) (tool.Tool, error) {
 	prefixed := ss.name + "__" + t.Name
 	desc := t.Description
 	if desc == "" {
@@ -147,6 +210,8 @@ func wrapMCPTool(ss *serverSession, t *mcp.Tool) (tool.Tool, error) {
 
 	toolName := t.Name
 	session := ss.session
+	// copy constraints for closure
+	cons := append([]config.MCPToolConstraint(nil), constraints...)
 
 	return functiontool.New(functiontool.Config{
 		Name:        prefixed,
@@ -161,6 +226,9 @@ func wrapMCPTool(ss *serverSession, t *mcp.Tool) (tool.Tool, error) {
 		if argMap == nil {
 			argMap = map[string]any{}
 		}
+		if err := checkConstraints(argMap, cons); err != nil {
+			return mcpResult{IsError: true, Content: "constraint denied: " + err.Error()}, nil
+		}
 		res, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      toolName,
 			Arguments: argMap,
@@ -171,6 +239,50 @@ func wrapMCPTool(ss *serverSession, t *mcp.Tool) (tool.Tool, error) {
 		text := formatCallResult(res)
 		return mcpResult{Content: text, IsError: res != nil && res.IsError}, nil
 	})
+}
+
+// checkConstraints evaluates simple arg constraints. Fail closed on violation.
+func checkConstraints(args map[string]any, cons []config.MCPToolConstraint) error {
+	for _, c := range cons {
+		raw, ok := args[c.Arg]
+		val, _ := raw.(string)
+		if !ok || val == "" {
+			// Missing required constrained arg is a denial.
+			return fmt.Errorf("%s: argument %q is required", c.Type, c.Arg)
+		}
+		switch c.Type {
+		case "arg_prefix":
+			if !strings.HasPrefix(val, c.Prefix) {
+				return fmt.Errorf("arg_prefix: %q must start with %q", c.Arg, c.Prefix)
+			}
+		case "arg_deny_substring":
+			lower := strings.ToLower(val)
+			for _, sub := range c.Values {
+				if sub != "" && strings.Contains(lower, strings.ToLower(sub)) {
+					return fmt.Errorf("arg_deny_substring: %q must not contain %q", c.Arg, sub)
+				}
+			}
+		case "url_allowlist":
+			u, err := url.Parse(val)
+			if err != nil || u.Host == "" {
+				return fmt.Errorf("url_allowlist: %q is not a valid URL with host", c.Arg)
+			}
+			host := strings.ToLower(u.Hostname())
+			allowed := false
+			for _, h := range c.Hosts {
+				if strings.EqualFold(host, strings.TrimSpace(h)) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("url_allowlist: host %q not in allowlist", host)
+			}
+		default:
+			return fmt.Errorf("unknown constraint type %q", c.Type)
+		}
+	}
+	return nil
 }
 
 func formatCallResult(res *mcp.CallToolResult) string {

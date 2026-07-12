@@ -311,6 +311,59 @@ button, input, select, textarea {
 @media (prefers-reduced-motion: reduce) {
   .phase-step.current .phase-mark.pulse { animation: none; }
 }
+
+.hold-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 0 0 0.85rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--bar-waiting) 45%, var(--border-subtle));
+  background: color-mix(in srgb, var(--wash-waiting) 80%, transparent);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+.hold-chip {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bar-waiting);
+  border: 1px solid color-mix(in srgb, var(--bar-waiting) 55%, transparent);
+  background: color-mix(in srgb, var(--bar-waiting) 12%, transparent);
+}
+.hold-text {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.budget-override {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.budget-override-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.budget-override input {
+  flex: 1 1 8rem;
+  min-width: 0;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
 .artifact-actions {
   display: flex;
   flex-wrap: wrap;
@@ -716,3 +769,21 @@ button, input, select, textarea {
   from { opacity: 1; transform: translateY(0); }
   to { opacity: 0; transform: translateY(0.35rem); }
 }
+
+.perm-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  font-size: 0.88rem;
+}
+.perm-table th, .perm-table td {
+  text-align: left;
+  padding: 0.4rem 0.55rem;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: top;
+}
+.perm-cons {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+.perm-server h3 code { color: var(--accent-pink); }

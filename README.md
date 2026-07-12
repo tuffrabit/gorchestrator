@@ -4,11 +4,11 @@ gorchestrator is a tight human + AI agent collaboration platform for software en
 
 ## Current status
 
-**Phases 1–3 are complete.** **Phase 4 extensibility and the project-registry/flavors refactor are largely in tree** (git workspaces, container `run_test`, MCP allowlists, triggers, S3 adapter path, YAML projects + agent flavors). Post–Phase 4 polish also landed: optional issue **description** + text **attachments**, multi-phase artifact drawer (Workspace tree + `workspace.zip` when implementation is done).
+**Phases 1–5 are complete.** Phase 4 extensibility (git workspaces, container `run_test`, MCP, triggers, S3), YAML project registry + agent flavors, and post–Phase 4 polish (description + text attachments, multi-phase artifact drawer, `workspace.zip`) are in tree. **Phase 5 guardrails** landed: scope hold at submit, planner effort gate, provider session token budgets, MCP per-tool grants + constraints, YAML escalation with dedupe, admin `/permissions` and `/escalation` pages.
 
 The system runs as a long-lived daemon (`gorchestrator serve`) with a worker pool, HTTP API, OIDC/local auth, HTMX dashboard, and notification sinks (console + optional Slack/email adapters). CLI one-shot `run` / `resume` still work without a daemon.
 
-**Next:** Phase 5 guardrails (`phase_5.md`) — budgets, effort gate, scope detection — must **not** regress the landed foundations called out in that plan.
+**Next:** Phase 6 polish & ship (`phase_6.md`) — audit completeness, metrics, retention, docs, deployment packaging. Do **not** regress landed foundations (projects registry, flavors, description/attachments, multi-phase drawer).
 
 ## Quick start
 
@@ -136,5 +136,5 @@ Dashboard static assets (vendored, no build step):
 | 4 | Extensibility (git, run_test, MCP, triggers, S3, …) | In tree — see `phase_4.md` |
 | 4 refactor | YAML project registry + agent flavors | Complete — see `phase_4_project_refactor.md` |
 | Post-4 polish | Description/attachments; multi-phase drawer; workspace.zip | Complete — see `spec.md` §7 / §8.3 / §11.5 |
-| 5 | Guardrails (budgets, effort, scope) | Draft — see `phase_5.md` (do not regress polish) |
+| 5 | Guardrails (scope, effort, provider budgets, MCP tools, escalation) | Complete — see `phase_5.md` |
 | 6 | Polish & ship | Draft — see `phase_6.md` |

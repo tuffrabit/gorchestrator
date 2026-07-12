@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -50,7 +51,6 @@ type AgentConfig struct {
 	SystemPromptAppend string      `yaml:"system_prompt_append" json:"system_prompt_append,omitempty"` // appended after base/override
 	Tools              []string    `yaml:"tools" json:"tools,omitempty"`                               // core tool name allowlist; empty = all for type
 	MCPServers         []string    `yaml:"mcp_servers" json:"mcp_servers,omitempty"`                   // per-agent MCP server allowlist
-	TokenBudget        int         `yaml:"token_budget" json:"token_budget,omitempty"`                 // stored only; enforced in Phase 5
 	Adjudicator        string      `yaml:"adjudicator" json:"adjudicator,omitempty"`
 	MaxAttempts        int         `yaml:"max_attempts" json:"max_attempts,omitempty"`
 	Loops              int         `yaml:"loops" json:"loops,omitempty"`
@@ -96,12 +96,20 @@ type ProjectTestConfig struct {
 	Runtime    string   `yaml:"runtime" json:"runtime,omitempty"`
 }
 
+// ProjectGuardrails holds Phase 5 per-project guardrail thresholds.
+type ProjectGuardrails struct {
+	// EffortGateMin is the minimum planner effort that inserts a human gate
+	// before implementation: low | medium | high. Default high (only high gates).
+	EffortGateMin string `yaml:"effort_gate_min" json:"effort_gate_min,omitempty"`
+}
+
 // ProjectConfig is one entry under the top-level projects: map (YAML source of truth).
 type ProjectConfig struct {
 	SourcePath    string                        `yaml:"source_path" json:"source_path,omitempty"`
 	Git           *ProjectGitConfig             `yaml:"git" json:"git,omitempty"`
 	Test          *ProjectTestConfig            `yaml:"test" json:"test,omitempty"`
 	TrustExternal bool                          `yaml:"trust_external" json:"trust_external,omitempty"`
+	Guardrails    ProjectGuardrails             `yaml:"guardrails" json:"guardrails,omitempty"`
 	Agents        map[string]ProjectAgentConfig `yaml:"agents" json:"agents,omitempty"`
 }
 
@@ -244,12 +252,32 @@ type NotificationsConfig struct {
 	Adapters []string `yaml:"adapters"`
 }
 
+// MCPToolConstraint is a simple call-time restriction on an MCP tool argument.
+// Unknown Type values are rejected at config load (fail closed).
+type MCPToolConstraint struct {
+	// Type: arg_prefix | arg_deny_substring | url_allowlist
+	Type   string   `yaml:"type" json:"type"`
+	Arg    string   `yaml:"arg" json:"arg"`                             // argument name in the tool args object
+	Prefix string   `yaml:"prefix,omitempty" json:"prefix,omitempty"`   // for arg_prefix
+	Values []string `yaml:"values,omitempty" json:"values,omitempty"` // deny substrings (arg_deny_substring)
+	Hosts  []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`   // allowed hosts for url_allowlist
+}
+
+// MCPToolGrant allowlists one tool from an MCP server (optional constraints).
+type MCPToolGrant struct {
+	Name        string              `yaml:"name" json:"name"`
+	Constraints []MCPToolConstraint `yaml:"constraints,omitempty" json:"constraints,omitempty"`
+}
+
 // MCPServerConfig declares an MCP server (stdio transport).
+// Empty Tools = Phase 4 compat (all tools from the server when agent lists the server).
+// Non-empty Tools = only listed tool names are exposed; others never advertised.
 type MCPServerConfig struct {
-	Name    string   `yaml:"name"`
-	Command []string `yaml:"command"` // binary + optional fixed args prefix
-	Args    []string `yaml:"args"`
-	Env     []string `yaml:"env"` // host env var NAMES to pass through
+	Name    string         `yaml:"name"`
+	Command []string       `yaml:"command"` // binary + optional fixed args prefix
+	Args    []string       `yaml:"args"`
+	Env     []string       `yaml:"env"` // host env var NAMES to pass through
+	Tools   []MCPToolGrant `yaml:"tools,omitempty"`
 }
 
 // WebhookTriggerConfig configures the built-in HTTP webhook trigger.
@@ -272,20 +300,45 @@ type StorageBackendConfig struct {
 }
 
 // Config is the top-level user configuration.
+// ProviderBudgetConfig is a session/context-window token gate for one LLM provider.
+// Applied per agent phase run (fresh counter each phase). Zero TokenBudget = unlimited.
+type ProviderBudgetConfig struct {
+	TokenBudget int `yaml:"token_budget" json:"token_budget,omitempty"`
+	// WarnPct is the fraction (1–100) at which to notify once per phase attempt. Default 80 when budget > 0.
+	WarnPct int `yaml:"warn_pct" json:"warn_pct,omitempty"`
+}
+
+// EscalationRule is one YAML-configured threshold → notification rule.
+type EscalationRule struct {
+	Name      string `yaml:"name"`
+	When      string `yaml:"when"`      // consecutive_failures | budget_exceeded | sandbox_refused | phase_failed
+	Project   string `yaml:"project"`   // registered name or "*" for all
+	Threshold int    `yaml:"threshold"` // e.g. consecutive count; default 1
+	Notify    string `yaml:"notify"`    // admin | console
+}
+
+// EscalationConfig holds YAML-only escalation rules (admin page is read-only).
+type EscalationConfig struct {
+	Rules []EscalationRule `yaml:"rules"`
+}
+
+// Config is the process configuration (YAML source of truth).
 type Config struct {
-	StorageRoot   string                   `yaml:"storage_root"`
-	DBPath        string                   `yaml:"db_path"`
-	DefaultModel  ModelConfig              `yaml:"default_model"`
-	Tools         ToolsConfig              `yaml:"tools"`
-	Adapters      []AdapterConfig          `yaml:"adapters"`
-	Agents        map[string]AgentConfig   `yaml:"agents"`
-	Projects      map[string]ProjectConfig `yaml:"projects"`
-	MCPServers    []MCPServerConfig        `yaml:"mcp_servers"`
-	Triggers      TriggersConfig           `yaml:"triggers"`
-	Storage       StorageBackendConfig     `yaml:"storage"`
-	Server        ServerConfig             `yaml:"server"`
-	Auth          AuthConfig               `yaml:"auth"`
-	Notifications NotificationsConfig      `yaml:"notifications"`
+	StorageRoot   string                          `yaml:"storage_root"`
+	DBPath        string                          `yaml:"db_path"`
+	DefaultModel  ModelConfig                     `yaml:"default_model"`
+	Tools         ToolsConfig                     `yaml:"tools"`
+	Adapters      []AdapterConfig                 `yaml:"adapters"`
+	Agents        map[string]AgentConfig          `yaml:"agents"`
+	Projects      map[string]ProjectConfig        `yaml:"projects"`
+	Providers     map[string]ProviderBudgetConfig `yaml:"providers"`
+	MCPServers    []MCPServerConfig               `yaml:"mcp_servers"`
+	Triggers      TriggersConfig                  `yaml:"triggers"`
+	Storage       StorageBackendConfig            `yaml:"storage"`
+	Server        ServerConfig                    `yaml:"server"`
+	Auth          AuthConfig                      `yaml:"auth"`
+	Notifications NotificationsConfig             `yaml:"notifications"`
+	Escalation    EscalationConfig                `yaml:"escalation"`
 }
 
 // HomeDir returns the user's home directory.
@@ -364,6 +417,16 @@ func LoadFrom(path string) (*Config, error) {
 	if err := normalizeProjects(&cfg, home); err != nil {
 		return nil, err
 	}
+	if err := rejectAgentTokenBudget(data); err != nil {
+		return nil, err
+	}
+	normalizeProviders(&cfg)
+	if err := validateMCPServers(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateEscalation(&cfg); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
 }
@@ -379,6 +442,15 @@ func normalizeProjects(cfg *Config, home string) error {
 		}
 		if pc.SourcePath != "" {
 			pc.SourcePath = expandTilde(pc.SourcePath, home)
+		}
+		min := strings.ToLower(strings.TrimSpace(pc.Guardrails.EffortGateMin))
+		switch min {
+		case "":
+			pc.Guardrails.EffortGateMin = "high"
+		case "low", "medium", "high":
+			pc.Guardrails.EffortGateMin = min
+		default:
+			return fmt.Errorf("projects.%s.guardrails.effort_gate_min: want low|medium|high, got %q", name, pc.Guardrails.EffortGateMin)
 		}
 		for agentType := range pc.Agents {
 			switch agentType {
@@ -396,6 +468,154 @@ func normalizeProjects(cfg *Config, home string) error {
 		cfg.Projects[name] = pc
 	}
 	return nil
+}
+
+// rejectAgentTokenBudget fails config load if agents or flavors still set token_budget
+// (removed in Phase 5 — budgets are provider-scoped only).
+
+
+func validateMCPServers(cfg *Config) error {
+	for i, s := range cfg.MCPServers {
+		if s.Name == "" {
+			return fmt.Errorf("mcp_servers[%d]: name is required", i)
+		}
+		if len(s.Command) == 0 {
+			return fmt.Errorf("mcp_servers[%d] (%s): command is required", i, s.Name)
+		}
+		seen := map[string]struct{}{}
+		for j, t := range s.Tools {
+			if t.Name == "" {
+				return fmt.Errorf("mcp_servers[%d] (%s).tools[%d]: name is required", i, s.Name, j)
+			}
+			if _, ok := seen[t.Name]; ok {
+				return fmt.Errorf("mcp_servers[%d] (%s).tools: duplicate tool %q", i, s.Name, t.Name)
+			}
+			seen[t.Name] = struct{}{}
+			for k, c := range t.Constraints {
+				switch c.Type {
+				case "arg_prefix":
+					if c.Arg == "" || c.Prefix == "" {
+						return fmt.Errorf("mcp_servers[%d] (%s).tools[%s].constraints[%d]: arg_prefix requires arg and prefix", i, s.Name, t.Name, k)
+					}
+				case "arg_deny_substring":
+					if c.Arg == "" || len(c.Values) == 0 {
+						return fmt.Errorf("mcp_servers[%d] (%s).tools[%s].constraints[%d]: arg_deny_substring requires arg and values", i, s.Name, t.Name, k)
+					}
+				case "url_allowlist":
+					if c.Arg == "" || len(c.Hosts) == 0 {
+						return fmt.Errorf("mcp_servers[%d] (%s).tools[%s].constraints[%d]: url_allowlist requires arg and hosts", i, s.Name, t.Name, k)
+					}
+				default:
+					return fmt.Errorf("mcp_servers[%d] (%s).tools[%s].constraints[%d]: unknown type %q (want arg_prefix|arg_deny_substring|url_allowlist)", i, s.Name, t.Name, k, c.Type)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateEscalation(cfg *Config) error {
+	for i := range cfg.Escalation.Rules {
+		r := &cfg.Escalation.Rules[i]
+		if r.Name == "" {
+			return fmt.Errorf("escalation.rules[%d]: name is required", i)
+		}
+		switch r.When {
+		case "consecutive_failures", "budget_exceeded", "sandbox_refused", "phase_failed":
+		default:
+			return fmt.Errorf("escalation.rules[%d] (%s): unknown when %q", i, r.Name, r.When)
+		}
+		if r.Threshold <= 0 {
+			r.Threshold = 1
+		}
+		if r.Notify == "" {
+			r.Notify = "admin"
+		}
+		switch r.Notify {
+		case "admin", "console":
+		default:
+			return fmt.Errorf("escalation.rules[%d] (%s): notify must be admin|console", i, r.Name)
+		}
+		if r.Project == "" {
+			r.Project = "*"
+		}
+	}
+	return nil
+}
+
+func rejectAgentTokenBudget(data []byte) error {
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil // parse already succeeded into Config; ignore secondary parse issues
+	}
+	if agents, ok := raw["agents"].(map[string]any); ok {
+		for name, v := range agents {
+			if m, ok := v.(map[string]any); ok {
+				if _, has := m["token_budget"]; has {
+					return fmt.Errorf("agents.%s.token_budget is not supported; use providers.<name>.token_budget", name)
+				}
+			}
+		}
+	}
+	if projects, ok := raw["projects"].(map[string]any); ok {
+		for pname, pv := range projects {
+			pm, ok := pv.(map[string]any)
+			if !ok {
+				continue
+			}
+			agents, ok := pm["agents"].(map[string]any)
+			if !ok {
+				continue
+			}
+			for atype, av := range agents {
+				am, ok := av.(map[string]any)
+				if !ok {
+					continue
+				}
+				if _, has := am["token_budget"]; has {
+					return fmt.Errorf("projects.%s.agents.%s.token_budget is not supported; use providers.<name>.token_budget", pname, atype)
+				}
+				flavors, ok := am["flavors"].(map[string]any)
+				if !ok {
+					continue
+				}
+				for fname, fv := range flavors {
+					if fm, ok := fv.(map[string]any); ok {
+						if _, has := fm["token_budget"]; has {
+							return fmt.Errorf("projects.%s.agents.%s.flavors.%s.token_budget is not supported; use providers.<name>.token_budget", pname, atype, fname)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeProviders(cfg *Config) {
+	if cfg.Providers == nil {
+		cfg.Providers = map[string]ProviderBudgetConfig{}
+		return
+	}
+	for name, p := range cfg.Providers {
+		if p.TokenBudget > 0 && p.WarnPct <= 0 {
+			p.WarnPct = 80
+		}
+		if p.WarnPct > 100 {
+			p.WarnPct = 100
+		}
+		cfg.Providers[name] = p
+	}
+}
+
+// ProviderBudget returns the session budget for a provider name (case-sensitive as configured).
+// Missing provider or zero budget → unlimited (ok=false or TokenBudget==0).
+func (c *Config) ProviderBudget(provider string) (ProviderBudgetConfig, bool) {
+	if c == nil || c.Providers == nil || provider == "" {
+		return ProviderBudgetConfig{}, false
+	}
+	p, ok := c.Providers[provider]
+	return p, ok
 }
 
 func applyServerDefaults(cfg *Config) error {
@@ -517,9 +737,6 @@ func MergeAgent(base, overlay AgentConfig) AgentConfig {
 	if len(overlay.MCPServers) > 0 {
 		out.MCPServers = append([]string(nil), overlay.MCPServers...)
 	}
-	if overlay.TokenBudget > 0 {
-		out.TokenBudget = overlay.TokenBudget
-	}
 	if overlay.Adjudicator != "" {
 		out.Adjudicator = overlay.Adjudicator
 	}
@@ -589,7 +806,8 @@ Rules:
 1. Base the plan on the issue and the accepted research output.
 2. Include specific files to change and tests to add.
 3. Write the plan using write_output.
-4. When finished, call finish_task with done=true and a brief rationale evaluating the plan.`
+4. When finished, call finish_task with done=true, a brief rationale evaluating the plan, and effort set to low, medium, or high based on implementation complexity (high = large multi-file or risky changes; low = small localized fix).
+5. If the plan is incomplete, call finish_task with done=false, explain what is missing, and still set effort.`
 }
 
 func defaultImplementerPrompt() string {

@@ -18,18 +18,19 @@ const (
 
 // Issue represents an issue row.
 type Issue struct {
-	ID               int64
-	ProjectID        int64
-	Title            string
-	Description      string // optional; mirrored to issue.md on submit
-	Status           string
-	CurrentPhase     string
-	DryRun           bool
-	Source           string // manual | webhook | github | jira | ...
-	ExternalID       string
-	AgentFlavorsJSON string // frozen cast: {"researcher":"cheap",...}
-	CreatedAt        string
-	UpdatedAt        string
+	ID                  int64
+	ProjectID           int64
+	Title               string
+	Description         string // optional; mirrored to issue.md on submit
+	Status              string
+	CurrentPhase        string
+	DryRun              bool
+	Source              string // manual | webhook | github | jira | ...
+	ExternalID          string
+	AgentFlavorsJSON    string // frozen cast: {"researcher":"cheap",...}
+	BudgetOverridesJSON string // provider → absolute session ceiling: {"openai":200000}
+	CreatedAt           string
+	UpdatedAt           string
 }
 
 // IssueListFilter selects issues for listing.
@@ -102,7 +103,7 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 // Get fetches an issue by id.
 func (r *IssueRepo) Get(id int64) (*Issue, error) {
 	row := r.db.QueryRow(`
-		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
+		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, created_at, updated_at
 		FROM issues WHERE id = ?`, id)
 	return scanIssue(row)
 }
@@ -114,6 +115,18 @@ func (r *IssueRepo) SetDescription(id int64, description string) error {
 	_, err := r.db.Exec(
 		`UPDATE issues SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		description, id,
+	)
+	return err
+}
+
+// SetBudgetOverrides stores absolute per-provider session ceilings as JSON.
+func (r *IssueRepo) SetBudgetOverrides(id int64, overridesJSON string) error {
+	if overridesJSON == "" {
+		overridesJSON = "{}"
+	}
+	_, err := r.db.Exec(
+		`UPDATE issues SET budget_overrides_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		overridesJSON, id,
 	)
 	return err
 }
@@ -194,7 +207,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 	}
 	args = append(args, limit, f.Offset)
 	q := fmt.Sprintf(`
-		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
+		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, created_at, updated_at
 		FROM issues
 		%s
 		ORDER BY updated_at DESC, id DESC
@@ -210,7 +223,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 // ListNonTerminal returns issues that are not in a terminal status.
 func (r *IssueRepo) ListNonTerminal() ([]*Issue, error) {
 	rows, err := r.db.Query(`
-		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, created_at, updated_at
+		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, created_at, updated_at
 		FROM issues
 		WHERE status NOT IN (?, ?, ?)
 		ORDER BY id ASC`,
@@ -271,7 +284,7 @@ func (r *IssueRepo) Delete(id int64) error {
 func scanIssue(row *sql.Row) (*Issue, error) {
 	i := &Issue{}
 	var dry int
-	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -281,6 +294,9 @@ func scanIssue(row *sql.Row) (*Issue, error) {
 	if i.AgentFlavorsJSON == "" {
 		i.AgentFlavorsJSON = "{}"
 	}
+	if i.BudgetOverridesJSON == "" {
+		i.BudgetOverridesJSON = "{}"
+	}
 	return i, nil
 }
 
@@ -289,12 +305,15 @@ func scanIssues(rows *sql.Rows) ([]*Issue, error) {
 	for rows.Next() {
 		i := &Issue{}
 		var dry int
-		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		i.DryRun = dry != 0
 		if i.AgentFlavorsJSON == "" {
 			i.AgentFlavorsJSON = "{}"
+		}
+		if i.BudgetOverridesJSON == "" {
+			i.BudgetOverridesJSON = "{}"
 		}
 		out = append(out, i)
 	}

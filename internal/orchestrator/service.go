@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/tuffrabit/gorchestrator/internal/adjudication"
+	"github.com/tuffrabit/gorchestrator/internal/notify"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 )
@@ -23,6 +24,10 @@ type DecideOptions struct {
 	DecidedBy string // stable user id, "local:admin", or "cli"
 	UserID    *int64 // optional for audit
 	Force     bool   // allow decide when not waiting_human (manual intervene)
+	// BudgetOverrides merges absolute per-provider session ceilings for this issue
+	// (Phase 5 budget_exceeded resume). Keys are provider names; values > 0 replace
+	// providers.<name>.token_budget for subsequent phase sessions on this issue.
+	BudgetOverrides map[string]int
 }
 
 // PhaseStep is one step in the research → plan → implementation strip.
@@ -39,7 +44,10 @@ type IssueView struct {
 	ProjectName string
 	TokenTotal  int
 	Attempt     int
-	PhaseStatus string      // filesystem result status for current phase
+	PhaseStatus string // filesystem result status for current phase
+	// HoldReason is result.json error when the issue/phase is waiting_human
+	// (scope / effort / adjudication rationale). Empty otherwise.
+	HoldReason  string
 	Phases      []PhaseStep // research → plan → implementation strip
 	// Attachments are basenames under attachments/ (issue context uploads).
 	Attachments []string
@@ -48,6 +56,7 @@ type IssueView struct {
 // SubmitIssue creates the issue (snapshot source if configured), sets status
 // queued, and returns immediately. Daemon workers pick it up.
 // Project must be declared in YAML (cfg.Projects); unknown names hard-fail.
+// Pathological scope is held as waiting_human on research before any agent run.
 func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issue, error) {
 	if opts.IssueTitle == "" {
 		return nil, fmt.Errorf("issue title is required")
@@ -78,6 +87,15 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 
 	if err := e.prepareIssueSource(ctx, project, issue); err != nil {
 		return nil, fmt.Errorf("prepare source: %w", err)
+	}
+
+	// Scope gate: hold before research is queued for workers.
+	if err := e.maybeHoldForScope(ctx, project, issue, opts); err != nil {
+		return nil, err
+	}
+	// Reload status after possible hold.
+	if refreshed, gerr := e.issues.Get(issue.ID); gerr == nil && refreshed != nil {
+		issue = refreshed
 	}
 
 	e.Publish(Event{
@@ -138,6 +156,12 @@ func (e *Engine) Decide(ctx context.Context, opts DecideOptions) error {
 		decidedBy = "cli"
 	}
 
+	if len(opts.BudgetOverrides) > 0 {
+		if err := e.mergeIssueBudgetOverrides(issue.ID, opts.BudgetOverrides); err != nil {
+			return fmt.Errorf("budget overrides: %w", err)
+		}
+	}
+
 	if err := e.applyHumanDecisionWithBy(ctx, project, issue, phase, opts.Decision, opts.Feedback, decidedBy); err != nil {
 		return err
 	}
@@ -157,15 +181,17 @@ func (e *Engine) Decide(ctx context.Context, opts DecideOptions) error {
 
 	switch decision {
 	case adjudication.Pass:
-		// Mark phase done on FS already; re-queue so workers continue the pipeline
-		// unless this was the last phase (runPipeline will mark issue done).
+		// applyHumanDecisionWithBy either marked the phase done or cleared a
+		// pre-phase hold (scope). Re-queue unless implementation is fully done.
 		if phase == "implementation" {
-			_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusDone, phase)
-			e.Publish(Event{
-				Type: EventIssueStatus, IssueID: issue.ID, ProjectID: project.ID,
-				Phase: phase, Status: sqlite.StatusDone,
-			})
-			return nil
+			if res, err := readResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, phase)); err == nil && res.Status == "done" {
+				_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusDone, phase)
+				e.Publish(Event{
+					Type: EventIssueStatus, IssueID: issue.ID, ProjectID: project.ID,
+					Phase: phase, Status: sqlite.StatusDone,
+				})
+				return nil
+			}
 		}
 		_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusQueued, phase)
 		e.Publish(Event{
@@ -231,8 +257,26 @@ func (e *Engine) applyHumanDecisionWithBy(ctx context.Context, project *sqlite.P
 
 	switch decision {
 	case adjudication.Pass:
+		// Scope hold: research never ran. Clearing result.json lets the pipeline
+		// start research (currentPhaseState → research/in_progress). Marking
+		// research "done" would skip it — forbidden.
+		if phase == "research" && IsScopeHoldError(result.Error) {
+			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
+				return fmt.Errorf("clear scope hold result: %w", err)
+			}
+			return nil
+		}
+		// Effort hold: plan is already done; clear implementation hold marker so
+		// implementer can start.
+		if phase == "implementation" && IsEffortHoldError(result.Error) {
+			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
+				return fmt.Errorf("clear effort hold result: %w", err)
+			}
+			return nil
+		}
 		result.Status = "done"
 		result.DoneRationale = feedback
+		result.Error = ""
 		result.Timestamp = nowRFC3339()
 		return writeResult(ctx, e.store, resultPath, result)
 	case adjudication.Fail:
@@ -241,7 +285,28 @@ func (e *Engine) applyHumanDecisionWithBy(ctx context.Context, project *sqlite.P
 		result.Timestamp = nowRFC3339()
 		return writeResult(ctx, e.store, resultPath, result)
 	case adjudication.Retry:
-		// Mark retry so runPhase starts attempt N+1 with feedback from this attempt.
+		// Scope hold retry: clear hold and re-queue research with feedback.
+		if phase == "research" && IsScopeHoldError(result.Error) {
+			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
+				return fmt.Errorf("clear scope hold result: %w", err)
+			}
+			if strings.TrimSpace(feedback) != "" {
+				fbPath := storage.FeedbackPath(project.ID, issue.ID, phase, 1)
+				_ = e.store.Write(ctx, fbPath, []byte(feedback))
+			}
+			return nil
+		}
+		// Effort hold retry: clear hold and run implementer with feedback.
+		if phase == "implementation" && IsEffortHoldError(result.Error) {
+			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
+				return fmt.Errorf("clear effort hold result: %w", err)
+			}
+			if strings.TrimSpace(feedback) != "" {
+				fbPath := storage.FeedbackPath(project.ID, issue.ID, phase, 1)
+				_ = e.store.Write(ctx, fbPath, []byte(feedback))
+			}
+			return nil
+		}
 		result.Status = "retry"
 		result.Error = feedback
 		result.Timestamp = nowRFC3339()
@@ -427,6 +492,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 	}
 	tokens, _ := e.runs.TokenTotalForIssue(issue.ID)
 	phaseStatus := ""
+	holdReason := ""
 	attempt := 0
 	var phases []PhaseStep
 	if project != nil {
@@ -440,6 +506,16 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 				if phaseStatus == "" {
 					phaseStatus = res.Status
 				}
+				if res.Status == "waiting_human" && res.Error != "" {
+					holdReason = res.Error
+				}
+			}
+		}
+		// Prefer issue-level waiting_human reason from current phase even if
+		// currentPhaseState pointed elsewhere.
+		if holdReason == "" && issue.Status == sqlite.StatusWaitingHuman {
+			if res, err := readResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, issue.CurrentPhase)); err == nil && res.Error != "" {
+				holdReason = res.Error
 			}
 		}
 		phases = e.buildPhaseSteps(ctx, project.ID, issue)
@@ -454,6 +530,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		TokenTotal:  tokens,
 		Attempt:     attempt,
 		PhaseStatus: phaseStatus,
+		HoldReason:  holdReason,
 		Phases:      phases,
 		Attachments: atts,
 	}, nil
@@ -576,4 +653,127 @@ func (e *Engine) DeleteIssue(ctx context.Context, issueID int64) error {
 		Message:   issue.Title,
 	})
 	return nil
+}
+
+// maybeHoldForScope evaluates scope heuristics after issue context is on disk.
+// When flagged, the issue is held waiting_human on research (not queued).
+func (e *Engine) maybeHoldForScope(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, opts RunOptions) error {
+	basenames := make([]string, 0, len(opts.Attachments))
+	peeks := make([]ScopeAttachment, 0, len(opts.Attachments))
+	for i, a := range opts.Attachments {
+		if a.Name == "" {
+			continue
+		}
+		basenames = append(basenames, a.Name)
+		if i < maxAttachmentsToPeek {
+			data := a.Data
+			if len(data) > maxAttachmentPeekBytes {
+				data = data[:maxAttachmentPeekBytes]
+			}
+			peeks = append(peeks, ScopeAttachment{Name: a.Name, Data: data})
+		}
+	}
+
+	hit := EvaluateScope(opts.IssueTitle, opts.Description, basenames, peeks)
+	if !hit.Flagged() {
+		return nil
+	}
+
+	summary := hit.Summary()
+	log.Printf("scope hold: issue %d project %s: %s", issue.ID, project.Name, summary)
+
+	resultPath := storage.ResultPath(project.ID, issue.ID, "research")
+	if err := writeResult(ctx, e.store, resultPath, PhaseResult{
+		Status:    "waiting_human",
+		Error:     summary,
+		Attempt:   0,
+		Timestamp: nowRFC3339(),
+	}); err != nil {
+		return fmt.Errorf("write scope hold result: %w", err)
+	}
+
+	if _, err := e.decisions.CreateWithFeedback(issue.ID, "research", summary); err != nil {
+		log.Printf("scope hold: record pending decision: %v", err)
+	}
+
+	if err := e.issues.UpdateStatus(issue.ID, sqlite.StatusWaitingHuman, "research"); err != nil {
+		return fmt.Errorf("set scope hold status: %w", err)
+	}
+
+	e.Publish(Event{
+		Type:      EventDecisionRequested,
+		IssueID:   issue.ID,
+		ProjectID: project.ID,
+		Phase:     "research",
+		Status:    sqlite.StatusWaitingHuman,
+		Message:   summary,
+		Data: map[string]any{
+			"hold":    "scope",
+			"reasons": hit.Reasons,
+		},
+	})
+
+	notify.NotifyHumanGate(ctx, e.notifier, issue.ID, "research", project.Name, issue.Title, e.adminEmails())
+	return nil
+}
+
+// maybeHoldForEffort inserts a human gate before implementation when planner
+// effort meets or exceeds projects.<name>.guardrails.effort_gate_min.
+// Plan phase remains done; hold is written as implementation waiting_human.
+// Returns held=true when the pipeline should stop for a human decision.
+func (e *Engine) maybeHoldForEffort(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, planResult *PhaseResult) (bool, error) {
+	if planResult == nil {
+		return false, nil
+	}
+	pc, err := e.typedProjectConfig(project)
+	if err != nil {
+		return false, err
+	}
+	min := EffortGateMin(pc)
+	effort := EffectiveEffort(planResult.Effort)
+	// Persist normalized effort on plan result when missing/invalid (treated as high).
+	if NormalizeEffort(planResult.Effort) == "" {
+		planResult.Effort = effort
+		_ = writeResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, "plan"), *planResult)
+	}
+	if !EffortRequiresGate(effort, min) {
+		return false, nil
+	}
+
+	summary := fmt.Sprintf("effort: %s (gate_min=%s)", effort, min)
+	log.Printf("effort hold: issue %d project %s: %s", issue.ID, project.Name, summary)
+
+	resultPath := storage.ResultPath(project.ID, issue.ID, "implementation")
+	if err := writeResult(ctx, e.store, resultPath, PhaseResult{
+		Status:    "waiting_human",
+		Error:     summary,
+		Attempt:   0,
+		Timestamp: nowRFC3339(),
+	}); err != nil {
+		return false, fmt.Errorf("write effort hold result: %w", err)
+	}
+
+	if _, err := e.decisions.CreateWithFeedback(issue.ID, "implementation", summary); err != nil {
+		log.Printf("effort hold: record pending decision: %v", err)
+	}
+
+	if err := e.issues.UpdateStatus(issue.ID, sqlite.StatusWaitingHuman, "implementation"); err != nil {
+		return false, fmt.Errorf("set effort hold status: %w", err)
+	}
+
+	e.Publish(Event{
+		Type:      EventDecisionRequested,
+		IssueID:   issue.ID,
+		ProjectID: project.ID,
+		Phase:     "implementation",
+		Status:    sqlite.StatusWaitingHuman,
+		Message:   summary,
+		Data: map[string]any{
+			"hold":   "effort",
+			"effort": effort,
+			"min":    min,
+		},
+	})
+	notify.NotifyHumanGate(ctx, e.notifier, issue.ID, "implementation", project.Name, issue.Title, e.adminEmails())
+	return true, nil
 }

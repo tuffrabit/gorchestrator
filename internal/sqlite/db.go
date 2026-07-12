@@ -176,6 +176,13 @@ ALTER TABLE issues ADD COLUMN agent_flavors_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE issues ADD COLUMN description TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		version: 10,
+		name:    "issue_budget_overrides",
+		sql: `
+ALTER TABLE issues ADD COLUMN budget_overrides_json TEXT NOT NULL DEFAULT '{}';
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

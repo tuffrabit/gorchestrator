@@ -1,6 +1,6 @@
 # AI Agent Orchestration System — Product Specification
 
-> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-10 (issue description + attachments; per-phase artifact drawer)  
+> **Session Date:** 2026-07-04 (original planning) · **Last Revised:** 2026-07-12 (Phase 5 guardrails landed)  
 > **Status:** Living document — single source of truth  
 > **Purpose:** This document captures all architectural decisions, constraints, and phase definitions. Future implementation sessions should reference this document as the single source of truth.
 >
@@ -18,6 +18,7 @@
 | 2026-07-09 | Phase 4 plan solidification. Closed §17 Q9 (agent config merge layers) and Q12 (adapters own credentials via env). Git worktree model; S3-only storage this phase (Azure deferred); MCP per-agent server allowlists with external triggers; seven session-sized parts A–G. See `phase_4.md`. |
 | 2026-07-10 | **Project registry + agent flavors.** Projects are YAML-declared only (no create-on-submit/CLI). `source_path` / git / test / agent flavors live under `projects.<name>` in config. Named agent **flavors** of the three core types; submit drawer selects a flavor per stage when a type has more than one. Per-issue cast frozen at submit. Project membership / invites deferred. See §6.0, §8.2, §11.5, §17 Q9/Q16; plan in `phase_4_project_refactor.md`. |
 | 2026-07-10 | **Issue input + multi-phase artifacts (post Phase 4 polish).** Optional issue **description** + text-like **attachments** at submit (`issue.md` + `attachments/` on disk; description also in SQLite). Agent context inlines title/description and lists attachment paths. Artifact drawer is **phase-scoped** (Research / Plan / Implementation tabs); implementer **Workspace** tree with per-file expand diffs; **workspace.zip** download when implementation is `done`. Full unified Diff tab removed. See §7.1, §8.2.5, §8.3, §11.5. |
+| 2026-07-12 | **Phase 5 Guardrails landed.** Provider session token budgets (context-window gate, not wallet); planner effort gate; scope hold at submit; MCP per-tool grants + constraints; YAML escalation with dedupe; admin `/permissions` and `/escalation` read-only pages. See §13, `phase_5.md`. |
 
 ---
 
@@ -223,10 +224,11 @@ MCP servers are the real permission surface because they expose arbitrary capabi
 **Phase 4 (must land *with* external triggers, not after):**
 - Per-agent, per-**server** allowlists — an agent only sees tools from MCP servers explicitly granted to it
 
-**Phase 5:**
-- Per-agent, per-**tool** allowlists
-- Tool-level permission granularity (e.g., `query_database` only allows `SELECT`)
-- Endpoint restrictions for API tools
+**Phase 5 (landed):**
+- Per-server **tool allowlists** under global `mcp_servers` (empty tools = all tools from that server — Phase 4 compat)
+- Simple call-time **constraints** on allowed tools (`arg_prefix`, `arg_deny_substring`, `url_allowlist`)
+- Agent still allowlists **servers only** (`mcp_servers: [name]`); tools/constraints come from the global server entry
+- Admin read-only **Permissions** page (`/permissions`) for auditability
 
 The MVP "all tools to all agents" posture is acceptable only while all pipeline input is human-authored. It must tighten before external triggers (GitHub/Jira) land — see §5.6.
 
@@ -479,7 +481,8 @@ Agent types are **structs in the Go codebase**, not generic configurations. Each
 #### 8.2.1 Configurable fields (per flavor / override)
 
 - LLM model/provider (and `base_url` / `api_key_env` where applicable)
-- Temperature, max tokens, token budget (`token_budget` stored Phase 4; enforced Phase 5)
+- Temperature, max tokens
+- **Token budgets are provider-scoped** (top-level `providers.<name>.token_budget`) — not per-agent/flavor fields (agent `token_budget` rejected at config load). See §13.2
 - System prompt override (`system_prompt`) or extension (`system_prompt_append`)
 - Core tool subset (`tools` allowlist; empty = all default for type)
 - MCP server allowlist (`mcp_servers`)
@@ -673,7 +676,7 @@ Layout, visual language, and interaction details are normative in **§11.5**.
 ### 11.4 Admin Features
 
 - Admin users always receive notifications on "bad" agent output (errors, timeouts, exceptions, empty outputs)
-- Configurable admin escalation rules (Phase 5)
+- Configurable admin escalation rules (YAML + read-only `/escalation` page — Phase 5 landed)
 - **Project and agent configuration** remain YAML-only for now (§6.0). Future admin GUI may edit the same model; it does not invent a second store.
 
 ### 11.5 Dashboard UX (Phase 3) — Layout, Theme & Interaction
@@ -829,12 +832,14 @@ Small, native Go toolset available to agents based on agent type:
 - MCP servers are declared in project/global config (**deny by default**)
 - Core implements the MCP client (official Go SDK); tools from a server are discovered at connect time for schemas
 - **Phase 4:** Per-agent, per-**server** allowlists — an agent only receives tools from servers listed in its `mcp_servers` config. If a server is allowed, all of its tools are exposed (name-prefixed to avoid collisions)
-- **Phase 5:** Per-agent, per-**tool** permission granularity
+- **Phase 5 (landed):** Per-server tool allowlists + simple constraints under global `mcp_servers`; agent still lists servers only. See §5.5 / §13.5
 - MCP tool calls are recorded in `events.jsonl` like core tools
 
 ---
 
 ## 13. Guardrails (Phase 5)
+
+*(Landed 2026-07-12. See `phase_5.md`. Product intent: human casting chooses cost; orchestrator bounds runaway sessions and inserts cheap human holds — not a spend/wallet system.)*
 
 ### 13.1 "Bad Output" Definition (MVP)
 
@@ -842,23 +847,40 @@ Small, native Go toolset available to agents based on agent type:
 - Agent exceptions during tool execution
 - Configuration errors or missing required config
 - Empty output: an attempt that produces neither a `write_output` call nor final model text is a **failed loop**, enforced at the orchestrator — not a silent success flagged later by heuristic
+- Session token budget breach (`budget_exceeded`) — hard mid-phase stop
 
-### 13.2 Token Budgets
+### 13.2 Token Budgets (provider session / context-window gate)
 
-- Configurable per agent and per provider
-- Hard stop when budget exceeded
-- Notification to admin when approaching threshold
+- **Config axis:** top-level `providers.<name>.token_budget` (+ optional `warn_pct`, default 80). Missing/zero → unlimited.
+- **Not** a wallet: no issue total, project total, or agent/flavor `token_budget` fields. Agent-level `token_budget` is rejected at config load.
+- **Unit:** per issue × **per agent phase run**. Each phase that uses provider `P` gets a **fresh** ceiling of `providers.P.token_budget` (new ADK session / context window). Counters do not accumulate research → plan → implementer.
+- **Enforcement:** wrap `model.LLM` so each `GenerateContent` checks spent vs ceiling **before** the call; rehydrate spent from phase `events.jsonl` usage rows (per-call). Breach → phase `failed` with `budget_exceeded`; admin notify.
+- **Resume:** human Decide may set absolute per-provider ceilings on the issue (`budget_overrides_json`); replaces the provider default for remaining/retried phases on that issue.
+- Warning at `warn_pct` → at most one notify per phase attempt.
 
-### 13.3 Effort Estimation (Phase 5)
+### 13.3 Effort Estimation
 
-- Planner tags issues as high / medium / low effort
-- High effort requires human confirmation before proceeding
-- Prevents runaway tasks (e.g., "refactor the entire monolith")
+- Planner `finish_task` emits structured `effort: low | medium | high` (required on planner schema only). Missing/invalid → treat as **high**.
+- After plan is accepted, if `effort >= projects.<name>.guardrails.effort_gate_min` (default **high**), hold **before implementation** as `waiting_human` with reason `effort: …` (plan stays `done`).
+- Human pass/retry clears the pre-implement hold and re-queues implementer.
 
-### 13.4 Scope Detection (Phase 5)
+### 13.4 Scope Detection
 
-- Basic heuristics to flag overly broad issues
-- Human confirmation required for flagged issues
+- At submit (all entry points), after context + source prepare: heuristics over **title + description + attachment basenames + size-capped light reads** of small text attachments (forbidden phrases, extreme length).
+- Flagged → issue `waiting_human` on **research** (research does not start); reason in `result.json` + pending decision feedback (`scope: …`).
+- Pass clears research hold result (does **not** mark research done) and queues the pipeline.
+
+### 13.5 MCP per-tool grants
+
+- Global `mcp_servers[].tools[]` optional allowlist; empty = all tools from that server (Phase 4 compat).
+- Optional simple constraints at call time: `arg_prefix`, `arg_deny_substring`, `url_allowlist`.
+- Agents still list **server names** only. Admin `/permissions` is read-only audit UI (does not replace artifact drawer).
+
+### 13.6 Admin escalation rules
+
+- YAML `escalation.rules[]`: `when` ∈ consecutive_failures | budget_exceeded | sandbox_refused | phase_failed; project filter; threshold; notify admin|console.
+- In-process dedupe: one fire per (rule, subject) until reset (e.g. success clears consecutive count). No alert storms.
+- Admin `/escalation` read-only page: rules + recent fires this process.
 
 ---
 
@@ -954,16 +976,15 @@ Small, native Go toolset available to agents based on agent type:
 - Webhook/trigger `body` wired into description (no longer dropped)
 - **Do not regress in Phase 5+:** plans that touch submit, context, retention, or the artifact drawer must preserve these contracts (see `phase_5.md` / `phase_6.md` “Landed foundations”)
 
-### Phase 5: Guardrails
-**Goal:** The system protects itself and the user's wallet. (See `phase_5.md`.)
+### Phase 5: Guardrails — ✅ Complete (see `phase_5.md`)
+**Goal:** Cheap human holds and hard mid-session stops so unattended volume cannot runaway. **Not** a spend wallet — casting chooses cost; provider budgets gate context-window scale per agent session.
 
-- Token budget enforcement: hard stop + notification, checked per model call against `events.jsonl` usage (budgets attach to **YAML-registered projects** and frozen issue casts — not free-text project names)
-- Effort estimation: Planner tags high/med/low, high requires human confirmation
-- Scope detection at submit uses **title + description + attachment paths/text signals** (not title alone)
-- Scope detection: basic heuristics to catch overly broad issues
-- Admin escalation rules: configurable thresholds
-- MCP permission granularity: per-agent, per-**tool** allowlists (tightening Phase 4's per-server grants)
-- **Deliverable:** System asks "are you sure?" before burning API budget
+- Scope detection at submit (title + description + attachments) → `waiting_human` before research
+- Planner effort tag + project `guardrails.effort_gate_min` → hold before implementation
+- Provider session token budgets (`providers.<name>.token_budget`) with mid-run hard stop + Decide override
+- MCP per-tool allowlists + simple constraints; admin `/permissions`
+- YAML escalation rules with dedupe; admin `/escalation`
+- **Deliverable (met):** runaway work stopped at submit (scope), pre-implement (effort), and mid-session (budget); permissions and escalations auditable
 
 ### Phase 6: Polish
 **Goal:** Shippable product. (See `phase_6.md`.)
@@ -1058,7 +1079,7 @@ Small, native Go toolset available to agents based on agent type:
 | Git worktree workspace model (Phase 4) | Bare clone cache + source/implementer worktrees replace per-issue file snapshots when git is configured; agents never run git. |
 | Adapter credentials stay in adapter env | External adapters authenticate to their backends via their own env/config; core does not mediate secrets into agent artifacts (§17 Q12). |
 | S3 first for cloud storage | Phase 4 ships S3 only; Azure Blob follows once the JSON-RPC storage pattern is proven. |
-| MCP per-agent server allowlists with triggers | Per-server grants land in Phase 4 alongside external triggers (§5.6); per-tool grants are Phase 5. |
+| MCP per-agent server allowlists with triggers | Per-server grants land in Phase 4 alongside external triggers (§5.6); per-tool grants + constraints landed Phase 5 (§5.5 / §13.5). |
 
 **Added 2026-07-10 (issue input + multi-phase artifacts):**
 
@@ -1091,7 +1112,7 @@ Small, native Go toolset available to agents based on agent type:
 | 8 | Project/issue ID scheme | **Auto-increment integers** — *closed* | Decided de facto by Phase 1 code. |
 | 10 | Local LLM integration | **OpenAI-compatible endpoint** (`base_url` on the OpenAI implementation) — *closed* | Decided de facto by Phase 2 code; covers llama.cpp, Ollama, and most gateways. |
 | 11 | Adapter binary discovery | **Explicit registry in config** *(soft)* | Scanning a directory and spawning whatever executables appear there is a supply-chain risk. See §4.3. |
-| 9 | YAML agent config schema | **Merge layers:** built-in defaults → global `default_model` → global `agents.<type>` → **project flavor** → **frozen issue cast** → orchestrator policy. Fields: model, temperature, max_tokens, system_prompt / system_prompt_append, core tool subset, mcp_servers, adjudication, token_budget (stored Phase 4; enforced Phase 5). **Named flavors** of core types only (no free-form agent types). Submit selects a flavor per stage when `len(flavors) > 1`. *(hard for Phase 4 project refactor)* | Casting thesis; extended 2026-07-10. See §8.2 and `phase_4_project_refactor.md`. |
+| 9 | YAML agent config schema | **Merge layers:** built-in defaults → global `default_model` → global `agents.<type>` → **project flavor** → **frozen issue cast** → orchestrator policy. Fields: model, temperature, max_tokens, system_prompt / system_prompt_append, core tool subset, mcp_servers, adjudication, adjudication fields. **Token budgets are provider-scoped** (`providers.<name>.token_budget` — Phase 5). **Named flavors** of core types only (no free-form agent types). Submit selects a flavor per stage when `len(flavors) > 1`. *(hard for Phase 4 project refactor)* | Casting thesis; extended 2026-07-10. See §8.2 and `phase_4_project_refactor.md`. |
 | 12 | Adapter authentication | **Adapters own backend credentials** via process env and/or adapter-local config. Core never puts secrets in agent-visible artifacts. *(soft; hard for Phase 4)* | Matches Slack/email; applies to S3/Jira/GitHub. Closed 2026-07-09 with Phase 4 plan. |
 | 13 | Git commit strategy | **Single commit per implementer run** *(soft; hard for Phase 4)* | Granular commits are dashboard polish, not MVP. Revisit if review workflows demand it. |
 | 15 | Test command secrets | **Maintainer-only secrets config, injected into the test container environment, never rendered into any agent-readable artifact** *(soft)* | `task.json` is agent-readable; secrets must never flow through it. See §6.5. |

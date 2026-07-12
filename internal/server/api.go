@@ -31,6 +31,10 @@ type decideRequest struct {
 	Feedback string `json:"feedback"`
 	Phase    string `json:"phase"`
 	Force    bool   `json:"force"`
+
+	// BudgetProvider + BudgetCeiling set an absolute session override for one provider.
+	BudgetProvider string `json:"budget_provider"`
+	BudgetCeiling  int    `json:"budget_ceiling"`
 }
 
 func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
@@ -235,14 +239,19 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 		uid = &u.ID
 	}
 
+	var budgetOverrides map[string]int
+	if req.BudgetProvider != "" && req.BudgetCeiling > 0 {
+		budgetOverrides = map[string]int{req.BudgetProvider: req.BudgetCeiling}
+	}
 	if err := s.eng.Decide(r.Context(), orchestrator.DecideOptions{
-		IssueID:   id,
-		Decision:  req.Decision,
-		Feedback:  req.Feedback,
-		Phase:     req.Phase,
-		DecidedBy: decidedBy,
-		UserID:    uid,
-		Force:     req.Force,
+		IssueID:         id,
+		Decision:        req.Decision,
+		Feedback:        req.Feedback,
+		Phase:           req.Phase,
+		DecidedBy:       decidedBy,
+		UserID:          uid,
+		Force:           req.Force,
+		BudgetOverrides: budgetOverrides,
 	}); err != nil {
 		if strings.Contains(err.Error(), "not waiting") {
 			writeJSONError(w, http.StatusConflict, err.Error())
@@ -395,6 +404,9 @@ func viewToJSON(v *orchestrator.IssueView) map[string]any {
 		return nil
 	}
 	m := issueToJSON(v.Issue, v.ProjectName, v.TokenTotal, v.Attempt, v.PhaseStatus)
+	if v.HoldReason != "" {
+		m["hold_reason"] = v.HoldReason
+	}
 	if len(v.Attachments) > 0 {
 		m["attachments"] = v.Attachments
 	} else {

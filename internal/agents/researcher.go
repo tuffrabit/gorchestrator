@@ -8,8 +8,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
-// finishTaskSchema is the output schema used by all task-mode agents to
-// self-evaluate before finishing.
+// finishTaskSchema is the output schema for researcher and implementer task mode.
 var finishTaskSchema = &genai.Schema{
 	Type: genai.TypeObject,
 	Properties: map[string]*genai.Schema{
@@ -23,6 +22,27 @@ var finishTaskSchema = &genai.Schema{
 		},
 	},
 	Required: []string{"done", "rationale"},
+}
+
+// plannerFinishTaskSchema extends finish_task with a required effort tag for
+// the pre-implementation effort gate (Phase 5).
+var plannerFinishTaskSchema = &genai.Schema{
+	Type: genai.TypeObject,
+	Properties: map[string]*genai.Schema{
+		"done": {
+			Type:        genai.TypeBoolean,
+			Description: "Whether the task is complete and meets the rubric.",
+		},
+		"rationale": {
+			Type:        genai.TypeString,
+			Description: "Brief explanation of why the task is or is not complete.",
+		},
+		"effort": {
+			Type:        genai.TypeString,
+			Description: "Implementation effort estimate. Must be exactly one of: low, medium, high.",
+		},
+	},
+	Required: []string{"done", "rationale", "effort"},
 }
 
 // Researcher is a requirements-analysis agent.

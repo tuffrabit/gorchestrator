@@ -1,0 +1,75 @@
+{{define "escalation.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Escalation · gorchestrator</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/htmx.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">gorchestrator</a>
+    <a class="nav-link" href="/">Issues</a>
+    <a class="nav-link" href="/notifications">
+      Notifications
+      {{if .PendingGates}}<span class="badge">{{.PendingGates}}</span>{{end}}
+    </a>
+    <a class="nav-link" href="/permissions">Permissions</a>
+    <a class="nav-link active" href="/escalation">Escalation</a>
+    <div class="topbar-spacer"></div>
+    {{if .User}}
+    <span class="user-chip">{{.User.Email}}</span>
+    <form method="post" action="/logout" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+    {{end}}
+  </header>
+
+  <section class="notif-list">
+    <h2>Escalation rules (read-only)</h2>
+    <p class="card-meta">Configured in YAML under <code>escalation.rules</code>. Edit config and restart to change. Fires once per subject until reset (no alert storms).</p>
+
+    {{if .Rules}}
+    <table class="perm-table">
+      <thead>
+        <tr><th>Name</th><th>When</th><th>Project</th><th>Threshold</th><th>Notify</th></tr>
+      </thead>
+      <tbody>
+        {{range .Rules}}
+        <tr>
+          <td><code>{{.Name}}</code></td>
+          <td><code>{{.When}}</code></td>
+          <td><code>{{.Project}}</code></td>
+          <td>{{.Threshold}}</td>
+          <td>{{.Notify}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No escalation rules configured.</p>
+    {{end}}
+
+    <h2 style="margin-top:2rem">Recent escalations (this process)</h2>
+    {{if .Recent}}
+      {{range .Recent}}
+      <div class="notif-item">
+        <h3><code>{{.Rule}}</code> · {{.When}}</h3>
+        <p>project=<code>{{.Project}}</code>
+          {{if .IssueID}} · issue <a href="/issues/{{.IssueID}}">#{{.IssueID}}</a>{{end}}
+          {{if .Phase}} · {{.Phase}}{{end}}
+        </p>
+        <p class="card-meta">{{.Message}}</p>
+      </div>
+      {{end}}
+    {{else}}
+      <p class="empty">No escalations fired since process start.</p>
+    {{end}}
+  </section>
+</body>
+</html>
+{{end}}

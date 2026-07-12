@@ -19,6 +19,10 @@
       Notifications
       {{if .PendingGates}}<span class="badge" id="notif-badge">{{.PendingGates}}</span>{{end}}
     </a>
+    {{if .IsAdmin}}
+    <a class="nav-link" href="/permissions">Permissions</a>
+    <a class="nav-link" href="/escalation">Escalation</a>
+    {{end}}
     <div class="topbar-spacer"></div>
     {{if .CanWrite}}
     <button class="btn btn-primary" type="button"

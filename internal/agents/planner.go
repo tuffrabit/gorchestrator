@@ -28,7 +28,7 @@ func (p *Planner) Build(model model.LLM, tools []tool.Tool) (agent.Agent, error)
 		Model:        model,
 		Tools:        tools,
 		Mode:         llmagent.ModeTask,
-		OutputSchema: finishTaskSchema,
+		OutputSchema: plannerFinishTaskSchema,
 	})
 }
 
@@ -45,6 +45,6 @@ Rules:
 1. Base the plan on the issue and the accepted research output.
 2. Identify specific files to create or modify and tests to add.
 3. Write the plan using the write_output tool.
-4. When finished, call finish_task with done=true and a brief rationale evaluating the plan.
-5. If the plan is incomplete, call finish_task with done=false and explain what is missing.`
+4. When finished, call finish_task with done=true, a brief rationale evaluating the plan, and effort set to low, medium, or high based on implementation complexity (high = large multi-file or risky changes; low = small localized fix).
+5. If the plan is incomplete, call finish_task with done=false, explain what is missing, and still set effort.`
 }

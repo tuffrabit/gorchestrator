@@ -1,0 +1,83 @@
+{{define "permissions.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Permissions · gorchestrator</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/htmx.min.js" defer></script>
+  <script src="/static/js/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">gorchestrator</a>
+    <a class="nav-link" href="/">Issues</a>
+    <a class="nav-link" href="/notifications">
+      Notifications
+      {{if .PendingGates}}<span class="badge">{{.PendingGates}}</span>{{end}}
+    </a>
+    <a class="nav-link active" href="/permissions">Permissions</a>
+    <a class="nav-link" href="/escalation">Escalation</a>
+    <div class="topbar-spacer"></div>
+    {{if .User}}
+    <span class="user-chip">{{.User.Email}}</span>
+    <form method="post" action="/logout" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+    {{end}}
+  </header>
+
+  <section class="notif-list">
+    <h2>MCP permissions (read-only)</h2>
+    <p class="card-meta">YAML-configured server grants and tool allowlists. Agents only see tools from servers listed in their <code>mcp_servers</code> allowlist. Empty tool list on a server means all discovered tools.</p>
+
+    {{if .Matrix}}
+      {{range .Matrix}}
+      <div class="notif-item perm-server">
+        <h3><code>{{.name}}</code> <span class="status-chip">{{.mode}}</span></h3>
+        <p class="card-meta">command: {{range .command}}{{.}} {{end}}</p>
+        <p><strong>Agents with this server:</strong>
+          {{if .agents}}
+            {{range .agents}}<span class="phase-chip">{{.}}</span> {{end}}
+          {{else}}
+            <span class="card-meta">none (no agent mcp_servers entry)</span>
+          {{end}}
+        </p>
+        <table class="perm-table">
+          <thead>
+            <tr><th>Tool</th><th>Constraints</th></tr>
+          </thead>
+          <tbody>
+            {{range .tools}}
+            <tr>
+              <td><code>{{.name}}</code></td>
+              <td>
+                {{if .constraints}}
+                  <ul class="perm-cons">
+                  {{range .constraints}}
+                    <li><code>{{.Type}}</code> arg=<code>{{.Arg}}</code>
+                      {{if .Prefix}} prefix=<code>{{.Prefix}}</code>{{end}}
+                      {{if .Values}} deny={{range .Values}}<code>{{.}}</code> {{end}}{{end}}
+                      {{if .Hosts}} hosts={{range .Hosts}}<code>{{.}}</code> {{end}}{{end}}
+                    </li>
+                  {{end}}
+                  </ul>
+                {{else}}
+                  <span class="card-meta">—</span>
+                {{end}}
+              </td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{end}}
+    {{else}}
+      <p class="empty">No MCP servers configured.</p>
+    {{end}}
+  </section>
+</body>
+</html>
+{{end}}

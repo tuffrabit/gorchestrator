@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>gorchestrator — Phase 5 Implementation Plan</title>
     <style>
+
+
         :root {
             --bg: #0f1117;
             --surface: #161b22;
@@ -19,6 +21,7 @@
             --warning: #d29922;
             --danger: #f85149;
             --code-bg: #0d1117;
+            --pink: #ff2d95;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -26,88 +29,103 @@
             background: var(--bg);
             color: var(--text);
             line-height: 1.7;
-            max-width: 900px;
+            max-width: 960px;
             margin: 0 auto;
             padding: 40px 24px;
         }
         h1 {
-            font-size: 2.2rem;
+            font-size: 2rem;
             color: var(--text-bright);
-            margin-bottom: 8px;
+            margin-bottom: 12px;
             font-weight: 600;
         }
-        .subtitle {
-            color: var(--text-muted);
-            font-size: 1.05rem;
-            margin-bottom: 32px;
-        }
-        .meta {
-            display: flex;
-            gap: 24px;
-            font-size: 0.9rem;
-            color: var(--text-muted);
-            margin-bottom: 40px;
-            padding-bottom: 24px;
-            border-bottom: 1px solid var(--border);
-        }
         h2 {
-            font-size: 1.5rem;
+            font-size: 1.45rem;
             color: var(--text-bright);
             margin: 40px 0 16px;
             padding-bottom: 8px;
             border-bottom: 1px solid var(--border);
             font-weight: 600;
         }
+        h3 {
+            font-size: 1.15rem;
+            color: var(--accent);
+            margin: 28px 0 12px;
+            font-weight: 600;
+        }
+        h4 {
+            font-size: 1rem;
+            color: var(--text-bright);
+            margin: 20px 0 10px;
+            font-weight: 600;
+        }
         p { margin-bottom: 14px; }
-        .highlight-box {
+        blockquote {
             background: var(--surface);
+            border-left: 3px solid var(--pink);
+            padding: 12px 18px;
+            margin: 16px 0;
+            color: var(--text-muted);
+            border-radius: 0 8px 8px 0;
+        }
+        blockquote p { margin-bottom: 8px; }
+        blockquote p:last-child { margin-bottom: 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0;
+            font-size: 0.88rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: var(--surface);
+            color: var(--text-bright);
+            font-weight: 600;
+            border-bottom: 1px solid var(--border);
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        tr:hover td { background: var(--surface-hover); }
+        ul, ol { margin: 12px 0 16px 24px; }
+        li { margin-bottom: 6px; }
+        li > ul, li > ol { margin-top: 6px; margin-bottom: 6px; }
+        code {
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            background: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.88em;
+            color: var(--accent);
+        }
+        pre {
+            background: var(--code-bg);
             border: 1px solid var(--border);
             border-radius: 8px;
-            padding: 20px 24px;
-            margin: 20px 0;
-        }
-        .highlight-box p:last-child { margin-bottom: 0; }
-        .status-badge {
-            display: inline-block;
-            padding: 3px 10px;
-            border-radius: 4px;
-            font-size: 0.8rem;
-            font-weight: 600;
-        }
-        .status-draft { background: var(--warning); color: #000; }
-        .phase-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 24px;
+            padding: 16px 18px;
             margin: 16px 0;
+            overflow-x: auto;
+            line-height: 1.5;
         }
-        .phase-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
+        pre code {
+            background: none;
+            padding: 0;
+            color: var(--text-muted);
+            font-size: 0.84rem;
+            white-space: pre;
         }
-        .phase-number {
-            background: var(--accent-soft);
-            color: #fff;
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            font-size: 1rem;
-            flex-shrink: 0;
+        hr {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 36px 0;
         }
-        .phase-title {
-            font-size: 1.2rem;
-            font-weight: 600;
-            color: var(--text-bright);
-        }
-        ul { margin: 12px 0 12px 24px; }
-        li { margin-bottom: 6px; }
+        strong { color: var(--text-bright); }
+        em { color: var(--text-muted); }
+        a { color: var(--pink); text-decoration: none; }
+        a:hover { text-decoration: underline; }
         .footer {
             margin-top: 60px;
             padding-top: 24px;
@@ -116,132 +134,396 @@
             font-size: 0.9rem;
             text-align: center;
         }
-        code {
-            font-family: 'SF Mono', Monaco, monospace;
-            background: var(--code-bg);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 0.9em;
-            color: var(--accent);
+        .canon-banner {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--pink);
+            border-radius: 0 8px 8px 0;
+            padding: 12px 16px;
+            margin-bottom: 28px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
         }
+
+    
+        .status-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            background: var(--success);
+            color: #000;
+        }
+        .meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px 24px;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
     </style>
 </head>
 <body>
-
-<div class="canon-banner" style="background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:10px 14px;margin-bottom:24px;font-size:0.9rem;color:#8b949e">Companion rendering of <code>phase_5.md</code>. <strong>Markdown is canonical</strong>.</div>
-
-<h1>gorchestrator</h1>
-<p class="subtitle">Phase 5 Implementation Plan — Guardrails</p>
-
+<div class="canon-banner">Companion rendering of <code>phase_5.md</code>. <strong>Markdown is canonical</strong> — on any conflict, the <code>.md</code> wins.</div>
 <div class="meta">
-    <span>📅 July 10, 2026 (revised)</span>
-    <span>📝 Status: <span class="status-badge status-draft">Draft</span></span>
-    <span>🎯 Prerequisite: Phase 4 + project refactor + post-4 polish</span>
+    <span>Completed 2026-07-12</span>
+    <span>Status: <span class="status-badge">Implementation landed</span></span>
+    <span>Parts A–E complete · Scope → Effort → Budgets → MCP → Escalation</span>
 </div>
-
+<h1>Phase 5 Implementation Plan — Guardrails</h1>
+<blockquote>
+<p><strong>Status:</strong> Implementation landed (Parts A–E in tree; suite green) — 2026-07-12.  </p>
+<p><strong>Approved plan frozen from session 2026-07-12.</strong>  </p>
+<p><strong>Prerequisite:</strong> Phase 4 complete (real workspaces, sandboxed tests, MCP, external triggers) <strong>and</strong> Phase 4 project refactor (YAML project registry + agent flavors) <strong>and</strong> the post–Phase 4 polish landings listed under <strong>Landed foundations</strong> below.  </p>
+<p><strong>Scope:</strong> Cheap human gates and hard mid-session stops so unattended volume (external triggers) cannot runaway. <strong>Not</strong> a spend/wallet system — casting chooses cost; provider budgets guard <strong>context-window scale per agent session</strong>.  </p>
+<p><strong>Spec anchors:</strong> §13 (guardrails — refined below for budgets), §5.5 (MCP per-tool), §8.2 / §8.3 (cast + context), §6.0 (projects), §9 (human gates), §11.5 (dashboard — do not regress).  </p>
+<p><strong>Markdown is canonical</strong> — companion <code>phase_5.html</code> is presentation only.</p>
+</blockquote>
+<hr />
 <h2>Landed foundations — do not regress</h2>
-<p>Already in tree and recorded in <code>spec.md</code> (2026-07-10). Phase 5 work <strong>must not</strong> reintroduce free-text projects, title-only issues, current-phase-only drawers, or drop trigger/webhook bodies.</p>
-<ul>
-    <li><strong>Projects</strong> — YAML registry only; budgets attach to registered projects.</li>
-    <li><strong>Agent cast</strong> — named flavors frozen at submit.</li>
-    <li><strong>Issue input</strong> — title + optional description + text-like attachments; dual-write SQLite + <code>issue.md</code> + <code>attachments/</code>.</li>
-    <li><strong>Agent context</strong> — inline title/description; list attachment paths; previous phase output. Scope heuristics must use description, not title alone.</li>
-    <li><strong>Artifact drawer</strong> — phase tabs; Result · Output/Workspace · Activity; Workspace tree + per-file diffs; no full Diff tab.</li>
-    <li><strong>Workspace download</strong> — <code>workspace.zip</code> only when implementation is <code>done</code>.</li>
-</ul>
-<p>If a Phase 5 design conflicts with the above, <strong>update the design</strong> — do not undo polish.</p>
-
+<p>These are already in tree and recorded in <code>spec.md</code> (2026-07-10). Phase 5 work <strong>must not</strong> reintroduce free-text projects, title-only issues, current-phase-only drawers, or drop trigger/webhook bodies.</p>
+<table>
+<tr><th>Area</th><th>Contract</th></tr>
+<tr><td><strong>Projects</strong></td><td>YAML registry only; submit/API/CLI/webhook hard-fail on unknown names. Escalation rules and effort thresholds attach to <strong>registered project names</strong>, not inventable strings.</td></tr>
+<tr><td><strong>Agent cast</strong></td><td>Named flavors of core types; frozen on the issue at submit; retries reuse cast. Human casting is the cost-control surface — not an orchestrator wallet.</td></tr>
+<tr><td><strong>Issue input</strong></td><td>Required <strong>title</strong>; optional <strong>description</strong> (<code>body</code> on API/triggers); optional <strong>text-like attachments</strong> (extension gate at upload only). Dual-write: SQLite <code>description</code> + <code>issue.md</code> + <code>attachments/</code> via one orchestrator path.</td></tr>
+<tr><td><strong>Agent context</strong></td><td>Inline title + description; list attachment paths; previous phase <code>output.*</code>. Scope heuristics must consider description (and attachment names/content signals), not title alone.</td></tr>
+<tr><td><strong>Artifact drawer</strong></td><td>Phase tabs (research / plan / implementation); Result · Output/Workspace · Activity. Implementation <strong>Workspace</strong> tree with per-file diffs; <strong>no</strong> full unified Diff tab.</td></tr>
+<tr><td><strong>Workspace download</strong></td><td><code>GET /api/issues/{id}/workspace.zip</code> only when implementation is <code>done</code>; full workspace tree.</td></tr>
+<tr><td><strong>Submit UX</strong></td><td>Project select + title + description + attachments + dry-run + conditional flavors. No source path field.</td></tr>
+</table>
+<p>If a Phase 5 design conflicts with the above, <strong>update the design</strong> — do not “simplify” by undoing polish.</p>
+<hr />
 <h2>Goal</h2>
-<p>The system asks <em>"are you sure?"</em> before burning budget, halts runaway work mid-flight, and gives admins configurable escalation instead of silent failure.</p>
-
-<h2>Workstreams</h2>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">A</div>
-        <div class="phase-title">Token Budget Enforcement</div>
-    </div>
-    <ul>
-        <li>Budgets per agent, per issue, per <strong>YAML-registered</strong> project, per provider (spec §13.2).</li>
-        <li><strong>Enforcement point:</strong> checked before each model call against <code>events.jsonl</code> usage — a hard mid-run stop.</li>
-        <li>On breach: phase → <code>failed</code> with <code>budget_exceeded</code>; admin notified; resumable after budget raise.</li>
-        <li>Warning threshold (e.g., 80%) → admin notification via the Phase 3 path.</li>
-        <li>Optional cost mapping for dashboard currency display; tokens remain the enforced unit.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">B</div>
-        <div class="phase-title">Effort Estimation Gate</div>
-    </div>
-    <ul>
-        <li>Planner emits effort tag via <code>finish_task</code> — not parsed from free-form <code>output.*</code>.</li>
-        <li><code>high</code> inserts a human confirmation gate before implementation.</li>
-        <li>Threshold configurable per project.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">C</div>
-        <div class="phase-title">Scope Detection</div>
-    </div>
-    <ul>
-        <li>Heuristics over <strong>title + description + attachment basenames</strong> (not title alone).</li>
-        <li>Flagged issues require human confirmation before research begins.</li>
-        <li>Heuristics are advisory and logged.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">D</div>
-        <div class="phase-title">Admin Escalation Rules</div>
-    </div>
-    <ul>
-        <li>Configurable thresholds → escalations (failures, retries, budgets, adapter restarts, sandbox refusals).</li>
-        <li>Targets reuse Phase 3 notification adapters; rules in config + admin page.</li>
-    </ul>
-</div>
-
-<div class="phase-card">
-    <div class="phase-header">
-        <div class="phase-number">E</div>
-        <div class="phase-title">MCP Per-Tool Granularity</div>
-    </div>
-    <ul>
-        <li>Per-agent, per-tool allowlists (tightening Phase 4 per-server grants).</li>
-        <li>Tool-level constraints where supported; endpoint restrictions for HTTP-ish tools.</li>
-        <li>Dashboard surface for permissions — without replacing the multi-phase artifact drawer.</li>
-    </ul>
-</div>
-
-<h2>Tests</h2>
+<pre><code>Submit (pathological scope) → waiting_human (scope) → human pass
+  → Research → Plan (effort tag)
+  → [effort ≥ project threshold] → waiting_human (effort) → human pass
+  → Implementer
+  → mid-phase: provider session token gate hard-stops runaway model loops
+MCP tools: only allowlisted tools + simple constraints reach the agent
+Escalation: YAML thresholds → notify once (no alert storm)</code></pre>
+<p>The system asks <strong>&quot;are you sure?&quot;</strong> before expensive work, <strong>halts a single agent session</strong> that would exceed a configured context-scale limit, and gives admins <strong>configurable escalation</strong> instead of silent failure.</p>
+<hr />
+<h2>Decisions (close draft ambiguities)</h2>
+<table>
+<tr><th>Topic</th><th>Decision</th><th>Rationale</th></tr>
+<tr><td>Token budget product meaning</td><td><strong>Session / context-window gate per agent run</strong>, not a wallet. One agent phase = one ADK session = one conversation with the provider.</td><td>Casting chooses model cost; orchestrator only bounds runaway <em>within</em> a session.</td></tr>
+<tr><td>Budget config axis</td><td><strong>Provider only</strong> via top-level <code>providers:</code> map. No project, flavor, or issue YAML budget.</td><td>Agents inherit the budget of <code>model.provider</code>.</td></tr>
+<tr><td>Budget unit</td><td><strong>Per issue × per phase (agent run).</strong> Each phase that uses provider <code>P</code> gets a <strong>fresh</strong> ceiling of <code>providers.P.token_budget</code>. Counters do <strong>not</strong> accumulate across research → plan → implementer.</td><td>Matches new context window per agent.</td></tr>
+<tr><td>Multi-provider on one issue</td><td><strong>Independent.</strong> Tokens attributed to the provider of each model call; each provider has its own session ceiling when its phase runs.</td><td>Research on openai and implementer on anthropic do not share a pool.</td></tr>
+<tr><td>Missing provider budget</td><td><strong>Unlimited</strong> (no enforcement) for that provider. Local/dev and dry-run keep working without config.</td><td>Opt-in safety.</td></tr>
+<tr><td>Old <code>AgentConfig.token_budget</code></td><td><strong>Remove.</strong> Config load <strong>errors</strong> if the key appears under agents / flavors.</td><td>Was stored-only Phase 4; contradicts provider-only model.</td></tr>
+<tr><td>Enforcement hook</td><td>Wrap <code>model.LLM</code> so each <code>GenerateContent</code> checks spent vs ceiling <strong>before</strong> the call. Rehydrate spent from phase <code>events.jsonl</code> on crash/resume.</td><td>Loop-boundary checks alone miss multi-turn tool loops.</td></tr>
+<tr><td>Usage events</td><td>Prefer <strong>per-call</strong> usage rows in <code>events.jsonl</code> (fix loop-aggregate-only).</td><td>Needed for true mid-run stop and rehydrate.</td></tr>
+<tr><td>Breach</td><td>Phase → <code>failed</code> with error class / message <code>budget_exceeded</code>; admin notification via Phase 3 path.</td><td>Spec §13.2 hard stop.</td></tr>
+<tr><td>Resume after breach</td><td><strong>Issue-level override on Decide</strong> replaces the provider session ceiling for <strong>this issue</strong> (all remaining / retried phases using that provider). Not “add N tokens.”</td><td>Human raises the context gate without editing YAML mid-flight.</td></tr>
+<tr><td>Warning</td><td><code>providers.&lt;name&gt;.warn_pct</code> (default <strong>80</strong> when budget set). At most <strong>one</strong> warn notify per phase attempt.</td><td>No alert storm.</td></tr>
+<tr><td>Optional pricing table</td><td><strong>Cosmetic only</strong> on dashboard if configured; <strong>tokens remain the only enforced unit.</strong> May ship minimal or defer display polish.</td><td>Not a wallet.</td></tr>
+<tr><td>Effort emit</td><td><strong>Planner-only</strong> <code>finish_task</code> field <code>effort</code> enum: <code>high</code>, <code>medium</code>, or <code>low</code> (structured schema). Orchestrator never parses free-form <code>output.*</code>.</td><td>Spec §13.3.</td></tr>
+<tr><td>Missing / invalid effort</td><td>Treat as <strong><code>high</code></strong> → gate.</td><td>Safe default.</td></tr>
+<tr><td>Effort threshold</td><td><code>projects.&lt;name&gt;.guardrails.effort_gate_min</code>: <code>high</code>, <code>medium</code>, or <code>low</code> (default <strong><code>high</code></strong>). Gate when <code>effort &gt;= min</code> on ordered scale low &lt; medium &lt; high.</td><td>Cautious teams can set <code>medium</code>.</td></tr>
+<tr><td>Effort gate placement</td><td>After plan phase is accepted, <strong>before</strong> implementation starts — regardless of plan/implementer adjudicator config. Uses <code>waiting_human</code> + Decide.</td><td>Reuse existing gate machinery.</td></tr>
+<tr><td>Scope signals</td><td>Title + description + attachment <strong>basenames</strong> + <strong>size-capped light reads</strong> of small text attachments (not a content-sniff pipeline).</td><td>Spec §13.4 + landed issue input.</td></tr>
+<tr><td>Scope hold</td><td>Issue created with source prepared; status <strong><code>waiting_human</code></strong>, phase <strong><code>research</code></strong>, reason scope. Research agent does <strong>not</strong> run until human pass.</td><td>Cheapest stop; reuse Decide.</td></tr>
+<tr><td>Hold reason storage</td><td>Pending <strong>decisions</strong> row feedback + phase <strong><code>result.json</code></strong> error/reason (e.g. <code>scope: …</code> / <code>effort: high</code>). UI shows why held.</td><td>Survives reload; filterable later.</td></tr>
+<tr><td>Escalation config</td><td><strong>YAML-only</strong> rules this phase.</td><td>Matches projects-are-YAML; no second config authority.</td></tr>
+<tr><td>Escalation UI</td><td>Minimal <strong>admin read-only</strong> page: active rules + recent escalations. No live CRUD editor.</td><td>Phase 5 need; full admin config GUI later.</td></tr>
+<tr><td>MCP tool grants</td><td>Nested under <strong>global</strong> <code>mcp_servers</code> entries: tool allowlist + optional simple constraints.</td><td>Spec §5.5 Phase 5.</td></tr>
+<tr><td>MCP agent bind</td><td>Agent still lists <strong>server names</strong> in <code>mcp_servers</code>. Tools/constraints come from the global server definition; agent does not re-declare tool lists.</td><td>Minimal agent schema change.</td></tr>
+<tr><td>MCP constraints depth</td><td>Allow/deny tool names + <strong>optional simple constraints</strong> (e.g. require prefix on an arg, deny substrings, HTTP URL allowlist) enforced in <code>wrapMCPTool</code>. Not a full policy language.</td><td>Auditable; enough for SELECT-ish and endpoint-ish cases.</td></tr>
+<tr><td>Implementation order</td><td><strong>A scope → B effort → C provider budgets → D MCP tools → E escalation</strong></td><td>Cheap stops first; mid-run session gate; then permissions; then alert rules.</td></tr>
+</table>
+<h3>Explicit non-goals for budgets</h3>
 <ul>
-    <li>Budget hard stop mid-phase; resumable after raise.</li>
-    <li>Effort gate pauses pre-implementation.</li>
-    <li>Scope flag: pathological description (and title) held at submission.</li>
-    <li>Escalation: one notification, no alert storm.</li>
-    <li>MCP per-tool denial at call time.</li>
-    <li>Regression smoke: description + attachment submit; drawer on past phase; zip only when implementation done.</li>
+<li>Issue total token caps  </li>
+<li>Project spend caps / wallets  </li>
+<li>Cross-phase remaining budget  </li>
+<li>Enforcing currency / dollar limits  </li>
 </ul>
+<p>Human <strong>agent casting</strong> (which flavor / model) is the cost-control process.</p>
+<hr />
+<h2>Sequencing (five session-sized parts)</h2>
+<pre><code>A Scope detection
+    ↓
+B Effort estimation gate
+    ↓
+C Provider session token budgets
+    ↓
+D MCP per-tool granularity
+    ↓
+E Admin escalation rules (YAML + read-only page)</code></pre>
+<p>Parts are sequential by default. <strong>D</strong> depends only on existing MCP manager (Phase 4) and can start after <strong>C</strong> (or carefully parallel after <strong>B</strong> if budget work is isolated). <strong>E</strong> should land last so it can subscribe to failure / budget / sandbox signals introduced earlier.</p>
+<table>
+<tr><th>Part</th><th>Workstream</th><th>Depends on</th></tr>
+<tr><td><strong>A</strong></td><td>Scope detection</td><td>Landed submit + <code>waiting_human</code></td></tr>
+<tr><td><strong>B</strong></td><td>Effort gate</td><td>A (shared hold-reason patterns helpful); plan phase</td></tr>
+<tr><td><strong>C</strong></td><td>Provider session budgets</td><td>B optional; LLM factory + <code>runAgentLoop</code></td></tr>
+<tr><td><strong>D</strong></td><td>MCP per-tool</td><td>Phase 4 MCP manager</td></tr>
+<tr><td><strong>E</strong></td><td>Escalation</td><td>C (+ failure paths from A–D)</td></tr>
+</table>
+<hr />
+<h2>Config sketches</h2>
+<pre><code># Provider session gates (context-scale). Opt-in per provider name
+# matching model.provider (openai, anthropic, gemini, …).
+providers:
+  openai:
+    token_budget: 128000
+    warn_pct: 80
+  anthropic:
+    token_budget: 200000
+  # dryrun / unset → unlimited
 
-<h2>Success Criteria</h2>
-<div class="highlight-box">
-    <p>A runaway task is stopped <strong>three ways</strong>: submission (scope), pre-implementation (effort), mid-run (budget). Guardrails compose with landed issue input and project registry.</p>
-</div>
+# Global MCP servers — Phase 5 adds tools + constraints under each server.
+mcp_servers:
+  - name: internal-api
+    command: [&quot;./bin/my-mcp-server&quot;]
+    env: [API_TOKEN]
+    # empty tools → all tools from server (Phase 4 compat)
+    tools:
+      - name: query_database
+        # optional simple constraints (all must pass):
+        constraints:
+          - type: arg_prefix
+            arg: sql
+            prefix: &quot;SELECT&quot;
+      - name: call_http
+        constraints:
+          - type: url_allowlist
+            arg: url
+            hosts: [&quot;api.internal.example&quot;]
 
-<h2>Out of Scope</h2>
+projects:
+  auth-service:
+    guardrails:
+      effort_gate_min: high   # high | medium | low — default high
+      # scope: uses global heuristics unless overridden later
+    agents:
+      implementer:
+        default: coder
+        flavors:
+          coder:
+            mcp_servers: [internal-api]   # server allowlist only
+
+# Escalation — YAML only; admin page is read-only.
+escalation:
+  rules:
+    - name: consecutive_project_failures
+      when: consecutive_failures
+      project: &quot;*&quot;              # or registered project name
+      threshold: 3
+      notify: admin             # bootstrap admin emails / console
+    - name: budget_breach
+      when: budget_exceeded
+      threshold: 1
+      notify: admin
+    - name: sandbox_refuse
+      when: sandbox_refused
+      threshold: 1
+      notify: admin
+  # Dedupe: fire once per (rule, issue|project window); no storm</code></pre>
+<p><strong>Removed:</strong> <code>agents.*.token_budget</code> / flavor <code>token_budget</code> — load error if present.</p>
+<hr />
+<h2>Part A — Scope detection</h2>
+<h3>Behavior</h3>
+<ol>
+<li>At <strong><code>SubmitIssue</code></strong> (all entry points: dashboard, API, CLI, webhook, external triggers), after project/cast/attachment validation and <strong><code>persistIssueContext</code> + <code>prepareIssueSource</code></strong>, run scope heuristics on:<ul><li>title</li><li>description</li><li>attachment basenames</li><li>light read of small text attachments (size cap, e.g. first 8KiB each; skip binary/oversize)</li></ul></li>
+<li>Signals (initial set; tunable constants or YAML later):<ul><li>excessive length (title+description)</li><li>forbidden phrases (e.g. &quot;refactor the entire&quot;, &quot;migrate everything&quot;, &quot;rewrite the whole&quot;)</li><li>extreme vagueness heuristics (optional light pass)</li></ul></li>
+<li>If flagged:<ul><li>Do <strong>not</strong> queue for research work as normal in-progress pipeline start.</li><li>Set issue <code>waiting_human</code>, <code>current_phase=research</code>.</li><li>Write research <code>result.json</code> with <code>status: waiting_human</code> and reason <code>scope: &lt;summary&gt;</code>.</li><li>Create pending <strong>decision</strong> with feedback describing why.</li><li>Notify human gate (existing path).</li><li>Audit / log the heuristic hit (advisory — false positives expected).</li></ul></li>
+<li>Human <strong>pass</strong> → re-queue; research runs. <strong>fail</strong> → terminal failed. <strong>retry</strong> with feedback optional (same as other gates).</li>
+<li>Unflagged issues → existing <code>queued</code> behavior unchanged.</li>
+</ol>
+<h3>Files</h3>
+<table>
+<tr><th>Path</th><th>Change</th></tr>
+<tr><td><code>internal/orchestrator/scope.go</code></td><td><strong>New</strong> — heuristic evaluation</td></tr>
+<tr><td><code>internal/orchestrator/service.go</code></td><td>Hook after prepare source; hold path</td></tr>
+<tr><td><code>internal/orchestrator/engine.go</code></td><td>Ensure process/resume respects scope hold</td></tr>
+<tr><td><code>internal/config/config.go</code></td><td>Optional global phrase list / caps if needed</td></tr>
+<tr><td><code>internal/server/dashboard.go</code> / templates</td><td>Reason chip on expanded card for scope holds</td></tr>
+<tr><td>Tests</td><td>Pathological description; title-only phrase; clean issue not held</td></tr>
+</table>
+<h3>Tests</h3>
 <ul>
-    <li>Metrics / deployment packaging → Phase 6</li>
-    <li>Changing multi-phase drawer / workspace tree / zip (already landed)</li>
-    <li>Project membership / invites (deferred)</li>
+<li>Pathological <strong>description</strong> → <code>waiting_human</code> before any research <code>in_progress</code> agent run.</li>
+<li>Title-only forbidden phrase (empty description) still held.</li>
+<li>Normal issue still <code>queued</code> and processes.</li>
+<li>Pass decision starts research.</li>
 </ul>
-
+<hr />
+<h2>Part B — Effort estimation gate</h2>
+<h3>Behavior</h3>
+<ol>
+<li>Extend <strong>planner-only</strong> finish schema with required <code>effort</code> enum: <code>low</code> | <code>medium</code> | <code>high</code>.</li>
+<li>Update planner system prompt to set effort honestly from plan complexity.</li>
+<li>On plan phase <strong>accepted</strong> (<code>done</code>), before starting implementation:<ul><li>Read planner effort from finish_task (persisted on plan <code>result.json</code> or side field).</li><li>If missing/invalid → treat as <strong><code>high</code></strong>.</li><li>Compare to <code>projects.&lt;name&gt;.guardrails.effort_gate_min</code> (default <code>high</code>).</li><li>If <code>effort &gt;= min</code> → do <strong>not</strong> start implementer; set <code>waiting_human</code>, phase <code>implementation</code> (or pre-implement boundary), reason <code>effort: high|medium</code>, pending decision, notify.</li></ul></li>
+<li>Human pass → queue implementer. Fail / retry per existing Decide semantics.</li>
+<li>Researcher / implementer finish schema <strong>unchanged</strong> (<code>done</code> + <code>rationale</code> only).</li>
+<li>Dry-run model: emit a default effort (e.g. <code>low</code>) unless prompt requests otherwise so tests stay unblocked; dedicated tests force <code>high</code>.</li>
+</ol>
+<h3>Files</h3>
+<table>
+<tr><th>Path</th><th>Change</th></tr>
+<tr><td><code>internal/agents/planner.go</code> / shared schema split</td><td>Planner <code>finishTaskSchema</code> + prompt</td></tr>
+<tr><td><code>internal/agents/researcher.go</code></td><td>Keep shared base or split schemas cleanly</td></tr>
+<tr><td><code>internal/llm/dryrun.go</code></td><td>Planner effort in finish_task args</td></tr>
+<tr><td><code>internal/orchestrator/engine.go</code></td><td>Post-plan gate in <code>runPipeline</code></td></tr>
+<tr><td><code>internal/config/config.go</code></td><td><code>ProjectGuardrails</code> / <code>effort_gate_min</code></td></tr>
+<tr><td>Dashboard</td><td>Effort reason on gate card</td></tr>
+<tr><td>Tests</td><td>high → hold; low + min high → no hold; missing → high</td></tr>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Planner tags <code>high</code> → pipeline pauses pre-implementation; pass proceeds.</li>
+<li><code>effort_gate_min: medium</code> + effort <code>medium</code> → hold.</li>
+<li>Missing effort → hold as high.</li>
+</ul>
+<hr />
+<h2>Part C — Provider session token budgets</h2>
+<h3>Behavior</h3>
+<ol>
+<li><strong>Config:</strong> top-level <code>providers</code> map: <code>token_budget</code>, optional <code>warn_pct</code> (default 80).</li>
+<li><strong>Remove</strong> <code>AgentConfig.TokenBudget</code>; reject YAML that still sets <code>token_budget</code> on agents/flavors.</li>
+<li><strong>Resolve</strong> at phase start:  </li>
+</ol>
+<p>   <code>ceiling = issue_provider_override[provider] ?? providers[provider].token_budget</code>  </p>
+<p>   Missing / zero → unlimited.</p>
+<ol>
+<li><strong>Wrap</strong> <code>model.LLM</code> returned from <code>llm.New</code> (or factory helper) with a budget guard that:<ul><li>Tracks spent for <strong>this phase run</strong> (in memory).</li><li>On construction / resume: rehydrate spent from phase <code>events.jsonl</code> usage records.</li><li><strong>Before</strong> each <code>GenerateContent</code>: if <code>spent &gt;= ceiling</code> → error <code>budget_exceeded</code> (no call).</li><li><strong>After</strong> each call: add <code>UsageMetadata.TotalTokenCount</code> (or prompt+completion); append <strong>per-call</strong> usage event; if crossed <code>warn_pct</code>, notify once per attempt.</li></ul></li>
+<li>Phase fails with <code>budget_exceeded</code>; <code>NotifyBadOutput</code> / escalation hook; issue not auto-deleted — human can Decide.</li>
+<li><strong>Decide override:</strong> member/admin may supply absolute token ceiling for a provider on this issue (replace). Stored on issue (e.g. JSON column or config blob). Subsequent phases/retries using that provider use the override. Re-queue / retry same phase after override.</li>
+<li>Dashboard: show session spent / ceiling on expanded card or result summary when configured (minimal). Optional pricing table is cosmetic only if present.</li>
+</ol>
+<h3>Files</h3>
+<table>
+<tr><th>Path</th><th>Change</th></tr>
+<tr><td><code>internal/config/config.go</code></td><td><code>Providers</code> map; remove <code>TokenBudget</code>; validation</td></tr>
+<tr><td><code>configs/config.example.yaml</code></td><td>Document <code>providers:</code>; remove agent token_budget</td></tr>
+<tr><td><code>internal/llm/budget.go</code></td><td><strong>New</strong> — wrapping LLM + rehydrate helper</td></tr>
+<tr><td><code>internal/orchestrator/engine.go</code></td><td>Wire wrapper; fail path; per-call usage events</td></tr>
+<tr><td><code>internal/orchestrator/events.go</code> / event schema</td><td>Per-call usage clarity</td></tr>
+<tr><td><code>internal/sqlite/issues.go</code></td><td>Issue provider budget override storage</td></tr>
+<tr><td><code>internal/orchestrator/service.go</code></td><td>Decide accepts override</td></tr>
+<tr><td><code>internal/server/*</code></td><td>Decide form/API field; display</td></tr>
+<tr><td>Tests</td><td>Scripted usage → mid-phase stop; rehydrate; override resume</td></tr>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Scripted model with known per-call usage → hard stop mid-phase before exceeding call; status failed <code>budget_exceeded</code>.</li>
+<li>Resume/rehydrate: partial events.jsonl counts toward ceiling.</li>
+<li>Decide with higher absolute ceiling → retry proceeds past prior stop point.</li>
+<li>Next phase gets a <strong>fresh</strong> counter (same provider budget value, spent reset).</li>
+<li>No <code>providers</code> entry → unlimited.</li>
+</ul>
+<hr />
+<h2>Part D — MCP per-tool granularity</h2>
+<h3>Behavior</h3>
+<ol>
+<li>Extend <code>MCPServerConfig</code> with optional <code>tools: [{name, constraints[]}]</code>.</li>
+<li><strong>Empty <code>tools</code>:</strong> Phase 4 behavior — all tools from that server (when agent lists the server).</li>
+<li><strong>Non-empty <code>tools</code>:</strong> only listed tool names are wrapped into the agent toolset; others never advertised.</li>
+<li><strong>Constraints</strong> evaluated in <code>wrapMCPTool</code> before <code>CallTool</code>:<ul><li><code>arg_prefix</code> — named arg string must start with prefix (case rules documented).</li><li><code>arg_deny_substring</code> — optional denylist.</li><li><code>url_allowlist</code> — parse URL host against allowlist.</li><li>Unknown constraint type → fail closed for that tool call (or config load error — prefer <strong>load error</strong>).</li></ul></li>
+<li>Agent <code>mcp_servers: [name]</code> unchanged — server allowlist only.</li>
+<li>Denial: tool absent from schema <strong>and</strong> if somehow called, reject at wrapper.</li>
+<li>Dashboard: small <strong>permissions</strong> view (admin or project detail) listing server → tools → agents that can use them — <strong>without</strong> replacing multi-phase artifact drawer. Prefer a separate page/section under admin or project API, not drawer tabs.</li>
+</ol>
+<h3>Files</h3>
+<table>
+<tr><th>Path</th><th>Change</th></tr>
+<tr><td><code>internal/config/config.go</code></td><td>Nested tools + constraints types; validation</td></tr>
+<tr><td><code>internal/mcp/manager.go</code></td><td>Filter + constraint enforcement</td></tr>
+<tr><td><code>internal/mcp/manager_test.go</code></td><td>Allow/deny + constraint cases</td></tr>
+<tr><td><code>configs/config.example.yaml</code></td><td>Examples</td></tr>
+<tr><td><code>internal/server/*</code> + templates</td><td>Read-only permissions surface</td></tr>
+<tr><td>Tests</td><td>Tool absent from agent toolset; constraint violation at call</td></tr>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>Per-tool denial: not in advertised set; call-time deny if forced.</li>
+<li><code>arg_prefix</code> SELECT-only happy path + reject <code>DROP</code>.</li>
+<li>Agent without server still sees no tools.</li>
+</ul>
+<hr />
+<h2>Part E — Admin escalation rules</h2>
+<h3>Behavior</h3>
+<ol>
+<li>YAML <code>escalation.rules</code> as sketched; load/validate at process start.</li>
+<li>Evaluate on signals: consecutive failures per project, budget_exceeded, sandbox refused, adapter restart loops (if supervisor exposes counters), retry count thresholds.</li>
+<li>Deliver via existing <code>notify.Dispatcher</code> (console / Slack / email).</li>
+<li><strong>Dedupe:</strong> one fire per (rule identity, subject key, window) — no alert storm (test: N failures → one notify).</li>
+<li>Admin <strong>read-only</strong> HTML page: list rules from config + recent matching notification rows. No YAML write-back UI.</li>
+<li>Role: admin-only page; members keep existing notifications list.</li>
+</ol>
+<h3>Files</h3>
+<table>
+<tr><th>Path</th><th>Change</th></tr>
+<tr><td><code>internal/config/config.go</code></td><td>Escalation config structs</td></tr>
+<tr><td><code>internal/notify/escalation.go</code></td><td><strong>New</strong> — rule eval + dedupe</td></tr>
+<tr><td><code>internal/orchestrator/<em></code> / <code>daemon/</em></code></td><td>Emit signals into evaluator</td></tr>
+<tr><td><code>internal/server/*</code> + templates</td><td><code>/admin/escalation</code> read-only</td></tr>
+<tr><td>Tests</td><td>Threshold fire once; no double storm</td></tr>
+</table>
+<h3>Tests</h3>
+<ul>
+<li>N consecutive failures → single escalation notification.</li>
+<li>Budget breach triggers configured rule.</li>
+<li>Non-admin cannot open admin page.</li>
+</ul>
+<hr />
+<h2>Cross-cutting tests</h2>
+<ul>
+<li>Regression smoke: submit with description + <code>.md</code> attachment; open drawer on research after pipeline advanced; <code>workspace.zip</code> only when implementation done.</li>
+<li>Hold reasons visible after reload (decision + result.json).</li>
+<li>No guardrail bypassable by free-form agent <code>output.*</code> content.</li>
+</ul>
+<hr />
+<h2>Success criteria</h2>
+<ol>
+<li>A deliberately runaway task is stopped <strong>three ways</strong>: at submission (<strong>scope</strong>), before implementation (<strong>effort</strong>), and mid-agent-session (<strong>provider token gate</strong>).</li>
+<li>Provider budget is a <strong>session/context gate</strong>, not a wallet; cross-phase totals are intentionally unbounded by this mechanism.</li>
+<li>No guardrail can be bypassed by agent output content — enforcement is orchestrator-side.</li>
+<li>Guardrails compose with landed issue input and project registry (no free-text projects; scope sees description + attachments).</li>
+<li>MCP agents only see/call allowlisted tools; simple constraints enforced at call time.</li>
+<li>Escalation rules fire without alert storms; admin can read rules and recent escalations.</li>
+</ol>
+<hr />
+<h2>Out of scope</h2>
+<ul>
+<li>Metrics/reporting polish, deployment packaging → Phase 6.</li>
+<li>Changing the multi-phase drawer / workspace tree / zip model (already landed).</li>
+<li>Project membership / invites (still deferred — §17 Q17).</li>
+<li>Issue/project token <strong>wallets</strong> or currency enforcement.</li>
+<li>Full policy language for MCP; admin YAML editors.</li>
+<li>SAML, Azure Blob, WASM (unchanged deferrals).</li>
+</ul>
+<hr />
+<h2>Spec touch-ups (when implementing / completing)</h2>
+<p>Update living <code>spec.md</code> to match:</p>
+<ul>
+<li>§13.2 — provider session budgets; remove multi-layer wallet reading; drop agent <code>token_budget</code> store-only story.</li>
+<li>§5.5 Phase 5 — nested tools + constraints under <code>mcp_servers</code>.</li>
+<li>§8.2 — remove <code>token_budget</code> from configurable flavor fields; add project <code>guardrails.effort_gate_min</code>.</li>
+<li>§17 / decisions log — record closed Phase 5 budget semantics.</li>
+<li><code>configs/config.example.yaml</code> — <code>providers:</code>, guardrails, escalation, MCP tools examples.</li>
+</ul>
+<hr />
+<h2>Implementation checklist (session order)</h2>
+<ul>
+<li>☑ <strong>A</strong> Scope detection + hold reason UX  </li>
+<li>☑ <strong>B</strong> Planner effort + pre-implement gate  </li>
+<li>☑ <strong>C</strong> Provider session budgets + Decide override  </li>
+<li>☑ <strong>D</strong> MCP per-tool + constraints + permissions view  </li>
+<li>☑ <strong>E</strong> Escalation YAML + dedupe + admin read-only page  </li>
+<li>☑ Spec + example config + regression smoke  </li>
+</ul>
+<hr />
+<p><em>End of Phase 5 Plan</em></p>
 <div class="footer">
-    <p>Phase 5 draft — refine into session-sized parts before implementation. Canonical source: <code>phase_5.md</code></p>
+    <p>Phase 5 complete — session-sized parts A–E. Canonical source: <code>phase_5.md</code></p>
 </div>
-
 </body>
 </html>

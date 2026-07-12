@@ -63,6 +63,7 @@ func Serve(fs *flag.FlagSet, args []string) error {
 		return fmt.Errorf("init notifications: %w", err)
 	}
 	eng.SetNotifier(dispatcher)
+	eng.SetEscalator(notify.NewEscalator(cfg, dispatcher))
 	defer func() {
 		for _, s := range adapterSinks {
 			_ = s.Close()

@@ -43,6 +43,23 @@ func (r *DecisionRepo) Create(issueID int64, phase string) (*Decision, error) {
 	return r.Get(id)
 }
 
+// CreateWithFeedback inserts a pending decision with pre-filled feedback
+// (e.g. scope/effort hold reason shown to the human).
+func (r *DecisionRepo) CreateWithFeedback(issueID int64, phase, feedback string) (*Decision, error) {
+	res, err := r.db.Exec(
+		`INSERT INTO decisions (issue_id, phase, feedback) VALUES (?, ?, ?)`,
+		issueID, phase, feedback,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert decision: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("last insert id: %w", err)
+	}
+	return r.Get(id)
+}
+
 // Get fetches a decision by id.
 func (r *DecisionRepo) Get(id int64) (*Decision, error) {
 	row := r.db.QueryRow(`

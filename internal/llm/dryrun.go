@@ -6,8 +6,8 @@ import (
 	"iter"
 	"strings"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 // DryRunModel is a model.LLM that returns a canned response without calling an LLM.
@@ -66,10 +66,10 @@ func (m *DryRunModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 		if hasFuncResponse {
 			// Second turn: finish the task.
 			if strings.Contains(prompt, "[reject]") && !strings.Contains(prompt, "Adjudicator feedback:") {
-				yield(m.finishTaskResponseWithDone(false, "missing tests"), nil)
+				yield(m.finishTaskResponseWithDone(req, false, "missing tests"), nil)
 				return
 			}
-			yield(m.finishTaskResponse("dry-run self-check passed"), nil)
+			yield(m.finishTaskResponseWithDone(req, true, "dry-run self-check passed"), nil)
 			return
 		}
 
@@ -89,7 +89,7 @@ func (m *DryRunModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 		}
 
 		// No work tool available: finish immediately.
-		yield(m.finishTaskResponse("dry-run self-check passed"), nil)
+		yield(m.finishTaskResponseWithDone(req, true, "dry-run self-check passed"), nil)
 	}
 }
 
@@ -193,10 +193,34 @@ func (m *DryRunModel) readFileCall() *model.LLMResponse {
 }
 
 func (m *DryRunModel) finishTaskResponse(rationale string) *model.LLMResponse {
-	return m.finishTaskResponseWithDone(true, rationale)
+	// Used by tests that don't have a request context; no effort field.
+	return m.finishTaskArgs(true, rationale, "")
 }
 
-func (m *DryRunModel) finishTaskResponseWithDone(done bool, rationale string) *model.LLMResponse {
+func (m *DryRunModel) finishTaskResponseWithDone(req *model.LLMRequest, done bool, rationale string) *model.LLMResponse {
+	effort := ""
+	// Only include effort when the finish_task declaration accepts it
+	// (planner OutputSchema). Extra fields fail ADK validation and loop forever.
+	if finishTaskHasEffort(req) {
+		effort = "low"
+		prompt := extractPrompt(req)
+		if strings.Contains(prompt, "[effort:high]") {
+			effort = "high"
+		} else if strings.Contains(prompt, "[effort:medium]") {
+			effort = "medium"
+		}
+	}
+	return m.finishTaskArgs(done, rationale, effort)
+}
+
+func (m *DryRunModel) finishTaskArgs(done bool, rationale, effort string) *model.LLMResponse {
+	args := map[string]any{
+		"done":      done,
+		"rationale": rationale,
+	}
+	if effort != "" {
+		args["effort"] = effort
+	}
 	return &model.LLMResponse{
 		Content: &genai.Content{
 			Role: genai.RoleModel,
@@ -204,10 +228,7 @@ func (m *DryRunModel) finishTaskResponseWithDone(done bool, rationale string) *m
 				FunctionCall: &genai.FunctionCall{
 					ID:   "call_finish_task",
 					Name: "finish_task",
-					Args: map[string]any{
-						"done":      done,
-						"rationale": rationale,
-					},
+					Args: args,
 				},
 			}},
 		},
@@ -218,6 +239,34 @@ func (m *DryRunModel) finishTaskResponseWithDone(done bool, rationale string) *m
 			TotalTokenCount:      15,
 		},
 	}
+}
+
+// finishTaskHasEffort reports whether the request's finish_task tool schema
+// includes an effort property (planner).
+func finishTaskHasEffort(req *model.LLMRequest) bool {
+	if req == nil {
+		return false
+	}
+	for _, d := range functionDeclarations(req.Config) {
+		if d == nil || d.Name != "finish_task" {
+			continue
+		}
+		// Parameters (genai.Schema) path used by hand-built finish_task.
+		if d.Parameters != nil && d.Parameters.Properties != nil {
+			if _, ok := d.Parameters.Properties["effort"]; ok {
+				return true
+			}
+		}
+		// ParametersJsonSchema map path.
+		if m, ok := d.ParametersJsonSchema.(map[string]any); ok {
+			if props, ok := m["properties"].(map[string]any); ok {
+				if _, ok := props["effort"]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func truncate(s string, n int) string {

@@ -46,8 +46,10 @@ type PhaseResult struct {
 	TokensUsed    int    `json:"tokens_used"`
 	DurationMs    int64  `json:"duration_ms"`
 	DoneRationale string `json:"done_rationale"`
-	LatestOutput  string `json:"latest_output"`
-	Timestamp     string `json:"timestamp"`
+	// Effort is planner finish_task effort (low|medium|high); empty for other phases.
+	Effort       string `json:"effort,omitempty"`
+	LatestOutput string `json:"latest_output"`
+	Timestamp    string `json:"timestamp"`
 }
 
 // PhaseTask is the orchestrator-written instructions/config file for a phase.
@@ -92,6 +94,7 @@ type Engine struct {
 	notifs    *sqlite.NotificationRepo
 	bus       *EventBus
 	notifier  *notify.Dispatcher
+	escalator *notify.Escalator
 	mcp       *gorchmcp.Manager
 }
 
@@ -296,9 +299,24 @@ func (e *Engine) SetNotifier(d *notify.Dispatcher) {
 	e.notifier = d
 }
 
+// SetEscalator attaches the YAML escalation evaluator (may be nil).
+func (e *Engine) SetEscalator(esc *notify.Escalator) {
+	e.escalator = esc
+}
+
+// Escalator returns the escalation evaluator (may be nil).
+func (e *Engine) Escalator() *notify.Escalator {
+	return e.escalator
+}
+
 // SetMCP attaches an MCP manager (per-agent server allowlists).
 func (e *Engine) SetMCP(m *gorchmcp.Manager) {
 	e.mcp = m
+}
+
+// MCP returns the MCP manager (may be nil).
+func (e *Engine) MCP() *gorchmcp.Manager {
+	return e.mcp
 }
 
 // Close releases engine resources.
@@ -356,6 +374,18 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 
 	if err := e.prepareIssueSource(ctx, project, issue); err != nil {
 		return fmt.Errorf("prepare source: %w", err)
+	}
+
+	if err := e.maybeHoldForScope(ctx, project, issue, opts); err != nil {
+		return err
+	}
+	issue, err = e.issues.Get(issue.ID)
+	if err != nil || issue == nil {
+		return fmt.Errorf("reload issue after scope check: %w", err)
+	}
+	if issue.Status == sqlite.StatusWaitingHuman {
+		// Scope hold — do not run the pipeline; caller uses resume/decide.
+		return nil
 	}
 
 	return e.runPipeline(ctx, project, issue, opts.DryRun)
@@ -578,6 +608,17 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 
 		switch result.Status {
 		case "done":
+			if e.escalator != nil {
+				e.escalator.Observe(ctx, notify.Event{Success: true, Project: project.Name, IssueID: issue.ID, Phase: phaseName})
+			}
+			// After an accepted plan, optionally hold before implementation.
+			if phaseName == "plan" {
+				if held, herr := e.maybeHoldForEffort(ctx, project, issue, result); herr != nil {
+					return herr
+				} else if held {
+					return nil
+				}
+			}
 			// Pipeline continues; issue stays in_progress until all phases finish.
 			continue
 		case "waiting_human":
@@ -589,6 +630,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			return nil
 		default:
 			notify.NotifyBadOutput(ctx, e.notifier, issue.ID, phaseName, result.Error, e.adminEmails())
+			e.observeEscalation(ctx, project.Name, issue.ID, phaseName, result.Error)
 			return fmt.Errorf("phase %s %s: %s", phaseName, result.Status, result.Error)
 		}
 	}
@@ -699,6 +741,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 		loopCount := 0
 		var loopErr error
 		var doneRationale string
+		var finishEffort string
 		var phaseDone bool = true
 
 		for loop := 1; loop <= loops; loop++ {
@@ -709,7 +752,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			}
 
 			loopInput := e.buildLoopInput(ctx, input, outputPath, loop)
-			output, done, rationale, tokens, err := e.runAgentLoop(ctx, project.ID, issue.ID, phase, cfg, loopInput, outputPath, eventsPath, allowlist, attempt, loop, run.ID, dryRun)
+			output, done, rationale, effort, tokens, err := e.runAgentLoop(ctx, project.ID, issue.ID, phase, cfg, loopInput, outputPath, eventsPath, allowlist, attempt, loop, run.ID, dryRun)
 			if err != nil {
 				loopErr = err
 				loopCount = loop
@@ -719,6 +762,9 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			totalTokens += tokens
 			if rationale != "" {
 				doneRationale = rationale
+			}
+			if effort != "" {
+				finishEffort = effort
 			}
 			phaseDone = done
 			_ = output
@@ -750,6 +796,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			TokensUsed:    totalTokens,
 			DurationMs:    duration,
 			DoneRationale: doneRationale,
+			Effort:        finishEffort,
 			LatestOutput:  latestOutput,
 			Timestamp:     time.Now().UTC().Format(time.RFC3339),
 		}
@@ -835,8 +882,8 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 }
 
 // runAgentLoop runs one loop of an agent and returns the loop output, the
-// finish_task done flag, rationale, token count, and any error.
-func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, allowlist []string, attempt, loop int, runID int64, dryRun bool) ([]byte, bool, string, int, error) {
+// finish_task done flag, rationale, effort tag (planner), token count, and any error.
+func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, allowlist []string, attempt, loop int, runID int64, dryRun bool) ([]byte, bool, string, string, int, error) {
 	outputWritten := false
 	issueDir := storage.IssueDir(projectID, issueID)
 	bt := &tools.BoundTools{
@@ -878,13 +925,13 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		registry, err = tools.NewImplementerRegistry(bt)
 	}
 	if err != nil {
-		return nil, false, "", 0, fmt.Errorf("build tool registry: %w", err)
+		return nil, false, "", "", 0, fmt.Errorf("build tool registry: %w", err)
 	}
 	registry = tools.FilterByNames(registry, cfg.Tools)
 	if e.mcp != nil && len(cfg.MCPServers) > 0 {
 		mcpTools, merr := e.mcp.ToolsForAgent(cfg.MCPServers)
 		if merr != nil {
-			return nil, false, "", 0, fmt.Errorf("mcp tools: %w", merr)
+			return nil, false, "", "", 0, fmt.Errorf("mcp tools: %w", merr)
 		}
 		registry = append(registry, mcpTools...)
 	}
@@ -904,12 +951,23 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 	}
 	llmModel, err := llm.New(ctx, modelCfg)
 	if err != nil {
-		return nil, false, "", 0, fmt.Errorf("build model: %w", err)
+		return nil, false, "", "", 0, fmt.Errorf("build model: %w", err)
 	}
+	// Provider session budget: per-phase ceiling, rehydrate from events.jsonl.
+	providerName := modelCfg.Provider
+	var issueRow *sqlite.Issue
+	if issueID > 0 {
+		issueRow, _ = e.issues.Get(issueID)
+	}
+	var projectRow *sqlite.Project
+	if issueRow != nil {
+		projectRow, _ = e.projects.Get(issueRow.ProjectID)
+	}
+	llmModel = e.wrapModelWithBudget(ctx, issueRow, projectRow, phase, providerName, eventsPath, dryRun, llmModel)
 
 	agentInst, err := e.buildAgent(phase, cfg, llmModel, registry)
 	if err != nil {
-		return nil, false, "", 0, fmt.Errorf("build agent: %w", err)
+		return nil, false, "", "", 0, fmt.Errorf("build agent: %w", err)
 	}
 
 	wrapper, err := agent.New(agent.Config{
@@ -920,7 +978,7 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		},
 	})
 	if err != nil {
-		return nil, false, "", 0, fmt.Errorf("create agent wrapper: %w", err)
+		return nil, false, "", "", 0, fmt.Errorf("create agent wrapper: %w", err)
 	}
 
 	sessionID := fmt.Sprintf("run-%d-attempt-%d-loop-%d", runID, attempt, loop)
@@ -931,24 +989,41 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		AutoCreateSession: true,
 	})
 	if err != nil {
-		return nil, false, "", 0, fmt.Errorf("create runner: %w", err)
+		return nil, false, "", "", 0, fmt.Errorf("create runner: %w", err)
 	}
 
 	loopTokens := 0
 	var finishRationale string
+	var finishEffort string
 	var finishDone *bool
 	var finalText string
 
 	for ev, err := range r.Run(ctx, "user", sessionID, userContent, agent.RunConfig{}) {
 		if err != nil {
-			return nil, false, "", 0, fmt.Errorf("loop %d: %w", loop, err)
+			if llm.IsBudgetExceeded(err) {
+				return nil, false, "", "", loopTokens, err
+			}
+			return nil, false, "", "", 0, fmt.Errorf("loop %d: %w", loop, err)
 		}
 		if ev == nil || ev.Content == nil {
 			continue
 		}
 
 		if ev.UsageMetadata != nil {
-			loopTokens += int(ev.UsageMetadata.TotalTokenCount)
+			callTokens := int(ev.UsageMetadata.TotalTokenCount)
+			if callTokens <= 0 {
+				callTokens = int(ev.UsageMetadata.PromptTokenCount + ev.UsageMetadata.CandidatesTokenCount)
+			}
+			if callTokens > 0 {
+				loopTokens += callTokens
+				recordEvent(ctx, e.store, eventsPath, eventRecord{
+					Type:      "usage",
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Attempt:   attempt,
+					Loop:      loop,
+					Tokens:    callTokens,
+				})
+			}
 		}
 
 		if ev.Content.Role == genai.RoleModel {
@@ -978,6 +1053,9 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 							}
 							if d, ok := args["done"].(bool); ok {
 								finishDone = &d
+							}
+							if ef, ok := args["effort"].(string); ok {
+								finishEffort = NormalizeEffort(ef)
 							}
 						}
 					}
@@ -1011,20 +1089,12 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		}
 	}
 
-	if loopTokens > 0 {
-		recordEvent(ctx, e.store, eventsPath, eventRecord{
-			Type:      "usage",
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Attempt:   attempt,
-			Loop:      loop,
-			Tokens:    loopTokens,
-		})
-	}
+	// Per-call usage events are written above; no loop-aggregate row (would double-count rehydrate).
 
 	// If the agent did not use write_output, fall back to the final model text.
 	if !outputWritten && finalText != "" {
 		if err := e.store.Write(ctx, outputPath, []byte(finalText)); err != nil {
-			return nil, false, "", 0, fmt.Errorf("write fallback output: %w", err)
+			return nil, false, "", "", 0, fmt.Errorf("write fallback output: %w", err)
 		}
 	}
 
@@ -1034,21 +1104,21 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		if exists, _ := e.store.Exists(ctx, outputPath); !exists {
 			summary := fmt.Sprintf("Implementation complete.\n\nRationale: %s", finishRationale)
 			if err := e.store.Write(ctx, outputPath, []byte(summary)); err != nil {
-				return nil, false, "", 0, fmt.Errorf("write implementation summary: %w", err)
+				return nil, false, "", "", 0, fmt.Errorf("write implementation summary: %w", err)
 			}
 		}
 	}
 
 	output, _ := e.store.Read(ctx, outputPath)
 	if phase != "implementation" && !outputWritten && finalText == "" && len(output) == 0 {
-		return nil, false, "", 0, fmt.Errorf("loop %d produced empty output", loop)
+		return nil, false, "", "", 0, fmt.Errorf("loop %d produced empty output", loop)
 	}
 
 	if finishDone == nil {
-		return nil, false, "", 0, fmt.Errorf("loop %d did not call finish_task", loop)
+		return nil, false, "", "", 0, fmt.Errorf("loop %d did not call finish_task", loop)
 	}
 
-	return output, *finishDone, finishRationale, loopTokens, nil
+	return output, *finishDone, finishRationale, finishEffort, loopTokens, nil
 }
 
 // buildAgent constructs the ADK agent for a phase.
@@ -1697,4 +1767,18 @@ func schemasFromTools(toolList []tool.Tool) ([]map[string]any, error) {
 		})
 	}
 	return out, nil
+}
+
+func (e *Engine) observeEscalation(ctx context.Context, projectName string, issueID int64, phase, errMsg string) {
+	if e.escalator == nil {
+		return
+	}
+	when := notify.ClassifyFailure(errMsg)
+	e.escalator.Observe(ctx, notify.Event{
+		When:    when,
+		Project: projectName,
+		IssueID: issueID,
+		Phase:   phase,
+		Message: errMsg,
+	})
 }

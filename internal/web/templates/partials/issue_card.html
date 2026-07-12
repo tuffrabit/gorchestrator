@@ -54,6 +54,12 @@
       <span>tokens={{.Issue.TokenTotal}}</span>
       <span>updated={{$issue.UpdatedAt}}</span>
     </div>
+    {{if .Issue.HoldReason}}
+    <div class="hold-reason" role="status">
+      <span class="hold-chip">hold</span>
+      <span class="hold-text">{{.Issue.HoldReason}}</span>
+    </div>
+    {{end}}
     {{if $issue.Description}}
     <div class="issue-description">
       <div class="issue-description-label">Description</div>
@@ -102,6 +108,15 @@
       {{/* Single named field: FormData omits submit buttons, so decision must live here. */}}
       <input type="hidden" name="decision" value="">
       <textarea name="feedback" placeholder="why? (context for fail/retry — injected into the next attempt)"></textarea>
+      {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
+      <div class="budget-override" title="Optional: raise provider session ceiling after budget_exceeded">
+        <label class="card-meta">Budget raise (optional)</label>
+        <div class="budget-override-row">
+          <input type="text" name="budget_provider" placeholder="provider (e.g. openai)" autocomplete="off">
+          <input type="number" name="budget_ceiling" placeholder="token ceiling" min="1" step="1">
+        </div>
+      </div>
+      {{end}}
       <div class="adjudicate-actions">
         <button class="btn btn-pass" type="submit"
           onclick="this.form.decision.value='pass'">Pass</button>
@@ -112,6 +127,9 @@
       </div>
       {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
       <p class="card-meta">Failed/cancelled issues can be retried with better feedback.</p>
+      {{end}}
+      {{if and (eq $issue.Status "waiting_human") .Issue.HoldReason}}
+      <p class="card-meta">Held for confirmation — Pass continues the pipeline; Fail closes the issue.</p>
       {{end}}
     </form>
       {{else if eq $issue.Status "done"}}
