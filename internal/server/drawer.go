@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark"
+	gmhtml "github.com/yuin/goldmark/renderer/html"
 
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
@@ -23,6 +24,13 @@ const (
 	phasePlan            = "plan"
 	phaseImplementation  = "implementation"
 	drawerPayloadCap     = 256 * 1024
+)
+
+// drawerMarkdown renders agent output.md for the artifact drawer.
+// WithUnsafe keeps intentional raw HTML in free-form agent artifacts (HTML
+// pages, embedded tables, etc.); goldmark's default strips those to comments.
+var drawerMarkdown = goldmark.New(
+	goldmark.WithRendererOptions(gmhtml.WithUnsafe()),
 )
 
 var knownPhases = []string{phaseResearch, phasePlan, phaseImplementation}
@@ -144,7 +152,7 @@ func (s *Server) drawerPhaseOutput(ctx context.Context, view *orchestrator.Issue
 	}
 	if strings.HasSuffix(outPath, ".md") {
 		var buf bytes.Buffer
-		if err := goldmark.Convert(out, &buf); err == nil {
+		if err := drawerMarkdown.Convert(out, &buf); err == nil {
 			return "", template.HTML(buf.String()), nil
 		}
 	}

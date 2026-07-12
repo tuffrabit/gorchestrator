@@ -148,6 +148,53 @@ func TestDrawer_PhaseScopedArtifacts(t *testing.T) {
 	}
 }
 
+func TestDrawer_RawHTMLOutputPreserved(t *testing.T) {
+	// Agents may write free-form HTML into output.md (e.g. a single-page demo).
+	// goldmark defaults strip raw HTML to "<!-- raw HTML omitted -->", which
+	// leaves the Output tab blank. Drawer rendering must preserve it.
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	h := srv.Handler()
+
+	issue, err := eng.SubmitIssue(context.Background(), orchestrator.RunOptions{
+		ProjectName: "acme",
+		IssueTitle:  "html output",
+		DryRun:      true,
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	htmlOut := "<!DOCTYPE html>\n<html><body><h1>ASCII Bunny</h1><pre>/\\_/\\</pre></body></html>\n"
+	writePhaseArtifacts(t, eng, issue.ProjectID, issue.ID, "research", "done", htmlOut)
+
+	req := httptest.NewRequest(http.MethodGet, "/partials/issues/"+itoa(issue.ID)+"/drawer?tab=output&phase=research", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "raw HTML omitted") {
+		t.Fatalf("raw HTML was stripped from drawer output: %s", body)
+	}
+	if !strings.Contains(body, "ASCII Bunny") {
+		t.Fatalf("expected HTML body content in drawer: %s", body)
+	}
+	if !strings.Contains(body, "<h1>") && !strings.Contains(body, "<h1") {
+		// WithUnsafe should keep the tag; template.HTML must not re-escape it.
+		t.Fatalf("expected unescaped HTML heading in drawer: %s", body)
+	}
+}
+
 func TestDrawer_WorkspaceFileDiff(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
