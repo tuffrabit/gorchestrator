@@ -14,5 +14,7 @@
 - app start needs to look for projects in db that are no longer in config and disable them, which means we need to implement a project is_active flag or something
 - introduce concept in config of "resource constrained inference". where the orchestrator only allows one agent to run at a time. perhaps the orchestrator could even unload and load different models via api call to local inference server to facilitate different agent flavors in between agent runs. this would likely require another app that servces as a llama.cpp or vllm proxy to manage the model loading and unloading.
 - ~~"no issues yet" ui remains after creating a new issue~~
-- per agent/provider token limit
+- ~~per agent/provider token limit~~
 - ~~output and result tabs empty~~
+- "build" system that embeds binary version
+
