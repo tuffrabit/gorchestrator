@@ -76,7 +76,7 @@ See `configs/config.example.yaml` for the full surface.
 | `server` | `listen`, `max_concurrent_issues`, `shutdown_timeout`, `public_base_url` |
 | `auth` | `mode: local \| oidc`, local password env, OIDC issuer/client, bootstrap admin emails |
 | `notifications.adapters` | Optional names of JSON-RPC adapters with `port: notification` (Slack webhook, SMTP email) |
-| `agents.*` | Global per-role adjudicator, max_attempts, model overrides (overlaid by project flavors) |
+| `agents.*` | Global per-role adjudicator, max_attempts, model overrides, `single_shot` (overlaid by project flavors) |
 
 ### OpenAI-compatible local / remote inference
 
@@ -90,6 +90,34 @@ default_model:
 ```
 
 Tool schemas are sent as standard JSON Schema (lowercase types) so strict servers such as llama.cpp accept them.
+
+### Single-shot phases (slow local models)
+
+For models too slow for a multi-round tool loop (e.g. a disk-streamed MoE behind
+llama-swap), researcher and planner flavors can run **single-shot**: one no-tools
+completion whose reply text becomes the phase output.
+
+```yaml
+flavors:
+  deepseek:
+    single_shot: true                # bypass the tool loop entirely
+    single_shot_context_bytes: 32768 # repo digest stuffed into the prompt
+    # context_files: [main.go, ...]  # or pin exact files instead of the digest
+    max_attempts: 1
+    max_tokens: 1024                 # always cap generation on slow models
+    model: { provider: openai, model: deepseek-v4-flash, timeout: 24h }
+```
+
+- The digest is built from the issue's source snapshot (gitignore-filtered,
+  binaries skipped, byte-capped with a truncation marker).
+- There is no `finish_task`, so planner `effort` defaults to `high` and the
+  pipeline always holds for a human decision before implementation.
+- Self-adjudication always passes single-shot output; a human `retry` re-runs the
+  whole generation (with feedback injected). `single_shot` on the implementer is
+  rejected at config load.
+- `model.timeout` covers the full request including llama-swap's model-swap wait;
+  it is validated at config load (a typo like `6hours` fails instead of silently
+  falling back to 60s).
 
 ### Auth modes
 

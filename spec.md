@@ -487,6 +487,7 @@ Agent types are **structs in the Go codebase**, not generic configurations. Each
 - Core tool subset (`tools` allowlist; empty = all default for type)
 - MCP server allowlist (`mcp_servers`)
 - Boundary configuration: `adjudicator`, `max_attempts`, `loops`, `rubric` (§9.1)
+- Single-shot execution (`single_shot`, researcher/planner only): one no-tools completion whose reply text is the phase output; repo context is pre-stuffed via `single_shot_context_bytes` (auto digest budget) or `context_files` (explicit paths). No `finish_task` ⇒ planner effort defaults to `high` (human gate before implementation). Design: `gorchestrator-local-model-swap-plan.md`
 
 #### 8.2.2 Named flavors (per project, per core type)
 

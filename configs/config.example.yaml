@@ -28,6 +28,12 @@ tools:
 #     # system_prompt_append: "extra instructions..."
 #     # tools: [read_file, list_directory, grep_search, write_output]
 #     # mcp_servers: []
+#     # single_shot: true                 # researcher/planner only: one no-tools call;
+#     #                                   # the reply text is the phase output (no
+#     #                                   # finish_task; planner effort defaults to
+#     #                                   # high → always human-gates before implement)
+#     # single_shot_context_bytes: 32768  # repo digest budget pre-stuffed into the prompt
+#     # context_files: [main.go, ...]     # pin exact files instead of the auto digest
 #     # (token_budget on agents removed — use top-level providers: map)
 #     model:
 #       provider: openai

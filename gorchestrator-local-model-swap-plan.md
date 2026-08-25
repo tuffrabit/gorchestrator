@@ -213,6 +213,9 @@ All line refs in this document checked out exactly. Sharpenings:
 
 ## Implementation plan (2026-08-25)
 
+**Status: steps 1-3 landed** (config schema + validation, repo digest,
+single-shot execution, dryrun support, tests). Steps 4-5 pending.
+
 ### Step 0 — Pre-flight, no code
 
 - llama-swap: config with both models, smoke-test model-field routing, swap-wait
