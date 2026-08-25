@@ -180,12 +180,12 @@ func (stopWalk) Error() string { return "max results reached" }
 
 type gitignoreFrame struct {
 	dir     string
-	matcher *gitignoreMatcher
+	matcher *GitignoreMatcher
 }
 
 func ignoredByGitignore(stack []gitignoreFrame, rel string, isDir bool) bool {
 	for _, frame := range stack {
-		if frame.matcher.match(rel, isDir) {
+		if frame.matcher.Match(rel, isDir) {
 			return true
 		}
 	}

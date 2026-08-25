@@ -582,6 +582,19 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			return fmt.Errorf("build input for %s: %w", phaseName, err)
 		}
 
+		// Single-shot phases get no tools, so pre-stuff repo context into the
+		// prompt. The digest is constant per issue (the source snapshot is
+		// frozen at issue creation) and survives retry attempts via baseInput.
+		if phaseCfg.SingleShot != nil && *phaseCfg.SingleShot {
+			digest, err := e.buildRepoDigest(ctx, project.ID, issue.ID, phaseCfg)
+			if err != nil {
+				return fmt.Errorf("build repo digest for %s: %w", phaseName, err)
+			}
+			if digest != "" {
+				baseInput += "\n\n" + digest
+			}
+		}
+
 		result, err := e.runPhase(ctx, project, issue, phaseName, phaseCfg, baseInput, dryRun)
 		if err != nil {
 			return fmt.Errorf("run phase %s: %w", phaseName, err)
@@ -881,9 +894,51 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 	return &PhaseResult{Status: "failed", Error: "max attempts exceeded"}, nil
 }
 
+// buildPhaseModel constructs the phase LLM from the merged agent config and
+// wraps it with the provider session budget (rehydrated from events.jsonl).
+func (e *Engine) buildPhaseModel(ctx context.Context, cfg config.AgentConfig, issueID int64, phase, eventsPath string, dryRun bool) (adkmodel.LLM, error) {
+	modelCfg := llm.Config{
+		Provider:    cfg.Model.Provider,
+		Model:       cfg.Model.Model,
+		APIKeyEnv:   cfg.Model.APIKeyEnv,
+		BaseURL:     cfg.Model.BaseURL,
+		Timeout:     modelTimeout(cfg.Model),
+		Temperature: cfg.Temperature,
+		MaxTokens:   cfg.MaxTokens,
+	}
+	if dryRun {
+		modelCfg.Provider = "dryrun"
+		modelCfg.Model = "dryrun"
+	}
+	llmModel, err := llm.New(ctx, modelCfg)
+	if err != nil {
+		return nil, fmt.Errorf("build model: %w", err)
+	}
+	// Provider session budget: per-phase ceiling, rehydrate from events.jsonl.
+	providerName := modelCfg.Provider
+	var issueRow *sqlite.Issue
+	if issueID > 0 {
+		issueRow, _ = e.issues.Get(issueID)
+	}
+	var projectRow *sqlite.Project
+	if issueRow != nil {
+		projectRow, _ = e.projects.Get(issueRow.ProjectID)
+	}
+	return e.wrapModelWithBudget(ctx, issueRow, projectRow, phase, providerName, eventsPath, dryRun, llmModel), nil
+}
+
 // runAgentLoop runs one loop of an agent and returns the loop output, the
 // finish_task done flag, rationale, effort tag (planner), token count, and any error.
 func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, allowlist []string, attempt, loop int, runID int64, dryRun bool) ([]byte, bool, string, string, int, error) {
+	// Single-shot phases skip tools/MCP and the ADK runner entirely.
+	if cfg.SingleShot != nil && *cfg.SingleShot {
+		llmModel, err := e.buildPhaseModel(ctx, cfg, issueID, phase, eventsPath, dryRun)
+		if err != nil {
+			return nil, false, "", "", 0, err
+		}
+		return e.runSingleShot(ctx, llmModel, phase, cfg, userContent, outputPath, eventsPath, attempt, loop)
+	}
+
 	outputWritten := false
 	issueDir := storage.IssueDir(projectID, issueID)
 	bt := &tools.BoundTools{
@@ -936,34 +991,10 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		registry = append(registry, mcpTools...)
 	}
 
-	modelCfg := llm.Config{
-		Provider:    cfg.Model.Provider,
-		Model:       cfg.Model.Model,
-		APIKeyEnv:   cfg.Model.APIKeyEnv,
-		BaseURL:     cfg.Model.BaseURL,
-		Timeout:     modelTimeout(cfg.Model),
-		Temperature: cfg.Temperature,
-		MaxTokens:   cfg.MaxTokens,
-	}
-	if dryRun {
-		modelCfg.Provider = "dryrun"
-		modelCfg.Model = "dryrun"
-	}
-	llmModel, err := llm.New(ctx, modelCfg)
+	llmModel, err := e.buildPhaseModel(ctx, cfg, issueID, phase, eventsPath, dryRun)
 	if err != nil {
-		return nil, false, "", "", 0, fmt.Errorf("build model: %w", err)
+		return nil, false, "", "", 0, err
 	}
-	// Provider session budget: per-phase ceiling, rehydrate from events.jsonl.
-	providerName := modelCfg.Provider
-	var issueRow *sqlite.Issue
-	if issueID > 0 {
-		issueRow, _ = e.issues.Get(issueID)
-	}
-	var projectRow *sqlite.Project
-	if issueRow != nil {
-		projectRow, _ = e.projects.Get(issueRow.ProjectID)
-	}
-	llmModel = e.wrapModelWithBudget(ctx, issueRow, projectRow, phase, providerName, eventsPath, dryRun, llmModel)
 
 	agentInst, err := e.buildAgent(phase, cfg, llmModel, registry)
 	if err != nil {

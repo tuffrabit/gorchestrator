@@ -2,13 +2,15 @@ package tools
 
 import (
 	"bufio"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
-// gitignoreMatcher holds patterns loaded from a .gitignore file.
-type gitignoreMatcher struct {
+// GitignoreMatcher holds patterns loaded from a .gitignore file.
+type GitignoreMatcher struct {
 	patterns []gitignorePattern
 }
 
@@ -18,20 +20,10 @@ type gitignorePattern struct {
 	dirOnly bool
 }
 
-// loadGitignore reads .gitignore patterns from path. It returns a nil matcher and
-// no error if the file does not exist.
-func loadGitignore(path string) (*gitignoreMatcher, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-
-	m := &gitignoreMatcher{}
-	scanner := bufio.NewScanner(f)
+// ParseGitignore parses .gitignore content from r.
+func ParseGitignore(r io.Reader) (*GitignoreMatcher, error) {
+	m := &GitignoreMatcher{}
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -40,7 +32,7 @@ func loadGitignore(path string) (*gitignoreMatcher, error) {
 		p := gitignorePattern{raw: line}
 		if strings.HasPrefix(line, "!") {
 			p.negated = true
-			p.raw = strings.TrimPrefix(line, "!")
+			p.raw = strings.TrimPrefix(p.raw, "!")
 		}
 		if strings.HasSuffix(p.raw, "/") {
 			p.dirOnly = true
@@ -51,9 +43,23 @@ func loadGitignore(path string) (*gitignoreMatcher, error) {
 	return m, scanner.Err()
 }
 
-// match reports whether rel (relative to the .gitignore file's directory) should
+// loadGitignore reads .gitignore patterns from path. It returns a nil matcher and
+// no error if the file does not exist.
+func loadGitignore(path string) (*GitignoreMatcher, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	return ParseGitignore(f)
+}
+
+// Match reports whether rel (relative to the .gitignore file's directory) should
 // be ignored. isDir indicates whether rel refers to a directory.
-func (m *gitignoreMatcher) match(rel string, isDir bool) bool {
+func (m *GitignoreMatcher) Match(rel string, isDir bool) bool {
 	if m == nil {
 		return false
 	}
@@ -67,6 +73,21 @@ func (m *gitignoreMatcher) match(rel string, isDir bool) bool {
 		}
 	}
 	return matched
+}
+
+// MatchFile reports whether the file at rel is ignored, also considering
+// dirOnly patterns against its parent directories (e.g. "node_modules/"
+// ignores "node_modules/big.js").
+func (m *GitignoreMatcher) MatchFile(rel string) bool {
+	if m.Match(rel, false) {
+		return true
+	}
+	for dir := path.Dir(rel); dir != "." && dir != "/" && dir != ""; dir = path.Dir(dir) {
+		if m.Match(dir, true) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchGitignorePattern implements a subset of .gitignore glob semantics sufficient

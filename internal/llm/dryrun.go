@@ -62,6 +62,26 @@ func (m *DryRunModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 			return
 		}
 
+		// Single-shot (no tools declared): reply with plain text instead of a
+		// tool call.
+		if len(functionDeclarations(req.Config)) == 0 {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{
+						Text: fmt.Sprintf("## Dry-run single-shot output\n\nPrompt summary: %s\n\nThis is a canned single-shot phase output for testing.", truncate(prompt, 200)),
+					}},
+				},
+				TurnComplete: true,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+					PromptTokenCount:     8,
+					CandidatesTokenCount: 8,
+					TotalTokenCount:      16,
+				},
+			}, nil)
+			return
+		}
+
 		hasFuncResponse := hasFunctionResponse(req)
 		if hasFuncResponse {
 			// Second turn: finish the task.

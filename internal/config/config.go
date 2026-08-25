@@ -486,7 +486,7 @@ func normalizeProjects(cfg *Config, home string) error {
 // project flavor configs that would otherwise be silently degraded at runtime
 // (e.g. a typo'd model.timeout falling back to 60s in modelTimeout).
 func validateAgentOverrides(cfg *Config) error {
-	check := func(where string, ac AgentConfig) error {
+	check := func(where, agentType string, ac AgentConfig) error {
 		if ac.Model.Timeout != "" {
 			if _, err := time.ParseDuration(ac.Model.Timeout); err != nil {
 				return fmt.Errorf("%s: parse model.timeout: %w", where, err)
@@ -495,10 +495,13 @@ func validateAgentOverrides(cfg *Config) error {
 		if ac.SingleShotContextBytes < 0 {
 			return fmt.Errorf("%s: single_shot_context_bytes must be >= 0, got %d", where, ac.SingleShotContextBytes)
 		}
+		if agentType == "implementer" && ac.SingleShot != nil && *ac.SingleShot {
+			return fmt.Errorf("%s: single_shot is not supported for the implementer (its output is the workspace, not reply text)", where)
+		}
 		return nil
 	}
 	for agentType, ac := range cfg.Agents {
-		if err := check("agents."+agentType, ac); err != nil {
+		if err := check("agents."+agentType, agentType, ac); err != nil {
 			return err
 		}
 	}
@@ -506,7 +509,7 @@ func validateAgentOverrides(cfg *Config) error {
 		for agentType, pac := range pc.Agents {
 			for flavor, ac := range pac.Flavors {
 				where := fmt.Sprintf("projects.%s.agents.%s.flavors.%s", projName, agentType, flavor)
-				if err := check(where, ac); err != nil {
+				if err := check(where, agentType, ac); err != nil {
 					return err
 				}
 			}
@@ -830,6 +833,57 @@ func defaultAgentConfig(name string, defaultModel ModelConfig) AgentConfig {
 		cfg.SystemPrompt = defaultImplementerPrompt()
 	}
 	return cfg
+}
+
+// DefaultSystemPrompt returns the built-in (pre-merge) system prompt for an
+// agent type ("researcher", "planner", "implementer"), or "" for unknown types.
+// The orchestrator compares merged configs against this to tell a user override
+// apart from the baked-in default.
+func DefaultSystemPrompt(agentType string) string {
+	switch agentType {
+	case "researcher":
+		return defaultResearcherPrompt()
+	case "planner":
+		return defaultPlannerPrompt()
+	case "implementer":
+		return defaultImplementerPrompt()
+	}
+	return ""
+}
+
+// DefaultSingleShotPrompt returns the built-in system prompt for single-shot
+// (no-tools) execution of an agent type, or "" for unknown or unsupported
+// types. Single-shot is supported for researcher and planner only.
+func DefaultSingleShotPrompt(agentType string) string {
+	switch agentType {
+	case "researcher":
+		return singleShotResearcherPrompt()
+	case "planner":
+		return singleShotPlannerPrompt()
+	}
+	return ""
+}
+
+func singleShotResearcherPrompt() string {
+	return `You are a Researcher agent investigating a software engineering issue. You have NO tools: everything you know about the repository is in the user's message (issue details and a source snapshot digest).
+
+Produce a concise findings document for the next phase (Planner):
+- What the issue asks for, restated precisely.
+- The relevant files, symbols, and current behavior found in the provided source context.
+- Gaps or ambiguities the Planner must account for.
+
+Reply with the complete findings document as plain markdown text. Do not ask questions; work only from the provided context.`
+}
+
+func singleShotPlannerPrompt() string {
+	return `You are a Planner agent. The user's message contains the issue, the Researcher's accepted findings, and a source snapshot digest. You have NO tools.
+
+Produce a concrete, self-contained implementation plan for the Implementer, who will NOT see this conversation or the research output. Include:
+- The exact files to create or modify, with the specific changes in each.
+- Tests to add or update.
+- Anything the Implementer needs copied verbatim (signatures, constants, snippets) — never refer to context they cannot see.
+
+Reply with the complete plan as plain markdown text.`
 }
 
 func defaultResearcherPrompt() string {

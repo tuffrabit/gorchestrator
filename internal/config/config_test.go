@@ -161,3 +161,44 @@ projects:
 		t.Fatalf("timeout = %q", fl.Model.Timeout)
 	}
 }
+
+func TestLoadRejectsImplementerSingleShot(t *testing.T) {
+	_, err := loadFromString(t, `
+projects:
+  proj:
+    agents:
+      implementer:
+        flavors:
+          bad:
+            single_shot: true
+`)
+	if err == nil || !strings.Contains(err.Error(), "single_shot is not supported for the implementer") {
+		t.Fatalf("want implementer single_shot error, got %v", err)
+	}
+}
+
+func TestDefaultPromptAccessors(t *testing.T) {
+	for _, agentType := range []string{"researcher", "planner", "implementer"} {
+		if DefaultSystemPrompt(agentType) == "" {
+			t.Fatalf("DefaultSystemPrompt(%q) is empty", agentType)
+		}
+	}
+	if DefaultSystemPrompt("nope") != "" {
+		t.Fatal("unknown agent type should have no default prompt")
+	}
+	if DefaultSingleShotPrompt("researcher") == "" || DefaultSingleShotPrompt("planner") == "" {
+		t.Fatal("researcher and planner need single-shot defaults")
+	}
+	if DefaultSingleShotPrompt("implementer") != "" {
+		t.Fatal("implementer must not have a single-shot default")
+	}
+	// Single-shot prompts must not reference tools that don't exist there.
+	for _, agentType := range []string{"researcher", "planner"} {
+		p := DefaultSingleShotPrompt(agentType)
+		for _, toolName := range []string{"write_output", "read_file", "finish_task", "grep_search"} {
+			if strings.Contains(p, toolName) {
+				t.Fatalf("single-shot %s prompt references tool %q", agentType, toolName)
+			}
+		}
+	}
+}
