@@ -55,6 +55,15 @@ type AgentConfig struct {
 	MaxAttempts        int         `yaml:"max_attempts" json:"max_attempts,omitempty"`
 	Loops              int         `yaml:"loops" json:"loops,omitempty"`
 	Rubric             string      `yaml:"rubric" json:"rubric,omitempty"`
+	// SingleShot bypasses the tool-call loop: one GenerateContent call, the reply
+	// text is the phase output. Pointer for tri-state merge (nil = inherit).
+	SingleShot *bool `yaml:"single_shot" json:"single_shot,omitempty"`
+	// SingleShotContextBytes caps the repo digest pre-stuffed into a single-shot
+	// prompt; 0 = no digest unless ContextFiles is set (then a 64 KiB default).
+	SingleShotContextBytes int `yaml:"single_shot_context_bytes" json:"single_shot_context_bytes,omitempty"`
+	// ContextFiles pins exact repo-relative paths for pre-stuffing instead of the
+	// auto digest (still bounded by SingleShotContextBytes).
+	ContextFiles []string `yaml:"context_files" json:"context_files,omitempty"`
 }
 
 // CoreAgentTypes are the only agent type keys allowed under projects.*.agents.
@@ -417,6 +426,9 @@ func LoadFrom(path string) (*Config, error) {
 	if err := normalizeProjects(&cfg, home); err != nil {
 		return nil, err
 	}
+	if err := validateAgentOverrides(&cfg); err != nil {
+		return nil, err
+	}
 	if err := rejectAgentTokenBudget(data); err != nil {
 		return nil, err
 	}
@@ -466,6 +478,39 @@ func normalizeProjects(cfg *Config, home string) error {
 			}
 		}
 		cfg.Projects[name] = pc
+	}
+	return nil
+}
+
+// validateAgentOverrides rejects malformed fields in global agents.<type> and
+// project flavor configs that would otherwise be silently degraded at runtime
+// (e.g. a typo'd model.timeout falling back to 60s in modelTimeout).
+func validateAgentOverrides(cfg *Config) error {
+	check := func(where string, ac AgentConfig) error {
+		if ac.Model.Timeout != "" {
+			if _, err := time.ParseDuration(ac.Model.Timeout); err != nil {
+				return fmt.Errorf("%s: parse model.timeout: %w", where, err)
+			}
+		}
+		if ac.SingleShotContextBytes < 0 {
+			return fmt.Errorf("%s: single_shot_context_bytes must be >= 0, got %d", where, ac.SingleShotContextBytes)
+		}
+		return nil
+	}
+	for agentType, ac := range cfg.Agents {
+		if err := check("agents."+agentType, ac); err != nil {
+			return err
+		}
+	}
+	for projName, pc := range cfg.Projects {
+		for agentType, pac := range pc.Agents {
+			for flavor, ac := range pac.Flavors {
+				where := fmt.Sprintf("projects.%s.agents.%s.flavors.%s", projName, agentType, flavor)
+				if err := check(where, ac); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -748,6 +793,16 @@ func MergeAgent(base, overlay AgentConfig) AgentConfig {
 	}
 	if overlay.Rubric != "" {
 		out.Rubric = overlay.Rubric
+	}
+	if overlay.SingleShot != nil {
+		s := *overlay.SingleShot
+		out.SingleShot = &s
+	}
+	if overlay.SingleShotContextBytes > 0 {
+		out.SingleShotContextBytes = overlay.SingleShotContextBytes
+	}
+	if len(overlay.ContextFiles) > 0 {
+		out.ContextFiles = append([]string(nil), overlay.ContextFiles...)
 	}
 	return out
 }

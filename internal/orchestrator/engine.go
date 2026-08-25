@@ -1703,6 +1703,7 @@ func modelTimeout(cfg config.ModelConfig) time.Duration {
 	}
 	d, err := time.ParseDuration(cfg.Timeout)
 	if err != nil {
+		log.Printf("model timeout %q unparseable (%v); falling back to 60s", cfg.Timeout, err)
 		return 60 * time.Second
 	}
 	return d
