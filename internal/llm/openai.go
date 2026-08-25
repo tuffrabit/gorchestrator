@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"time"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 // OpenAIModel is an ADK model.LLM that calls the OpenAI chat completions API

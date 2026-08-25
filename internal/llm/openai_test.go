@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 func TestOpenAIModel_GenerateContent(t *testing.T) {

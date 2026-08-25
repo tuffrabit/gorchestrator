@@ -66,17 +66,17 @@ type ClientOptions struct {
 
 // Client manages a JSON-RPC stdio adapter process.
 type Client struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   *bufio.Scanner
-	stderr   io.Reader
-	nextID   int64
-	pending  map[int64]chan *Response
-	mu       sync.Mutex
-	done     chan struct{}
-	scanErr  atomic.Value
-	notifCh  chan Notification
-	closed   atomic.Bool
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Scanner
+	stderr  io.Reader
+	nextID  int64
+	pending map[int64]chan *Response
+	mu      sync.Mutex
+	done    chan struct{}
+	scanErr atomic.Value
+	notifCh chan Notification
+	closed  atomic.Bool
 }
 
 // NewClient spawns an external adapter binary and performs the initialize handshake.

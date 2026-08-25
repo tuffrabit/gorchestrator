@@ -1,11 +1,11 @@
 package agents
 
 import (
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/genai"
 )
 
 // finishTaskSchema is the output schema for researcher and implementer task mode.

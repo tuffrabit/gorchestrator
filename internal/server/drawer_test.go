@@ -332,4 +332,3 @@ func TestNormalizePhase(t *testing.T) {
 		t.Fatal("nope")
 	}
 }
-

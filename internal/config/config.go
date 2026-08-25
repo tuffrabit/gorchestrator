@@ -77,13 +77,13 @@ type ProjectAgentConfig struct {
 
 // ProjectGitConfig is git workspace settings for a project (YAML + synced config_json).
 type ProjectGitConfig struct {
-	RepoURL     string          `yaml:"repo_url" json:"repo_url,omitempty"`
-	BaseBranch  string          `yaml:"base_branch" json:"base_branch,omitempty"`
-	Push        bool            `yaml:"push" json:"push,omitempty"`
-	CreatePR    bool            `yaml:"create_pr" json:"create_pr,omitempty"`
-	AuthorName  string          `yaml:"author_name" json:"author_name,omitempty"`
-	AuthorEmail string          `yaml:"author_email" json:"author_email,omitempty"`
-	Auth        ProjectGitAuth  `yaml:"auth" json:"auth,omitempty"`
+	RepoURL     string         `yaml:"repo_url" json:"repo_url,omitempty"`
+	BaseBranch  string         `yaml:"base_branch" json:"base_branch,omitempty"`
+	Push        bool           `yaml:"push" json:"push,omitempty"`
+	CreatePR    bool           `yaml:"create_pr" json:"create_pr,omitempty"`
+	AuthorName  string         `yaml:"author_name" json:"author_name,omitempty"`
+	AuthorEmail string         `yaml:"author_email" json:"author_email,omitempty"`
+	Auth        ProjectGitAuth `yaml:"auth" json:"auth,omitempty"`
 }
 
 // ProjectGitAuth selects credential mode (credentials live in the environment).
@@ -237,10 +237,10 @@ type ServerConfig struct {
 
 // OIDCConfig configures OpenID Connect authentication.
 type OIDCConfig struct {
-	IssuerURL      string   `yaml:"issuer_url"`
-	ClientID       string   `yaml:"client_id"`
-	ClientSecretEnv string  `yaml:"client_secret_env"`
-	Scopes         []string `yaml:"scopes"`
+	IssuerURL       string   `yaml:"issuer_url"`
+	ClientID        string   `yaml:"client_id"`
+	ClientSecretEnv string   `yaml:"client_secret_env"`
+	Scopes          []string `yaml:"scopes"`
 }
 
 // AuthConfig configures authentication for the serve daemon.
@@ -266,8 +266,8 @@ type NotificationsConfig struct {
 type MCPToolConstraint struct {
 	// Type: arg_prefix | arg_deny_substring | url_allowlist
 	Type   string   `yaml:"type" json:"type"`
-	Arg    string   `yaml:"arg" json:"arg"`                             // argument name in the tool args object
-	Prefix string   `yaml:"prefix,omitempty" json:"prefix,omitempty"`   // for arg_prefix
+	Arg    string   `yaml:"arg" json:"arg"`                           // argument name in the tool args object
+	Prefix string   `yaml:"prefix,omitempty" json:"prefix,omitempty"` // for arg_prefix
 	Values []string `yaml:"values,omitempty" json:"values,omitempty"` // deny substrings (arg_deny_substring)
 	Hosts  []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`   // allowed hosts for url_allowlist
 }
@@ -520,7 +520,6 @@ func validateAgentOverrides(cfg *Config) error {
 
 // rejectAgentTokenBudget fails config load if agents or flavors still set token_budget
 // (removed in Phase 5 — budgets are provider-scoped only).
-
 
 func validateMCPServers(cfg *Config) error {
 	for i, s := range cfg.MCPServers {

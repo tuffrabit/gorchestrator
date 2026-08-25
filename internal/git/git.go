@@ -24,12 +24,12 @@ const (
 
 // Config is project-level git configuration (from projects.config_json).
 type Config struct {
-	RepoURL     string   `json:"repo_url"`
-	BaseBranch  string   `json:"base_branch"`
-	Push        bool     `json:"push"`
-	CreatePR    bool     `json:"create_pr"`
-	AuthorName  string   `json:"author_name"`
-	AuthorEmail string   `json:"author_email"`
+	RepoURL     string     `json:"repo_url"`
+	BaseBranch  string     `json:"base_branch"`
+	Push        bool       `json:"push"`
+	CreatePR    bool       `json:"create_pr"`
+	AuthorName  string     `json:"author_name"`
+	AuthorEmail string     `json:"author_email"`
 	Auth        AuthConfig `json:"auth"`
 }
 

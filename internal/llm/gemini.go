@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/genai"
 )
 
 // NewGeminiModel creates an ADK Gemini model.LLM from configuration.

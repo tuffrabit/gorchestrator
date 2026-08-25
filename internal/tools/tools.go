@@ -22,14 +22,14 @@ type BoundTools struct {
 	// ".", "source", …). Typically the issue directory for research/plan, or
 	// the implementer workspace for implementation. Full storage keys under
 	// Allowlist still work.
-	BasePath          string
-	OutputPath        string
-	WorkspacePath     string
+	BasePath      string
+	OutputPath    string
+	WorkspacePath string
 	// WorkspaceHostPath is the absolute host path of the implementer workspace
 	// (for container bind-mounts). Empty when not an implementer run.
 	WorkspaceHostPath string
 	// Test holds project test config for run_test (implementer only).
-	Test *TestConfig
+	Test             *TestConfig
 	ReadFileMaxBytes int
 	ReadFileMaxLines int
 	// OutputWritten is set to true by the write_output tool when it executes.

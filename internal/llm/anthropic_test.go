@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 func TestAnthropicModel_Translation(t *testing.T) {

@@ -13,12 +13,12 @@ import (
 // ReadFileArgs are the arguments for the read_file tool.
 //
 // Two explicit modes:
-//   1. Whole-file: leave Offset and Limit at zero. The file is returned subject
-//      to a configurable cap (default 64KB / 2,000 lines, whichever is hit first).
-//      If truncated, Truncated is true and TotalLines holds the full line count.
-//   2. Surgical: set Offset (1-based line) and Limit (line count) to read exactly
-//      that range. This is the intended follow-up to grep_search, which returns
-//      file paths and line numbers.
+//  1. Whole-file: leave Offset and Limit at zero. The file is returned subject
+//     to a configurable cap (default 64KB / 2,000 lines, whichever is hit first).
+//     If truncated, Truncated is true and TotalLines holds the full line count.
+//  2. Surgical: set Offset (1-based line) and Limit (line count) to read exactly
+//     that range. This is the intended follow-up to grep_search, which returns
+//     file paths and line numbers.
 type ReadFileArgs struct {
 	Path string `json:"path" jsonschema:"File path relative to the issue root (e.g. source/main.go) or a full allowlisted storage key"`
 	// Offset/Limit are optional (omit for whole-file mode). omitempty keeps them

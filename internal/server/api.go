@@ -18,10 +18,10 @@ import (
 type submitIssueRequest struct {
 	Project      string            `json:"project"`
 	Title        string            `json:"title"`
-	Body         string            `json:"body"`         // optional description (trigger/API name)
-	Description  string            `json:"description"`  // alias for body
-	Source       string            `json:"source"`       // rejected if set
-	SourcePath   string            `json:"source_path"`  // rejected if set
+	Body         string            `json:"body"`        // optional description (trigger/API name)
+	Description  string            `json:"description"` // alias for body
+	Source       string            `json:"source"`      // rejected if set
+	SourcePath   string            `json:"source_path"` // rejected if set
 	DryRun       bool              `json:"dry_run"`
 	AgentFlavors map[string]string `json:"agent_flavors"`
 }
@@ -79,11 +79,11 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		uid = &u.ID
 	}
 	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
-		"project":       req.Project,
-		"title":         req.Title,
+		"project":         req.Project,
+		"title":           req.Title,
 		"has_description": desc != "",
-		"dry_run":       req.DryRun,
-		"agent_flavors": parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
+		"dry_run":         req.DryRun,
+		"agent_flavors":   parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
 	})
 
 	view, err := s.eng.GetIssue(r.Context(), issue.ID)
@@ -417,20 +417,20 @@ func viewToJSON(v *orchestrator.IssueView) map[string]any {
 
 func issueToJSON(i *sqlite.Issue, project string, tokens, attempt int, phaseStatus string) map[string]any {
 	return map[string]any{
-		"id":             i.ID,
-		"project_id":     i.ProjectID,
-		"project":        project,
-		"title":          i.Title,
-		"description":    i.Description,
-		"status":         i.Status,
-		"current_phase":  i.CurrentPhase,
-		"dry_run":        i.DryRun,
-		"agent_flavors":  parseAgentFlavorsJSON(i.AgentFlavorsJSON),
-		"created_at":     i.CreatedAt,
-		"updated_at":     i.UpdatedAt,
-		"token_total":    tokens,
-		"attempt":        attempt,
-		"phase_status":   phaseStatus,
+		"id":            i.ID,
+		"project_id":    i.ProjectID,
+		"project":       project,
+		"title":         i.Title,
+		"description":   i.Description,
+		"status":        i.Status,
+		"current_phase": i.CurrentPhase,
+		"dry_run":       i.DryRun,
+		"agent_flavors": parseAgentFlavorsJSON(i.AgentFlavorsJSON),
+		"created_at":    i.CreatedAt,
+		"updated_at":    i.UpdatedAt,
+		"token_total":   tokens,
+		"attempt":       attempt,
+		"phase_status":  phaseStatus,
 	}
 }
 

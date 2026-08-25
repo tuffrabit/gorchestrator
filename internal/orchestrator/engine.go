@@ -15,13 +15,13 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	adkmodel "google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/genai"
 
 	"github.com/tuffrabit/gorchestrator/internal/adapters"
 	"github.com/tuffrabit/gorchestrator/internal/adjudication"
@@ -67,16 +67,16 @@ type PhaseTask struct {
 
 // eventRecord is a single line in events.jsonl.
 type eventRecord struct {
-	Type      string         `json:"type"`
-	Timestamp string         `json:"timestamp"`
-	Attempt   int            `json:"attempt"`
-	Loop      int            `json:"loop"`
-	Role      string         `json:"role,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	ToolCall  map[string]any `json:"tool_call,omitempty"`
+	Type       string         `json:"type"`
+	Timestamp  string         `json:"timestamp"`
+	Attempt    int            `json:"attempt"`
+	Loop       int            `json:"loop"`
+	Role       string         `json:"role,omitempty"`
+	Content    string         `json:"content,omitempty"`
+	ToolCall   map[string]any `json:"tool_call,omitempty"`
 	ToolResult map[string]any `json:"tool_result,omitempty"`
-	Tokens    int            `json:"tokens,omitempty"`
-	Error     string         `json:"error,omitempty"`
+	Tokens     int            `json:"tokens,omitempty"`
+	Error      string         `json:"error,omitempty"`
 }
 
 // Engine executes the multi-agent pipeline.
@@ -692,6 +692,11 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 				return nil, fmt.Errorf("build retry context: %w", err)
 			}
 			input += retryCtx
+		} else if fb := e.humanGateFeedback(ctx, project.ID, issue.ID, phase); fb != "" {
+			// Decide on a cleared scope/effort hold leaves feedback at attempt 1
+			// with no result.json; the held phase never ran, so there is no
+			// rejected output — inject the feedback alone into the first run.
+			input += "\n\nHuman gate feedback:\n" + fb
 		}
 
 		outputPath := storage.AttemptOutputPath(project.ID, issue.ID, phase, attempt)
@@ -1289,6 +1294,18 @@ func pathGuide(projectID, issueID int64, phase string, allowlist []string) strin
 	return b.String()
 }
 
+// humanGateFeedback returns feedback a human left when retrying a cleared
+// scope/effort hold: Decide writes attempts/1/feedback.md and removes
+// result.json, so the retry starts at attempt 1 with no rejected output to
+// build retry context from.
+func (e *Engine) humanGateFeedback(ctx context.Context, projectID, issueID int64, phase string) string {
+	data, err := e.store.Read(ctx, storage.FeedbackPath(projectID, issueID, phase, 1))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	return string(data)
+}
+
 // buildRetryContext appends the rejected attempt's output and feedback.
 func (e *Engine) buildRetryContext(ctx context.Context, projectID, issueID int64, phase string, prevAttempt int) (string, error) {
 	outputPath := storage.AttemptOutputPath(projectID, issueID, phase, prevAttempt)
@@ -1787,7 +1804,9 @@ func cappedText(s string) string {
 func schemasFromTools(toolList []tool.Tool) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(toolList))
 	for _, t := range toolList {
-		declarer, ok := t.(interface{ Declaration() *genai.FunctionDeclaration })
+		declarer, ok := t.(interface {
+			Declaration() *genai.FunctionDeclaration
+		})
 		if !ok {
 			continue
 		}

@@ -20,10 +20,10 @@ import (
 )
 
 const (
-	phaseResearch        = "research"
-	phasePlan            = "plan"
-	phaseImplementation  = "implementation"
-	drawerPayloadCap     = 256 * 1024
+	phaseResearch       = "research"
+	phasePlan           = "plan"
+	phaseImplementation = "implementation"
+	drawerPayloadCap    = 256 * 1024
 )
 
 // drawerMarkdown renders agent output.md for the artifact drawer.

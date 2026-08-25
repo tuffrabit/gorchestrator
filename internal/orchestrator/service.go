@@ -47,8 +47,8 @@ type IssueView struct {
 	PhaseStatus string // filesystem result status for current phase
 	// HoldReason is result.json error when the issue/phase is waiting_human
 	// (scope / effort / adjudication rationale). Empty otherwise.
-	HoldReason  string
-	Phases      []PhaseStep // research → plan → implementation strip
+	HoldReason string
+	Phases     []PhaseStep // research → plan → implementation strip
 	// Attachments are basenames under attachments/ (issue context uploads).
 	Attachments []string
 }

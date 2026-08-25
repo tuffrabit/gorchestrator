@@ -8,11 +8,11 @@ func TestResolveAllowedPath_IssueRelative(t *testing.T) {
 	allow := []string{issue, source}
 
 	cases := []struct {
-		name    string
-		in      string
-		base    string
-		want    string
-		wantOK  bool
+		name   string
+		in     string
+		base   string
+		want   string
+		wantOK bool
 	}{
 		{name: "empty uses base", in: "", base: issue, want: issue, wantOK: true},
 		{name: "dot uses base", in: ".", base: issue, want: issue, wantOK: true},

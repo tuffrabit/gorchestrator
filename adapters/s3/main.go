@@ -157,7 +157,7 @@ func handle(ctx context.Context, client *s3.Client, bucket, prefix string, req r
 		}
 		out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:    aws.String(bucket),
-			Prefix:     aws.String(pref),
+			Prefix:    aws.String(pref),
 			Delimiter: aws.String("/"),
 		})
 		if err != nil {
@@ -226,7 +226,7 @@ func handle(ctx context.Context, client *s3.Client, bucket, prefix string, req r
 		for {
 			out, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 				Bucket:            aws.String(bucket),
-				Prefix:             aws.String(listPref),
+				Prefix:            aws.String(listPref),
 				ContinuationToken: token,
 			})
 			if err != nil {

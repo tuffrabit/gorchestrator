@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
-	"github.com/tuffrabit/gorchestrator/internal/storage"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
+	"github.com/tuffrabit/gorchestrator/internal/storage"
 )
 
 func testConfig(tmp string) *config.Config {
@@ -76,7 +76,6 @@ func firstIssueIDs(t *testing.T, dbPath string) (projectID, issueID int64) {
 	}
 	return projectID, issueID
 }
-
 
 func TestRun_DryRun_Pipeline(t *testing.T) {
 	ctx := context.Background()

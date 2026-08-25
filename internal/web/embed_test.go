@@ -1,8 +1,8 @@
 package web_test
 
 import (
-	"testing"
 	"github.com/tuffrabit/gorchestrator/internal/web"
+	"testing"
 )
 
 func TestTemplatesParse(t *testing.T) {

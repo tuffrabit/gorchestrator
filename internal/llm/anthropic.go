@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/genai"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 // AnthropicModel is an ADK model.LLM that calls the Anthropic Messages API.
@@ -197,9 +197,9 @@ func (m *AnthropicModel) convertContents(contents []*genai.Content, cfg *genai.G
 			}
 			if p.FunctionCall != nil {
 				contentBlocks = append(contentBlocks, map[string]any{
-					"type": "tool_use",
-					"id":   p.FunctionCall.ID,
-					"name": p.FunctionCall.Name,
+					"type":  "tool_use",
+					"id":    p.FunctionCall.ID,
+					"name":  p.FunctionCall.Name,
 					"input": p.FunctionCall.Args,
 				})
 			}
@@ -210,7 +210,7 @@ func (m *AnthropicModel) convertContents(contents []*genai.Content, cfg *genai.G
 					resultText = string(b)
 				}
 				contentBlocks = append(contentBlocks, map[string]any{
-					"type": "tool_result",
+					"type":        "tool_result",
 					"tool_use_id": p.FunctionResponse.ID,
 					"content":     resultText,
 				})

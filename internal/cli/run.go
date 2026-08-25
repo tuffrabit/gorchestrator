@@ -84,11 +84,11 @@ func Run(fs *flag.FlagSet, args []string) error {
 	}()
 
 	opts := orchestrator.RunOptions{
-		ProjectName:  *project,
-		IssueTitle:   *issue,
-		Description:  description,
-		Attachments:  attachments,
-		DryRun:       *dryRun,
+		ProjectName: *project,
+		IssueTitle:  *issue,
+		Description: description,
+		Attachments: attachments,
+		DryRun:      *dryRun,
 	}
 
 	return orchestrator.Run(ctx, cfg, opts)

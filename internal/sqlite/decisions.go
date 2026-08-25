@@ -7,14 +7,14 @@ import (
 
 // Decision represents a human adjudication decision row.
 type Decision struct {
-	ID         int64
-	IssueID    int64
-	Phase      string
+	ID          int64
+	IssueID     int64
+	Phase       string
 	RequestedAt string
-	DecidedAt  sql.NullString
-	Decision   sql.NullString
-	Feedback   sql.NullString
-	DecidedBy  sql.NullString
+	DecidedAt   sql.NullString
+	Decision    sql.NullString
+	Feedback    sql.NullString
+	DecidedBy   sql.NullString
 }
 
 // DecisionRepo provides decision persistence.
