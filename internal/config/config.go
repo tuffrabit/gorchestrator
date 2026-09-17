@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -226,6 +227,18 @@ func (p ProjectConfig) FlavorOverlay(agentType, flavorName string) (AgentConfig,
 	return overlay, true, nil
 }
 
+// InferenceConfig configures explicit model-lifecycle control of a
+// model-swapping inference server. When the block is absent, behavior is
+// unchanged: the server swaps models implicitly per request.
+type InferenceConfig struct {
+	Type string `yaml:"type"` // llama-swap (only supported value)
+	// BaseURL is the management base (chat API at <base>/v1).
+	BaseURL string `yaml:"base_url"`
+	// Mode: "" | exclusive. exclusive serializes ALL phases against this
+	// server via a process-wide keyed lock.
+	Mode string `yaml:"mode"`
+}
+
 // ServerConfig configures the serve daemon HTTP surface and worker pool.
 type ServerConfig struct {
 	Listen              string        `yaml:"listen"`
@@ -344,6 +357,7 @@ type Config struct {
 	MCPServers    []MCPServerConfig               `yaml:"mcp_servers"`
 	Triggers      TriggersConfig                  `yaml:"triggers"`
 	Storage       StorageBackendConfig            `yaml:"storage"`
+	Inference     InferenceConfig                 `yaml:"inference"`
 	Server        ServerConfig                    `yaml:"server"`
 	Auth          AuthConfig                      `yaml:"auth"`
 	Notifications NotificationsConfig             `yaml:"notifications"`
@@ -439,8 +453,36 @@ func LoadFrom(path string) (*Config, error) {
 	if err := validateEscalation(&cfg); err != nil {
 		return nil, err
 	}
+	if err := validateInference(&cfg); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+// validateInference rejects malformed inference blocks. An absent block is
+// valid and means no lifecycle control (implicit swap-on-request).
+func validateInference(cfg *Config) error {
+	inf := &cfg.Inference
+	if inf.Type == "" {
+		return nil
+	}
+	if inf.Type != "llama-swap" {
+		return fmt.Errorf("inference.type: unknown type %q (want llama-swap)", inf.Type)
+	}
+	if inf.BaseURL == "" {
+		return fmt.Errorf("inference.base_url is required when inference.type is set")
+	}
+	u, err := url.Parse(inf.BaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("inference.base_url: invalid URL %q", inf.BaseURL)
+	}
+	switch inf.Mode {
+	case "", "exclusive":
+	default:
+		return fmt.Errorf("inference.mode: unknown mode %q (want exclusive or empty)", inf.Mode)
+	}
+	return nil
 }
 
 func normalizeProjects(cfg *Config, home string) error {

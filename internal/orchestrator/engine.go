@@ -77,6 +77,10 @@ type eventRecord struct {
 	ToolResult map[string]any `json:"tool_result,omitempty"`
 	Tokens     int            `json:"tokens,omitempty"`
 	Error      string         `json:"error,omitempty"`
+	// Model and DurationMs are set on model_wait/model_load/model_unload
+	// residency events.
+	Model      string `json:"model,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
 // Engine executes the multi-agent pipeline.
@@ -92,10 +96,11 @@ type Engine struct {
 	sessions  *sqlite.SessionRepo
 	audit     *sqlite.AuditRepo
 	notifs    *sqlite.NotificationRepo
-	bus       *EventBus
-	notifier  *notify.Dispatcher
-	escalator *notify.Escalator
-	mcp       *gorchmcp.Manager
+	bus        *EventBus
+	notifier   *notify.Dispatcher
+	escalator  *notify.Escalator
+	mcp        *gorchmcp.Manager
+	controller Controller
 }
 
 // NewEngine creates an engine from configuration.
@@ -121,6 +126,9 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		audit:     sqlite.NewAuditRepo(db),
 		notifs:    sqlite.NewNotificationRepo(db),
 		bus:       NewEventBus(),
+	}
+	if cfg.Inference.Type != "" {
+		e.controller = NewController(cfg.Inference)
 	}
 	if err := e.SyncProjects(); err != nil {
 		_ = e.Close()
@@ -609,6 +617,15 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			// Fall through and re-run the phase (human or adjudicator requested retry).
 		}
 
+		// Drive inference-server residency for this phase (no-op without an
+		// inference config). The model stays resident across adjudication
+		// retries inside runPhase; release unloads it once the phase's
+		// result.json is persisted and frees the exclusive-mode lock.
+		releaseModel, err := e.acquirePhaseModel(ctx, project, issue, phaseName, phaseCfg)
+		if err != nil {
+			return fmt.Errorf("load model for %s: %w", phaseName, err)
+		}
+
 		// Issue status is independent of phase result.json status. Mark the
 		// issue in_progress on the new phase *before* work starts so SSE/UI
 		// can show the transition (research → plan → implementation).
@@ -638,7 +655,19 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 
 		result, err := e.runPhase(ctx, project, issue, phaseName, phaseCfg, baseInput, dryRun)
 		if err != nil {
+			// Hard error: result.json may not be persisted. Still release the
+			// model/lock, but don't let an unload failure mask the real error.
+			_ = releaseModel()
 			return fmt.Errorf("run phase %s: %w", phaseName, err)
+		}
+
+		// The phase's result.json is durably written at this point. Unload on
+		// ALL outcomes (done, waiting_human, failed) — a phase waiting on a
+		// human must not pin the model. Fail safe on unload failure: residency
+		// is unknown, so return before the next phase starts. The persisted
+		// result lets resume/recovery pick the phase up correctly.
+		if err := releaseModel(); err != nil {
+			return fmt.Errorf("unload model after %s: %w", phaseName, err)
 		}
 
 		issueStatus := mapPhaseResultToIssueStatus(result.Status)
@@ -695,6 +724,63 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		Phase: "implementation", Status: sqlite.StatusDone,
 	})
 	return nil
+}
+
+// acquirePhaseModel drives inference-server residency for one pipeline phase
+// when an inference block is configured: in exclusive mode it takes the
+// server-keyed lock, then ensures the phase's model is loaded. It returns a
+// release func that unloads the model and frees the lock; the release func
+// always releases the lock, including when unload fails. With no inference
+// config both steps are no-ops and the server swaps implicitly per request.
+func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, phaseCfg config.AgentConfig) (func() error, error) {
+	inf := e.cfg.Inference
+	if inf.Type == "" || e.controller == nil {
+		return func() error { return nil }, nil
+	}
+	model := phaseCfg.Model.Model
+	eventsPath := storage.EventsPath(project.ID, issue.ID, phaseName)
+	record := func(ev eventRecord) {
+		ev.Timestamp = time.Now().UTC().Format(time.RFC3339)
+		recordEvent(ctx, e.store, eventsPath, ev)
+	}
+
+	locked := false
+	if inf.Mode == "exclusive" {
+		key := inf.BaseURL
+		if !modelLocks.TryLock(key) {
+			record(eventRecord{Type: "model_wait", Model: model})
+			modelLocks.Lock(key)
+		}
+		locked = true
+	}
+
+	start := time.Now()
+	loadErr := e.controller.EnsureLoaded(ctx, model, modelTimeout(phaseCfg.Model))
+	loadEv := eventRecord{Type: "model_load", Model: model, DurationMs: time.Since(start).Milliseconds()}
+	if loadErr != nil {
+		loadEv.Error = loadErr.Error()
+		record(loadEv)
+		if locked {
+			modelLocks.Unlock(inf.BaseURL)
+		}
+		return nil, loadErr
+	}
+	record(loadEv)
+
+	return func() error {
+		start := time.Now()
+		err := e.controller.UnloadAll(ctx)
+		ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
+		if err != nil {
+			ev.Error = err.Error()
+			log.Printf("issue %d phase %s: model unload failed: %v", issue.ID, phaseName, err)
+		}
+		record(ev)
+		if locked {
+			modelLocks.Unlock(inf.BaseURL)
+		}
+		return err
+	}, nil
 }
 
 // runPhase runs a single phase with adjudication attempts.

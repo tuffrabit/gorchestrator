@@ -15,11 +15,16 @@ Design + implementation scoping document. Updated 2026-09-17; supersedes the
 - **Old step 5 only half-landed**: `configs/config.local.example.yaml` still has
   no llama-swap multi-flavor example. Redone as step 4 below.
 - **Landed 2026-09-17**: modification 2 (human gate default + adjudicator name
-  validation) and modification 3 (issue dependency chain: `depends_on` column +
+  validation), modification 3 (issue dependency chain: `depends_on` column +
   migration v11, submit validation, dep-aware `ClaimQueued`, `blocked_by`
-  surfacing in API/dashboard, `--depends-on` on `gorchestrator run`).
-- **Not built**: model load/unload control + exclusive-mode lock (modification
-  1 — the remaining core work), example config redo (modification 4).
+  surfacing in API/dashboard, `--depends-on` on `gorchestrator run`), and
+  modification 1 (`inference:` config block, llama-swap `Controller` with
+  warmup-load/unload-poll in `internal/orchestrator/modelctl.go`, keyed
+  exclusive lock in `model_lock.go`, per-phase load/unload hooks in
+  `runPipeline`, `model_wait`/`model_load`/`model_unload` events, fail-safe on
+  unload error).
+- **Not built**: example config redo (modification 4). Then: live e2e against
+  the real server.
 
 ## Agent arrangement (CHANGED 2026-09-17)
 
@@ -96,7 +101,7 @@ Deployed model names live in the llama-swap config, not here. Role mapping:
 
 ## Required modifications
 
-### 1. Model lifecycle control + exclusive-mode serialization (the rock-solid requirement)
+### 1. Model lifecycle control + exclusive-mode serialization (the rock-solid requirement) — LANDED 2026-09-17
 
 **Requirement**: on a single-model-at-a-time server, the harness must
 *explicitly and reliably* drive model residency per agent stage — not rely on
@@ -272,13 +277,11 @@ gen hours) from the measured MoE numbers.
 
 1. ~~Modification 2 (human gates)~~ — DONE 2026-09-17.
 2. ~~Modification 3 (dependencies)~~ — DONE 2026-09-17.
-3. **Modification 1 (lifecycle + exclusive lock)** — the remaining core reliability work;
-   do it against the live server with `dryrun` flavors first (dryrun exercises
-   the phase machinery without burning GPU), then one real issue end-to-end:
+3. ~~Modification 1 (lifecycle + exclusive lock)~~ — DONE 2026-09-17.
+4. **Modification 4 (example config/docs)** — then one real issue end-to-end:
    research (fast) → human gate → plan (slow, single-shot) → human gate →
    implementation (mid), verifying load/unload events, swap-wait timeout
    headroom, and digest budget.
-4. **Modification 4 (example config/docs)** — land alongside 3's verification.
 
 Deferred (unchanged, only if real need shows): big-model plan-vs-diff review
 loop, headless-harness adapter phase type, `max_tool_rounds` cap

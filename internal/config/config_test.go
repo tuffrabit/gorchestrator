@@ -246,3 +246,78 @@ func TestDefaultPromptAccessors(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAcceptsInferenceBlock(t *testing.T) {
+	cfg, err := loadFromString(t, `
+inference:
+  type: llama-swap
+  base_url: http://192.168.1.152:8080
+  mode: exclusive
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Inference.Type != "llama-swap" || cfg.Inference.BaseURL != "http://192.168.1.152:8080" || cfg.Inference.Mode != "exclusive" {
+		t.Fatalf("inference = %+v", cfg.Inference)
+	}
+
+	// Mode is optional: load/unload without the exclusive lock.
+	cfg, err = loadFromString(t, `
+inference:
+  type: llama-swap
+  base_url: http://192.168.1.152:8080
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Inference.Mode != "" {
+		t.Fatalf("inference.mode = %q, want empty", cfg.Inference.Mode)
+	}
+}
+
+func TestLoadAbsentInferenceBlockAccepted(t *testing.T) {
+	cfg, err := loadFromString(t, "")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Inference.Type != "" || cfg.Inference.BaseURL != "" || cfg.Inference.Mode != "" {
+		t.Fatalf("inference = %+v, want zero value", cfg.Inference)
+	}
+}
+
+func TestLoadRejectsBadInference(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "unknown type",
+			yaml: "inference:\n  type: vllm\n  base_url: http://h:8080\n",
+			want: `inference.type: unknown type "vllm"`,
+		},
+		{
+			name: "missing base_url",
+			yaml: "inference:\n  type: llama-swap\n",
+			want: "inference.base_url is required",
+		},
+		{
+			name: "unparseable base_url",
+			yaml: "inference:\n  type: llama-swap\n  base_url: not-a-url\n",
+			want: "inference.base_url: invalid URL",
+		},
+		{
+			name: "unknown mode",
+			yaml: "inference:\n  type: llama-swap\n  base_url: http://h:8080\n  mode: shared\n",
+			want: `inference.mode: unknown mode "shared"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadFromString(t, tc.yaml)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("load error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
