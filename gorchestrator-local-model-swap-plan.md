@@ -22,9 +22,14 @@ Design + implementation scoping document. Updated 2026-09-17; supersedes the
   warmup-load/unload-poll in `internal/orchestrator/modelctl.go`, keyed
   exclusive lock in `model_lock.go`, per-phase load/unload hooks in
   `runPipeline`, `model_wait`/`model_load`/`model_unload` events, fail-safe on
-  unload error).
-- **Not built**: example config redo (modification 4). Then: live e2e against
-  the real server.
+  unload error), and modification 4 (`configs/config.local.example.yaml` now
+  carries the three-flavor llama-swap setup: `inference:` block, fast
+  researcher / single-shot big planner / mid implementer, sizing-math comments,
+  `max_concurrent_issues: 1`; placeholders `<LLAMA_SWAP_HOST>:<PORT>`,
+  `<FAST_SMALL_MODEL>`, `<BIG_MOE_MODEL>`, `<MID_CODER_MODEL>` to fill in;
+  verified to parse via a substituted load test).
+- **Not built**: nothing remains in code. Next: live e2e against the real
+  server (fill in the example-config placeholders first).
 
 ## Agent arrangement (CHANGED 2026-09-17)
 
@@ -239,7 +244,7 @@ pausing at human gates — dependencies make that walk order-aware.
 - **Tests**: claim skips blocked, claims after dep completes, FIFO preserved
   among eligible, missing-dep validation, dep on failed issue stays blocked.
 
-### 4. Example config + docs (redo of old step 5's missing half)
+### 4. Example config + docs — LANDED 2026-09-17
 
 `configs/config.local.example.yaml`: three-flavor llama-swap setup for the new
 arrangement:
@@ -278,7 +283,8 @@ gen hours) from the measured MoE numbers.
 1. ~~Modification 2 (human gates)~~ — DONE 2026-09-17.
 2. ~~Modification 3 (dependencies)~~ — DONE 2026-09-17.
 3. ~~Modification 1 (lifecycle + exclusive lock)~~ — DONE 2026-09-17.
-4. **Modification 4 (example config/docs)** — then one real issue end-to-end:
+4. ~~Modification 4 (example config/docs)~~ — DONE 2026-09-17. Remaining: the
+   live e2e run —
    research (fast) → human gate → plan (slow, single-shot) → human gate →
    implementation (mid), verifying load/unload events, swap-wait timeout
    headroom, and digest budget.
