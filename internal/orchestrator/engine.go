@@ -101,6 +101,7 @@ type Engine struct {
 	escalator  *notify.Escalator
 	mcp        *gorchmcp.Manager
 	controller Controller
+	breaker    *inferenceBreaker
 }
 
 // NewEngine creates an engine from configuration.
@@ -126,6 +127,7 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		audit:     sqlite.NewAuditRepo(db),
 		notifs:    sqlite.NewNotificationRepo(db),
 		bus:       NewEventBus(),
+		breaker:   &inferenceBreaker{},
 	}
 	if cfg.Inference.Type != "" {
 		e.controller = NewController(cfg.Inference)
@@ -623,6 +625,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		// result.json is persisted and frees the exclusive-mode lock.
 		releaseModel, err := e.acquirePhaseModel(ctx, project, issue, phaseName, phaseCfg)
 		if err != nil {
+			e.failIssueInferenceError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("load model for %s: %w", phaseName, err)
 		}
 
@@ -667,6 +670,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		// is unknown, so return before the next phase starts. The persisted
 		// result lets resume/recovery pick the phase up correctly.
 		if err := releaseModel(); err != nil {
+			e.failIssueInferenceError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("unload model after %s: %w", phaseName, err)
 		}
 
@@ -767,20 +771,53 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 	}
 	record(loadEv)
 
-	return func() error {
-		start := time.Now()
-		err := e.controller.UnloadAll(ctx)
-		ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
-		if err != nil {
-			ev.Error = err.Error()
-			log.Printf("issue %d phase %s: model unload failed: %v", issue.ID, phaseName, err)
-		}
-		record(ev)
-		if locked {
-			modelLocks.Unlock(inf.BaseURL)
-		}
-		return err
-	}, nil
+		return func() error {
+			start := time.Now()
+			err := e.controller.UnloadAll(ctx)
+			ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
+			if err != nil {
+				ev.Error = err.Error()
+				log.Printf("issue %d phase %s: model unload failed: %v", issue.ID, phaseName, err)
+			}
+			record(ev)
+			if locked {
+				modelLocks.Unlock(inf.BaseURL)
+			}
+			return err
+		}, nil
+}
+
+// failIssueInferenceError marks an issue failed after an inference-side error
+// (lifecycle controller load/unload), making the failure visible: issue row,
+// phase_finished SSE event, an inference_error entry in the phase's
+// events.jsonl, and a bad-output notification. In exclusive mode it also
+// trips the inference breaker so daemon workers stop claiming new issues
+// until a human decides on this one. Agent output quality and LLM-call
+// failures inside runPhase deliberately do not take this path.
+func (e *Engine) failIssueInferenceError(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, cause error) {
+	msg := fmt.Sprintf("inference error during %s: %v", phaseName, cause)
+	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusFailed, phaseName)
+	e.Publish(Event{
+		Type: EventPhaseFinished, IssueID: issue.ID, ProjectID: project.ID,
+		Phase: phaseName, Status: sqlite.StatusFailed, Message: msg,
+		Data: map[string]any{
+			"phase_result":  "inference_error",
+			"current_phase": phaseName,
+		},
+	})
+	recordEvent(ctx, e.store, storage.EventsPath(project.ID, issue.ID, phaseName), eventRecord{
+		Type:      "inference_error",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Error:     msg,
+	})
+	notify.NotifyBadOutput(ctx, e.notifier, issue.ID, phaseName, msg, e.adminEmails())
+	if e.cfg.Inference.Mode == "exclusive" && e.breaker.Trip(issue.ID, msg) {
+		e.Publish(Event{
+			Type: EventIssueStatus, IssueID: issue.ID, ProjectID: project.ID,
+			Phase: phaseName, Status: sqlite.StatusFailed,
+			Message: "inference breaker tripped: " + msg,
+		})
+	}
 }
 
 // runPhase runs a single phase with adjudication attempts.

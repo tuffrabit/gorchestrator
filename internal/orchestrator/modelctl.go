@@ -106,22 +106,8 @@ func (c *llamaSwapController) EnsureLoaded(ctx context.Context, model string, ti
 
 // UnloadAll implements Controller. Already-unloaded is success.
 func (c *llamaSwapController) UnloadAll(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "POST", c.base+"/unload", nil)
-	if err != nil {
-		return fmt.Errorf("create unload request: %w", err)
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("unload: %w", err)
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return fmt.Errorf("read unload response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unload: status %d: %s", resp.StatusCode, cappedText(string(body)))
+	if err := c.postUnload(ctx); err != nil {
+		return err
 	}
 
 	deadline := time.Now().Add(c.unloadDeadline)
@@ -142,6 +128,36 @@ func (c *llamaSwapController) UnloadAll(ctx context.Context) error {
 		case <-time.After(c.pollInterval):
 		}
 	}
+}
+
+// postUnload issues the unload request. Current llama-swap exposes
+// POST /api/models/unload; older builds had POST /unload, so fall back on
+// 404/405.
+func (c *llamaSwapController) postUnload(ctx context.Context) error {
+	for _, path := range []string{"/api/models/unload", "/unload"} {
+		req, err := http.NewRequestWithContext(ctx, "POST", c.base+path, nil)
+		if err != nil {
+			return fmt.Errorf("create unload request: %w", err)
+		}
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("unload: %w", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("read unload response: %w", err)
+		}
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unload: status %d: %s", resp.StatusCode, cappedText(string(body)))
+		}
+		return nil
+	}
+	return fmt.Errorf("unload: no supported endpoint (tried /api/models/unload, /unload)")
 }
 
 // runningModels returns the names of models llama-swap currently has loaded.

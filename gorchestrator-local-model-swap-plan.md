@@ -22,7 +22,13 @@ Design + implementation scoping document. Updated 2026-09-17; supersedes the
   warmup-load/unload-poll in `internal/orchestrator/modelctl.go`, keyed
   exclusive lock in `model_lock.go`, per-phase load/unload hooks in
   `runPipeline`, `model_wait`/`model_load`/`model_unload` events, fail-safe on
-  unload error), and modification 4 (`configs/config.local.example.yaml` now
+  unload error; hardened after a production 405 exposed a surfacing gap:
+  inference-side failures now fail the issue visibly (`phase_result:
+  inference_error` event + notification) and, in `mode: exclusive`, trip a
+  process-wide circuit breaker (`internal/orchestrator/breaker.go`) that stops
+  workers claiming new issues until a human decides on the tripped issue;
+  llama-swap unload endpoint corrected to `/api/models/unload` with legacy
+  `/unload` fallback), and modification 4 (`configs/config.local.example.yaml` now
   carries the three-flavor llama-swap setup: `inference:` block, fast
   researcher / single-shot big planner / mid implementer, sizing-math comments,
   `max_concurrent_issues: 1`; placeholders `<LLAMA_SWAP_HOST>:<PORT>`,
@@ -65,29 +71,40 @@ implementer run tool loops.
 
 ## Models
 
-Deployed model names live in the llama-swap config, not here. Role mapping:
+Deployed model names live in the llama-swap config, not here. Role mapping with
+**measured throughput on the production server (2026-09, post hardware build +
+llama.cpp tuning)** — these obsolete the old disk-streamed estimates
+(~0.47 tok/s prompt) that drove the original "hours per phase" sizing:
 
-- **researcher**: fastest available small dense model.
-- **planner**: the big MoE (previously DeepSeek V4 Flash 0731 UD-Q4_K_XL,
-  measured ~0.47 tok/s prompt / ~0.02 tok/s gen — one-shot phases only,
-  `max_tokens` mandatory, timeout in hours).
-- **implementer**: mid dense coder model (previously Qwen3.8-27B class) —
-  strong tool calling on the available GPU.
+- **researcher**: fastest small dense model — ~300 tok/s prefill, ~50 tok/s decode.
+- **planner**: the big smart model — ~40 tok/s prefill, ~10 tok/s decode.
+- **implementer**: mid dense coder — ~100 tok/s prefill, ~20 tok/s decode.
+- Every model loads with a **131072-token context window**.
+
+Sizing math at these numbers (≈4 bytes/token): a 32 KiB digest ≈ 8k tokens ≈
+**~3.5 min** of planner prefill; 2048 max_tokens ≈ **~3.5 min** decode. Even a
+128 KiB digest (≈32k tokens) is only ~13 min of prefill. The constraint is now
+the 131k context window (digest + research artifact + output must fit), not
+wall clock — though `max_tokens` and a real timeout remain mandatory as
+backstops against a runaway generation.
 
 ## Architecture conclusions (unchanged unless noted)
 
 - **Engine manager = llama-swap.** Arbitrary per-model launch commands,
   OpenAI-compatible routing by request `model` field, mutually-exclusive swap
-  groups, `/unload`, `/running`, request-holding during loads. Verified in
+  groups, `/api/models/unload`, `/running`, request-holding during loads. Verified in
   production now, not just against upstream docs.
 - **MCP rejected for flow control.** Phase transitions (load → work → persist →
   unload) are orchestrator-driven, not model-driven. MCP fine *inside* phases.
 - **Delegated headless harnesses still deferred.** Built-in implementer loop is
   good enough; revisit only if it proves underpowered.
-- **Swap-cost discipline** (unchanged, now sharper): with the planner as the
-  only big-model phase, each issue pays at most one slow-model load + one
-  one-shot generation + one unload. The researcher absorbs the exploratory
-  chattiness at fast-model prices.
+- **Swap-cost discipline** (much relaxed by the measured speeds, but the shape
+  still holds): with the planner as the only big-model phase, each issue pays
+  one model load + one one-shot generation + one unload. Prefill/decode are now
+  fast enough (40/10 tok/s) that the planner phase is minutes, not hours; model
+  load time likely dominates. The researcher absorbs the exploratory chattiness
+  at fast-model prices. Plans handed to the implementer must still be
+  self-contained — no KV survives a swap.
 
 ## gorchestrator: what works today, unmodified
 
@@ -133,9 +150,11 @@ silently thrash.
   - `EnsureLoaded`: warmup request (`POST {base}/v1/chat/completions`,
     `max_tokens: 1`) — llama-swap holds the request while loading, so a
     completed warmup == model resident. Verify via `GET /running`.
-  - `UnloadAll`: `POST {base}/unload`, then poll `/running` until empty or
-    timeout. On timeout: return error — the next phase must not start against
-    an unknown-residency server.
+  - `UnloadAll`: `POST {base}/api/models/unload` (current llama-swap path;
+    falls back to legacy `POST /unload` on 404/405 — the legacy path 405s on
+    current builds, confirmed in production 2026-09-17), then poll `/running`
+    until empty or timeout. On timeout: return error — the next phase must not
+    start against an unknown-residency server.
 - **Hook points** (both in `runPipeline`, per phase, NOT per attempt — retries
   keep the model resident):
   - Load: after `agentConfigForIssue` resolves the phase config
@@ -165,10 +184,12 @@ silently thrash.
 - Warmup tokens cost prompt-processing time on the slow model — keep warmup to
   `max_tokens: 1` and an empty/short prompt; it forces the load, nothing more.
 - `http.Client.Timeout` covers the whole body read including llama-swap
-  swap-wait (`internal/llm/openai.go:54`) — the warmup client needs the same
-  hours-scale timeout as the flavor.
-- llama-swap `/unload` semantics: confirm the deployed version unloads the
-  whole group, not just one model (smoke-test in step 3 verification).
+  swap-wait (`internal/llm/openai.go:54`) — the warmup client uses the flavor's
+  timeout, which must still cover a cold model load (load time now likely
+  exceeds inference time).
+- llama-swap `/unload` semantics: RESOLVED 2026-09-17 — current builds moved
+  unload to `POST /api/models/unload` (bare `/unload` returns 405); the
+  controller uses the new path with legacy fallback.
 - SIGTERM mid-phase still kills in-flight generation and re-runs from scratch
   on recovery (`internal/cli/serve.go:106-116`); on recovery the model may be
   left loaded — `EnsureLoaded` is idempotent by construction, so no special
@@ -265,18 +286,17 @@ agents:
     # tool loop; adjudicator now defaults to human
   planner:
     model: { provider: openai, base_url: http://192.168.1.152:8080/v1,
-             model: <big-moe>, timeout: 24h }
+             model: <big-moe>, timeout: 1h }
     single_shot: true
-    single_shot_context_bytes: 32768    # ~8k tokens ≈ hours of prompt time — show the math
-    max_tokens: 2048                    # uncapped gen at 0.02 tok/s is unbounded wall clock
+    single_shot_context_bytes: 65536    # ~16k tokens ≈ ~7 min prefill at 40 tok/s; window is 131k
+    max_tokens: 4096                    # backstop: ~7 min decode at 10 tok/s
     max_attempts: 1                     # human retry re-runs the whole generation
   implementer:
     model: { provider: openai, base_url: http://192.168.1.152:8080/v1,
              model: <mid-coder>, timeout: 2h }
 ```
 
-Comments carry the token/time math (digest bytes ↔ prompt hours, max_tokens ↔
-gen hours) from the measured MoE numbers.
+Comments carry the token/time math from the measured production numbers above.
 
 ## Suggested order of work
 

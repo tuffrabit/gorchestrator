@@ -93,6 +93,99 @@ func TestDaemon_WorkersProcessQueue(t *testing.T) {
 	t.Fatal("timeout waiting for workers to complete issues")
 }
 
+func TestDaemon_InferenceBreakerBlocksClaiming(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	cfg.Server.MaxConcurrentIssues = 1
+	// Exclusive-mode inference pointed at a dead server: the first issue's
+	// model load fails fast (connection refused) and trips the breaker.
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: "http://127.0.0.1:1",
+		Mode:    "exclusive",
+	}
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer eng.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	d := New(eng, cfg)
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	first, err := eng.SubmitIssue(ctx, orchestrator.RunOptions{
+		ProjectName: "acme",
+		IssueTitle:  "trips the breaker",
+		DryRun:      true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitIssue first: %v", err)
+	}
+
+	// Wait for the worker to fail the issue on the dead inference server and
+	// trip the breaker.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		got, _ := eng.Issues().Get(first.ID)
+		tripped, tripIssue := eng.InferenceBreakerTripped()
+		if got != nil && got.Status == sqlite.StatusFailed && tripped && tripIssue == first.ID {
+			break
+		}
+		if time.Now().After(deadline) {
+			d.Shutdown(2 * time.Second)
+			t.Fatalf("timeout waiting for breaker trip (issue status=%v tripped=%v)", got.Status, tripped)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// While tripped, new queued work must not be claimed.
+	second, err := eng.SubmitIssue(ctx, orchestrator.RunOptions{
+		ProjectName: "acme",
+		IssueTitle:  "blocked by breaker",
+		DryRun:      true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitIssue second: %v", err)
+	}
+	time.Sleep(time.Second)
+	got, err := eng.Issues().Get(second.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get second issue: %v", err)
+	}
+	if got.Status != sqlite.StatusQueued {
+		t.Fatalf("second issue status = %q, want queued while breaker tripped", got.Status)
+	}
+
+	// A human decision on the tripped issue clears the breaker; the worker
+	// resumes claiming and picks up the queued issue (it also fails against
+	// the dead server, re-tripping the breaker — that is expected here).
+	if err := eng.Decide(ctx, orchestrator.DecideOptions{
+		IssueID:  first.ID,
+		Decision: "fail",
+		Feedback: "investigated",
+	}); err != nil {
+		t.Fatalf("Decide on tripped issue: %v", err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		got, _ := eng.Issues().Get(second.ID)
+		if got != nil && got.Status == sqlite.StatusFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			d.Shutdown(2 * time.Second)
+			t.Fatalf("timeout waiting for second issue to be claimed after Decide (status=%v)", got.Status)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	d.Shutdown(2 * time.Second)
+}
+
 func TestDaemon_ShutdownDoesNotMarkFailed(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)

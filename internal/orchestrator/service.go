@@ -181,6 +181,11 @@ func (e *Engine) Decide(ctx context.Context, opts DecideOptions) error {
 		return err
 	}
 
+	// A human looked at the issue that tripped the exclusive-mode inference
+	// breaker — resume claiming. A retry re-queues the issue and the phase
+	// re-runs; EnsureLoaded is idempotent so this is safe.
+	e.breaker.Clear(opts.IssueID)
+
 	e.Publish(Event{
 		Type:      EventDecisionApplied,
 		IssueID:   issue.ID,
@@ -489,6 +494,25 @@ func (e *Engine) ProcessIssue(ctx context.Context, issueID int64) error {
 // Issues returns the issue repository (for daemon claim loop).
 func (e *Engine) Issues() *sqlite.IssueRepo {
 	return e.issues
+}
+
+// ClaimIssue returns the next queued issue for a daemon worker, or (nil, nil)
+// when the queue is empty or the exclusive-mode inference breaker is tripped.
+// While tripped, workers behave as if the queue is empty until a human
+// decides on the tripped issue (see failIssueInferenceError).
+func (e *Engine) ClaimIssue() (*sqlite.Issue, error) {
+	if tripped, _, _ := e.breaker.Active(); tripped {
+		return nil, nil
+	}
+	return e.issues.ClaimQueued()
+}
+
+// InferenceBreakerTripped reports whether the exclusive-mode inference
+// breaker is tripped and, if so, which issue tripped it (for observability
+// and tests).
+func (e *Engine) InferenceBreakerTripped() (bool, int64) {
+	tripped, issueID, _ := e.breaker.Active()
+	return tripped, issueID
 }
 
 // Store returns the storage port.

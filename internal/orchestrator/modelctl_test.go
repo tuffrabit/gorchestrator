@@ -57,7 +57,7 @@ func (s *llamaSwapStub) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": models})
 	})
-	mux.HandleFunc("POST /unload", func(w http.ResponseWriter, r *http.Request) {
+	unload := func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.requests = append(s.requests, "unload")
 		switch {
@@ -70,7 +70,9 @@ func (s *llamaSwapStub) handler() http.Handler {
 		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-	})
+	}
+	mux.HandleFunc("POST /api/models/unload", unload)
+	mux.HandleFunc("POST /unload", unload) // legacy path, used by fallback test
 	return mux
 }
 
@@ -201,6 +203,52 @@ func TestUnloadAll_AlreadyUnloaded(t *testing.T) {
 	log := stub.requestLog()
 	if len(log) != 2 || log[0] != "unload" || log[1] != "running" {
 		t.Fatalf("request log = %v, want [unload running]", log)
+	}
+}
+
+// Old llama-swap builds only expose POST /unload (current: /api/models/unload).
+// A 405/404 on the current path must fall back to the legacy one.
+func TestUnloadAll_FallsBackToLegacyPath(t *testing.T) {
+	var legacyHit bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/models/unload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("POST /unload", func(w http.ResponseWriter, r *http.Request) {
+		legacyHit = true
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /running", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"running":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	ctl := newLlamaSwapController(srv.URL)
+
+	if err := ctl.UnloadAll(context.Background()); err != nil {
+		t.Fatalf("UnloadAll: %v", err)
+	}
+	if !legacyHit {
+		t.Fatal("legacy /unload path was not used after 405")
+	}
+}
+
+func TestUnloadAll_NoSupportedEndpoint(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/models/unload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("POST /unload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	ctl := newLlamaSwapController(srv.URL)
+
+	err := ctl.UnloadAll(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "no supported endpoint") {
+		t.Fatalf("UnloadAll = %v, want no-supported-endpoint error", err)
 	}
 }
 

@@ -197,7 +197,7 @@ func (d *Daemon) worker(ctx context.Context, id int) {
 			return
 		}
 
-		issue, err := d.eng.Issues().ClaimQueued()
+		issue, err := d.eng.ClaimIssue()
 		if err != nil {
 			log.Printf("daemon: worker %d claim error: %v", id, err)
 			select {

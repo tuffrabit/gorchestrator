@@ -219,18 +219,31 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 		t.Fatal("plan result.json exists; next phase ran despite unload failure")
 	}
 
+	// The issue must land in a visible failed state, not stay green/stale.
+	got, err := eng.issues.Get(issue.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got.Status != sqlite.StatusFailed {
+		t.Fatalf("issue status = %q, want failed", got.Status)
+	}
+	if got.CurrentPhase != "research" {
+		t.Fatalf("issue current_phase = %q, want research", got.CurrentPhase)
+	}
+
 	// The exclusive-mode lock must be released even on unload failure.
 	if !modelLocks.TryLock(srv.URL) {
 		t.Fatal("exclusive lock still held after unload failure")
 	}
 	modelLocks.Unlock(srv.URL)
 
-	// The failure is recorded in the phase's events.jsonl.
+	// The failure is recorded in the phase's events.jsonl, alongside the
+	// inference_error entry from the failure path.
 	eventsData, err := eng.store.Read(ctx, storage.EventsPath(project.ID, issue.ID, "research"))
 	if err != nil {
 		t.Fatalf("read research events.jsonl: %v", err)
 	}
-	var sawUnloadErr bool
+	var sawUnloadErr, sawInferenceErr bool
 	scanner := bufio.NewScanner(strings.NewReader(string(eventsData)))
 	for scanner.Scan() {
 		var ev eventRecord
@@ -240,9 +253,163 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 		if ev.Type == "model_unload" && ev.Error != "" {
 			sawUnloadErr = true
 		}
+		if ev.Type == "inference_error" {
+			sawInferenceErr = true
+		}
 	}
 	if !sawUnloadErr {
 		t.Fatal("research events.jsonl missing model_unload error event")
+	}
+	if !sawInferenceErr {
+		t.Fatal("research events.jsonl missing inference_error event")
+	}
+
+	// Exclusive mode: the breaker must trip on the inference-side failure.
+	if tripped, tripIssue := eng.InferenceBreakerTripped(); !tripped || tripIssue != issue.ID {
+		t.Fatalf("breaker = (%v, %d), want tripped on issue %d", tripped, tripIssue, issue.ID)
+	}
+}
+
+// drainEvents collects all buffered events without blocking.
+func drainEvents(ch <-chan Event) []Event {
+	var out []Event
+	for {
+		select {
+		case ev := <-ch:
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
+}
+
+func TestRun_Inference_LoadFailureFailsIssue(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	stub := newLlamaSwapStub()
+	stub.noLoadOnWarmup = true // warmup completes but the model never loads
+	srv := newStubServer(t, stub)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: srv.URL,
+		Mode:    "exclusive",
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	eventCh := eng.Subscribe(subCtx, EventFilter{IssueID: issue.ID})
+
+	err := eng.runPipeline(ctx, project, issue, true)
+	if err == nil || !strings.Contains(err.Error(), "load model for research") {
+		t.Fatalf("runPipeline = %v, want load-failure error", err)
+	}
+
+	// Issue row: visible failed state on the phase that failed to load.
+	got, err := eng.issues.Get(issue.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got.Status != sqlite.StatusFailed {
+		t.Fatalf("issue status = %q, want failed", got.Status)
+	}
+	if got.CurrentPhase != "research" {
+		t.Fatalf("issue current_phase = %q, want research", got.CurrentPhase)
+	}
+
+	// SSE: a phase_finished event carrying phase_result=inference_error,
+	// plus the breaker-trip issue_status event.
+	var sawPhaseFinished, sawBreakerTrip bool
+	for _, ev := range drainEvents(eventCh) {
+		if ev.Type == EventPhaseFinished && ev.Status == sqlite.StatusFailed && ev.Data["phase_result"] == "inference_error" {
+			sawPhaseFinished = true
+		}
+		if ev.Type == EventIssueStatus && strings.Contains(ev.Message, "inference breaker tripped") {
+			sawBreakerTrip = true
+		}
+	}
+	if !sawPhaseFinished {
+		t.Fatal("missing phase_finished event with phase_result=inference_error")
+	}
+	if !sawBreakerTrip {
+		t.Fatal("missing issue_status breaker-trip event")
+	}
+
+	// events.jsonl: inference_error recorded for the phase.
+	eventsData, err := eng.store.Read(ctx, storage.EventsPath(project.ID, issue.ID, "research"))
+	if err != nil {
+		t.Fatalf("read research events.jsonl: %v", err)
+	}
+	var sawInferenceErr bool
+	scanner := bufio.NewScanner(strings.NewReader(string(eventsData)))
+	for scanner.Scan() {
+		var ev eventRecord
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		if ev.Type == "inference_error" {
+			sawInferenceErr = true
+		}
+	}
+	if !sawInferenceErr {
+		t.Fatal("research events.jsonl missing inference_error event")
+	}
+
+	// Exclusive mode: breaker tripped, claiming halted.
+	if tripped, tripIssue := eng.InferenceBreakerTripped(); !tripped || tripIssue != issue.ID {
+		t.Fatalf("breaker = (%v, %d), want tripped on issue %d", tripped, tripIssue, issue.ID)
+	}
+	if claimed, err := eng.ClaimIssue(); err != nil || claimed != nil {
+		t.Fatalf("ClaimIssue while tripped = (%v, %v), want (nil, nil)", claimed, err)
+	}
+}
+
+func TestRun_Inference_LoadFailureNonExclusive(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	stub := newLlamaSwapStub()
+	stub.noLoadOnWarmup = true
+	srv := newStubServer(t, stub)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: srv.URL,
+		// No mode: exclusive: failure fails the issue but must not halt claiming.
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+
+	err := eng.runPipeline(ctx, project, issue, true)
+	if err == nil || !strings.Contains(err.Error(), "load model for research") {
+		t.Fatalf("runPipeline = %v, want load-failure error", err)
+	}
+
+	got, err := eng.issues.Get(issue.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got.Status != sqlite.StatusFailed {
+		t.Fatalf("issue status = %q, want failed", got.Status)
+	}
+
+	if tripped, _ := eng.InferenceBreakerTripped(); tripped {
+		t.Fatal("breaker tripped in non-exclusive mode")
+	}
+	// Claiming is unaffected: a queued issue is still claimable.
+	other, err := eng.issues.CreateQueued(project.ID, "unrelated queued issue", true)
+	if err != nil {
+		t.Fatalf("create queued issue: %v", err)
+	}
+	claimed, err := eng.ClaimIssue()
+	if err != nil || claimed == nil {
+		t.Fatalf("ClaimIssue = (%v, %v), want queued issue", claimed, err)
+	}
+	if claimed.ID != other.ID {
+		t.Fatalf("ClaimIssue claimed %d, want %d", claimed.ID, other.ID)
 	}
 }
 
