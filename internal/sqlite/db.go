@@ -183,6 +183,13 @@ ALTER TABLE issues ADD COLUMN description TEXT NOT NULL DEFAULT '';
 ALTER TABLE issues ADD COLUMN budget_overrides_json TEXT NOT NULL DEFAULT '{}';
 `,
 	},
+	{
+		version: 11,
+		name:    "issue_depends_on",
+		sql: `
+ALTER TABLE issues ADD COLUMN depends_on_json TEXT NOT NULL DEFAULT '[]';
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

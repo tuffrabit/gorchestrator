@@ -1,347 +1,300 @@
 # Local Multi-Model Orchestration: gorchestrator + llama-swap
 
-Working notes from a design/investigation session (2026-08-24). Goal: plan for adapting
-[gorchestrator](https://github.com/tuffrabit/gorchestrator) into a two-model local
-inference orchestrator.
+Design + implementation scoping document. Updated 2026-09-17; supersedes the
+2026-08-24/25 working notes (history preserved in git).
+
+## Current state (2026-09-17)
+
+- **Inference server: built and running.** llama-swap is deployed, configured
+  with the inference engine and multiple models, and verified to swap and serve.
+  Pre-flight (old step 0) is DONE. The remaining work is all in gorchestrator.
+- **gorchestrator code: old plan steps 1-4 landed.** Config schema + validation
+  (`single_shot`, `single_shot_context_bytes`, `context_files`; timeout
+  validation), repo digest (`internal/orchestrator/digest.go`), single-shot
+  execution (`internal/orchestrator/single_shot.go`), effort-gate feedback fix.
+- **Old step 5 only half-landed**: `configs/config.local.example.yaml` still has
+  no llama-swap multi-flavor example. Redone as step 4 below.
+- **Landed 2026-09-17**: modification 2 (human gate default + adjudicator name
+  validation) and modification 3 (issue dependency chain: `depends_on` column +
+  migration v11, submit validation, dep-aware `ClaimQueued`, `blocked_by`
+  surfacing in API/dashboard, `--depends-on` on `gorchestrator run`).
+- **Not built**: model load/unload control + exclusive-mode lock (modification
+  1 — the remaining core work), example config redo (modification 4).
+
+## Agent arrangement (CHANGED 2026-09-17)
+
+Three stages, three model classes. This **inverts** the old doc's mapping (which
+put the big MoE on research): the researcher is now the fast tool-user, and the
+big slow model only plans.
+
+| Stage | Model class | Execution mode | Output artifact |
+|---|---|---|---|
+| **researcher** | Small + fastest | ADK tool-call loop (`runAgentLoop`) — needs `read_file`/`grep_search`/`list` to explore the workspace | Context digest: accumulated, contextually significant detail for the planner (RAG-by-agent) |
+| **planner** | Biggest + smartest, speed be damned | **Single-shot** (`runSingleShot`) — research artifact + repo digest pre-stuffed, zero or near-zero tool calls | Self-contained implementation plan |
+| **implementer** | Mid: code + tool-calling tuned | ADK tool-call loop | The actual code changes |
+
+Why this shape:
+
+- The researcher's value is throughput, not depth. A fast small model doing many
+  cheap tool rounds beats a slow genius pulling files one token at a time.
+- The planner gets everything pre-stuffed (research artifact via
+  `buildBaseInput`, repo digest via `buildRepoDigest`), so its slowness is paid
+  exactly once, on the maximum-intelligence task.
+- Every stage boundary is a human gate (modification 2), so a weak researcher
+  output is caught before the expensive planner run, and a weak plan is caught
+  before implementation.
+
+The existing machinery supports this unmodified: `CoreAgentTypes =
+{researcher, planner, implementer}` (`internal/config/config.go:70`), per-phase
+flavors with full `model` blocks (`base_url`, `timeout`), `MergeAgent`
+overlay (`config.go:746`), `phaseAgentType` mapping
+(`internal/orchestrator/engine.go:1689`), and the hard-coded
+`research → plan → implementation` phase list (`engine.go:526`). Single-shot is
+per-flavor, so the planner alone can be single-shot while researcher and
+implementer run tool loops.
 
 ## Models
 
-- **DeepSeek V4 Flash 0731** (unsloth UD-Q4_K_XL) — frontier-size MoE, disk-streamed
-  experts via mmap. Measured: ~0.47 tok/s prompt, ~0.02 tok/s gen (~55 s/token).
-  Disk-bound at the SATA ceiling (verified math: ~15-25 GB expert reads/token at
-  ~0.3-0.5 GB/s effective). Role: research, planning, review — one-shot, big-context
-  phases only.
-- **Qwen3.8-27B** (dense) — strong at tool calling and code, runs on 16 GB GPU at
-  decent speed. Role: implementation.
+Deployed model names live in the llama-swap config, not here. Role mapping:
 
-## Architecture conclusions
+- **researcher**: fastest available small dense model.
+- **planner**: the big MoE (previously DeepSeek V4 Flash 0731 UD-Q4_K_XL,
+  measured ~0.47 tok/s prompt / ~0.02 tok/s gen — one-shot phases only,
+  `max_tokens` mandatory, timeout in hours).
+- **implementer**: mid dense coder model (previously Qwen3.8-27B class) —
+  strong tool calling on the available GPU.
 
-- **Engine manager = llama-swap** (https://github.com/mostlygeek/llama-swap).
-  Actively maintained; already does: arbitrary per-model launch commands (works for
-  colibri too, not just llama.cpp), OpenAI-compatible passthrough routed by the
-  request's `model` field, mutually-exclusive swappable groups (= "one model fits
-  at a time" semantics), `/unload` + `/running`, holds requests while a model loads.
-  Do NOT build a custom engine manager; only revisit if concrete gaps appear
-  (async load semantics, colibri lifecycle quirks).
-- **Orchestrator = gorchestrator** (modified, see below). Its research → plan →
-  implementation pipeline + per-stage model flavors + artifact storage + resume +
-  human adjudication gates already match the desired flow.
-- **MCP rejected for flow control**: MCP is a tool transport; invocation timing is
-  model-driven. Phase transitions (load → work → persist → unload → …) must be
-  orchestrator-driven, not model-driven. MCP remains fine *inside* phases.
-- **Delegated headless harnesses (kimi-cli -p, claude -p, …) deferred**: gorchestrator's
-  built-in implementer agent loop is good enough to start; no subprocess adapters to
-  maintain. Only add a "harness adapter" phase type later if the built-in loop
-  proves underpowered vs dedicated coding harnesses.
-- **Swap-cost discipline**: every model swap costs minutes; every round trip on the
-  MoE costs tens of minutes at these speeds. Big-model phases must be one-shot with
-  pre-stuffed context. Plans handed to the fast model must be self-contained
-  (no KV survives the swap). Cheap re-invocation of the big model for
-  plan-vs-diff review is fine (small context); full re-planning is not.
+## Architecture conclusions (unchanged unless noted)
+
+- **Engine manager = llama-swap.** Arbitrary per-model launch commands,
+  OpenAI-compatible routing by request `model` field, mutually-exclusive swap
+  groups, `/unload`, `/running`, request-holding during loads. Verified in
+  production now, not just against upstream docs.
+- **MCP rejected for flow control.** Phase transitions (load → work → persist →
+  unload) are orchestrator-driven, not model-driven. MCP fine *inside* phases.
+- **Delegated headless harnesses still deferred.** Built-in implementer loop is
+  good enough; revisit only if it proves underpowered.
+- **Swap-cost discipline** (unchanged, now sharper): with the planner as the
+  only big-model phase, each issue pays at most one slow-model load + one
+  one-shot generation + one unload. The researcher absorbs the exploratory
+  chattiness at fast-model prices.
 
 ## gorchestrator: what works today, unmodified
 
-- Per-phase models against llama-swap via flavors: flavors carry a full `model`
-  block incl. `base_url` + `timeout` (`internal/config/config.go`; merge in
-  `MergeAgent` config.go:699). Point both flavors at `http://<host>:<llama-swap>/v1`
-  with different `model` names; llama-swap swaps on demand.
-- Per-phase timeouts: `timeout:` per flavor, parsed in `modelTimeout`
-  (`internal/orchestrator/engine.go:1700`).
-- Adjudication/effort gates between phases are natural model-swap points.
-- Phase results, artifacts, resume, dashboard all work regardless of model backend.
+- Per-phase models against llama-swap via flavors (`model.base_url` +
+  `model.timeout` per flavor; llama-swap swaps on the request's `model` field).
+- Single-shot planner: `single_shot: true` + digest stuffing, landed and tested.
+- Phase results, artifacts, resume, dashboard, human decision plumbing
+  (`Decide`, pending-decision rows) — all backend-agnostic.
+- Multi-provider/multi-endpoint configs: flavors already resolve per-phase
+  `provider`+`base_url`, so a hybrid setup (local llama-swap for two stages +
+  hosted API for a third) works today. The new serialization machinery
+  (modification 1) must key on the inference endpoint, not assume one global
+  server — but the initial optimization target is a single resource-constrained
+  local server that can hold exactly one model and serve exactly one request at
+  a time.
 
-## Required modifications (the shape)
+## Required modifications
 
-### 1. Single-shot mode for research/plan (the critical change)
+### 1. Model lifecycle control + exclusive-mode serialization (the rock-solid requirement)
 
-**Why**: every phase is an ADK `ModeTask` tool-call loop (`runAgentLoop`,
-engine.go:886) with NO round-trip cap — runs until the model calls `finish_task`.
-At 0.5 tok/s prompt processing, a chatty research phase is days. ADK has no
-iteration cap knob.
+**Requirement**: on a single-model-at-a-time server, the harness must
+*explicitly and reliably* drive model residency per agent stage — not rely on
+llama-swap's implicit swap-on-request. For every phase: ensure the phase's
+model is loaded before work, unload after the phase's artifact is persisted.
+Failure to unload must fail safe (block the next phase, surface the error), never
+silently thrash.
 
 **Shape**:
 
-- Config: add `SingleShot bool` (use `*bool` if tri-state needed, like
-  `Temperature`) + `SingleShotContextBytes int` to `AgentConfig`
-  (config.go:46-58); merge in `MergeAgent` (config.go:699+). Flows through flavors
-  automatically.
-- Execution: in `runAgentLoop`, branch right after model construction/budget-wrap
-  (engine.go:952-966, before `buildAgent` at :968) to a new
-  `Engine.runSingleShot` (~60 lines, new file `internal/orchestrator/single_shot.go`):
-  1. Build `model.LLMRequest` directly (SystemInstruction + loopInput);
-     `OpenAIModel.convertContents` (internal/llm/openai.go:202-210) already maps it.
-  2. Prompt: `cfg.SystemPrompt` + hardcoded suffix ("You have no tools. Reply with
-     the complete document as plain text.") — default researcher/planner prompts
-     reference `write_output`/`finish_task`, which won't exist.
-  3. One `GenerateContent(ctx, req, false)` call; take the single response.
-  4. Write text to outputPath via `e.store.Write`; record `usage` + `model_turn`
-     events via `recordEvent` (engine.go:1731) so budgets/dashboard keep working.
-  5. Return `done=true` unconditionally — else `SelfAdjudicator` returns Retry
-     (internal/adjudication/adjudicator.go:88-94) and re-runs the slow model.
-- Bypassing the ADK runner is safe: sessions are in-memory and per-loop; all
-  cross-phase state flows through storage (`result.json`).
+- **Config**: new optional server-level block, e.g.
+  ```yaml
+  inference:
+    type: llama-swap            # enables lifecycle control
+    base_url: http://host:port  # management API (chat API is <base>/v1)
+    mode: exclusive             # serialize ALL phases against this server
+  ```
+  `mode: exclusive` is the single-resource optimization. Without the block,
+  behavior is exactly as today (llama-swap swaps implicitly) — this keeps
+  multi-provider and hosted-API configs untouched.
+- **Controller**: new `internal/orchestrator/modelctl.go`,
+  `type Controller interface { EnsureLoaded(ctx, model string) error; UnloadAll(ctx) error }`.
+  llama-swap implementation:
+  - `EnsureLoaded`: warmup request (`POST {base}/v1/chat/completions`,
+    `max_tokens: 1`) — llama-swap holds the request while loading, so a
+    completed warmup == model resident. Verify via `GET /running`.
+  - `UnloadAll`: `POST {base}/unload`, then poll `/running` until empty or
+    timeout. On timeout: return error — the next phase must not start against
+    an unknown-residency server.
+- **Hook points** (both in `runPipeline`, per phase, NOT per attempt — retries
+  keep the model resident):
+  - Load: after `agentConfigForIssue` resolves the phase config
+    (`engine.go:468`, called in the phase loop), before `runPhase`
+    (`engine.go:598`).
+  - Unload: after the phase's result.json is durably written — i.e. after
+    `runPhase` returns and before status mapping/`EventPhaseFinished`
+    (`engine.go:613`). Unload on ALL outcomes (done, waiting_human, failed):
+    a phase waiting on a human must not pin the model.
+- **Exclusive-mode lock**: a process-wide keyed mutex on the inference endpoint
+  (new `internal/orchestrator/model_lock.go` — the old deferred modification 3,
+  now required). With `mode: exclusive`, every phase (any issue) acquires the
+  server key before load and holds it through unload. This makes
+  `max_concurrent_issues > 1` safe even on one server: issues queue at the
+  phase level instead of thrashing. Publish a "waiting for inference server"
+  event before blocking so the dashboard shows the queue.
+  - Keep `max_concurrent_issues: 1` as the recommended initial config; the lock
+    is the correctness floor, not a license to raise concurrency on day one.
+- **Observability**: record `model_load` / `model_unload` / `model_wait` events
+  via `recordEvent` (`engine.go:1780`) so the dashboard/SSE shows residency
+  transitions; note `recordEvent` is unlocked read-modify-write — the exclusive
+  lock serializes the contended path, but keep events per-(issue, phase) as
+  today.
 
 **Landmines**:
-- Planner effort gate: no `finish_task` → no `effort` → defaults to "high"
-  (effort.go:41-47) → forced human gate before implementation (service.go:724).
-  Arguably ideal for this use case (human gate = swap point); otherwise parse
-  `effort:` from plan text.
-- Set `max_tokens` in the flavor — uncapped generation at 0.02 tok/s is unbounded
-  wall clock.
-- Retries: human `retry` decisions re-run the whole slow generation. Attempts only
-  re-fire on adjudicator Retry/Fail (won't happen with done=true).
 
-### 2. Repo-context pre-stuffing (required companion to single-shot)
+- Warmup tokens cost prompt-processing time on the slow model — keep warmup to
+  `max_tokens: 1` and an empty/short prompt; it forces the load, nothing more.
+- `http.Client.Timeout` covers the whole body read including llama-swap
+  swap-wait (`internal/llm/openai.go:54`) — the warmup client needs the same
+  hours-scale timeout as the flavor.
+- llama-swap `/unload` semantics: confirm the deployed version unloads the
+  whole group, not just one model (smoke-test in step 3 verification).
+- SIGTERM mid-phase still kills in-flight generation and re-runs from scratch
+  on recovery (`internal/cli/serve.go:106-116`); on recovery the model may be
+  left loaded — `EnsureLoaded` is idempotent by construction, so no special
+  recovery path is needed. Operational rule unchanged: don't restart mid-phase.
+- Multi-endpoint future: the lock is keyed by endpoint, so adding a second
+  llama-swap server or a hosted API later needs no redesign — each key
+  serializes independently.
 
-Nothing exists today — the model pulls everything via `read_file`/`grep_search`.
-Add `Engine.buildRepoDigest(ctx, projectID, issueID, maxBytes)`:
-- File list via `listRecursive` (engine.go:1610) over the storage snapshot
-  (source already copied per issue; `copyDirToStorage` skips `.git`).
-- Read via `e.store.Read`; skip binaries with existing `looksMostlyText`
-  (scope.go:142); `.gitignore` matcher exists but is unexported
-  (internal/tools/gitignore.go) — export or accept `.git`-only filtering.
-- Emit `## <relpath>` + fenced content until byte budget; truncation marker.
-- **The byte budget knob is the whole ballgame**: at 0.5 tok/s prompt, ~4
-  bytes/token, 32 KiB ≈ 8k tokens ≈ 4.5 hours of prompt processing. Default small
-  (16-32 KiB); consider a `context_files: [...]` explicit-list alternative in the
-  flavor for targeted stuffing.
+### 2. Human gate at every stage boundary (removes self-approval) — LANDED 2026-09-17
 
-### 3. Model-residency lock (prevents swap thrash)
+**Decision**: remove the self/auto-approval mechanism from the active flow.
+Every agent stage ends in a human decision. Rationale: with a queued batch of
+issues, the operator reviews each stage artifact (research digest, plan,
+implementation) before the harness spends the next stage's compute — and each
+gate is also the natural model-swap point.
 
-No model-residency awareness exists; `max_concurrent_issues: 1` is the only current
-lever (works, but crude). Proper fix:
-- `keyedMutex` type (new `internal/orchestrator/model_lock.go`), field on `Engine`
-  (engine.go:83-99, init in `NewEngine`).
-- In `runPipeline`, after `agentConfigForIssue` resolves phaseCfg (engine.go:547)
-  and before `runPhase` (:585): lock on `provider|base_url|model`, hold across ALL
-  attempts/loops of the phase, defer unlock.
-- Phases ending `waiting_human` release the lock (model not pinned while waiting
-  on humans — good; the plan→implementation effort gate frees the slow model before
-  the fast model's phase starts).
-- Enables pipelining with `max_concurrent_issues > 1`: issue A implementation
-  (fast model) concurrent with issue B research (slow model), no thrash.
-- Optional: publish a "waiting for model X" event before blocking (dashboard SSE
-  already renders phase events).
+**Implementation choice: flip the default, keep the code.** Cheaper than
+deletion, and "self" remains as an explicit config opt-in if wanted back:
 
-### 4. Timeout ergonomics (small)
+- `defaultAgentConfig` (`internal/config/config.go:812`): change hard-coded
+  `Adjudicator: "self"` (:821) → `"human"`.
+- `adjudication.New` (`internal/adjudication/adjudicator.go:105`): keep the
+  `"self"` case but treat unknown names as a **validation error at config load**
+  instead of silently mapping to Null (:111-112) — today a typo like `selff`
+  silently produces *less* gating. Add known-name validation in
+  `validateAgentOverrides` (`config.go:488`).
+- No plumbing changes needed: `HumanAdjudicator` → `WaitingHuman` → pending
+  decision row → `Decide` (`service.go:115`) → re-queue → next phase. The
+  forced-human override for untrusted external issues (`engine.go:486-492`) is
+  already compatible.
+- Effort gate (`maybeHoldForEffort`, `service.go:724`) becomes redundant at the
+  plan→implementation boundary (human adjudication already holds there) but is
+  harmless; leave it.
+- Stale-contract cleanup: `single_shot.go` comment says `done=true` exists so
+  self-adjudication passes — update to reflect human-gate-everywhere.
+- Configs that explicitly set `adjudicator: self` keep working (opt-in), so
+  this is a default change, not a breaking removal.
+- **Tests**: many suites pin the self default — update
+  `internal/adjudication/adjudicator_test.go`, `internal/daemon/daemon_test.go`,
+  `internal/server/server_test.go`, `internal/orchestrator/run_test.go`,
+  `projects_registry_test.go`, `service_test.go` for the human default and the
+  new name validation.
 
-- `modelTimeout` (engine.go:1700) silently falls back to 60s on bad parse, and
-  flavor-level timeouts get no load-time validation (unlike `default_model`,
-  config.go:399-402). A typo'd `timeout: 6hours` (must be `6h`) silently neuters
-  the slow-model config. Fix: validate in `normalizeProjects` (config.go:434) +
-  log on fallback.
-- `OpenAIModel` reads the whole body under one `http.Client.Timeout` (openai.go:54,
-  :104) — timeout = total wall clock incl. llama-swap swap-wait. Set hours, e.g. `4h`.
-- Retry loop (openai.go:91-135) retries 429/5xx up to 3x — a crashed backend costs
-  3 full prompt re-processings before failing. llama-swap holds during load, so
-  shouldn't trigger normally.
-- SIGTERM kills in-flight generations instantly (daemon.go:155-157); recovery
-  re-runs the phase from scratch. Operational rule: don't restart mid-phase.
+### 3. Issue dependency chain — LANDED 2026-09-17
+
+**Requirement**: an issue must not be picked up while an issue it depends on is
+not fully `done`. With a queued batch, the harness walks issues one at a time,
+pausing at human gates — dependencies make that walk order-aware.
+
+**Shape**:
+
+- **Schema**: `depends_on` JSON array of issue IDs on the issues table
+  (`internal/sqlite/issues.go:20-34`), mirroring `AgentFlavorsJSON` style
+  (`DependsOnJSON string`) + migration. A JSON column beats a join table at
+  this scale; deps are write-once at submit.
+- **Submit**: CLI + API accept `--depends-on 12,14` / `depends_on: [12,14]`.
+  Validate: referenced issues must exist and belong to a project the caller can
+  see. Cycles are impossible by construction if deps must reference *existing*
+  issues (no forward references) — enforce that, and no cycle-check code is
+  needed.
+- **Claiming**: `ClaimQueued` (`issues.go:145-186`) currently selects the
+  oldest `queued` row. Change to skip rows with unsatisfied deps:
+  exclude any candidate whose `depends_on` contains an ID whose current status
+  != `done`. Simplest correct form: fetch the oldest N queued candidates in the
+  transaction, filter in Go (deps resolved against the same tx), claim the
+  first eligible. Keep FIFO within the eligible set. Failed/cancelled deps do
+  NOT unblock — dependent stays queued until a human retries/completes the
+  blocker or edits the dep.
+- **Surface**: `GET /api/issues` + dashboard show `blocked_by: [...]` for
+  queued issues with unsatisfied deps (derive at read time; don't store a
+  status — "blocked" is a view of queued, not a new state, so recovery and
+  requeue logic stay untouched).
+- **Tests**: claim skips blocked, claims after dep completes, FIFO preserved
+  among eligible, missing-dep validation, dep on failed issue stays blocked.
+
+### 4. Example config + docs (redo of old step 5's missing half)
+
+`configs/config.local.example.yaml`: three-flavor llama-swap setup for the new
+arrangement:
+
+```yaml
+inference:
+  type: llama-swap
+  base_url: http://192.168.1.152:8080   # management base; chat at /v1
+  mode: exclusive
+
+server:
+  max_concurrent_issues: 1              # start here even with the lock
+
+agents:
+  researcher:
+    model: { provider: openai, base_url: http://192.168.1.152:8080/v1,
+             model: <fast-small-model>, timeout: 10m }
+    # tool loop; adjudicator now defaults to human
+  planner:
+    model: { provider: openai, base_url: http://192.168.1.152:8080/v1,
+             model: <big-moe>, timeout: 24h }
+    single_shot: true
+    single_shot_context_bytes: 32768    # ~8k tokens ≈ hours of prompt time — show the math
+    max_tokens: 2048                    # uncapped gen at 0.02 tok/s is unbounded wall clock
+    max_attempts: 1                     # human retry re-runs the whole generation
+  implementer:
+    model: { provider: openai, base_url: http://192.168.1.152:8080/v1,
+             model: <mid-coder>, timeout: 2h }
+```
+
+Comments carry the token/time math (digest bytes ↔ prompt hours, max_tokens ↔
+gen hours) from the measured MoE numbers.
 
 ## Suggested order of work
 
-1. **Config-only validation**: two flavors (MoE + Qwen) against llama-swap,
-   `max_concurrent_issues: 1`, big timeout on the MoE flavor. Use `dryrun` provider
-   to validate flavor routing end-to-end before burning GPU hours.
-2. **Single-shot mode + repo digest** (modifications 1+2 — do together; single-shot
-   without context stuffing is useless).
-3. **Model-residency lock** (modification 3) when raising concurrency.
-4. **Timeout validation** (modification 4) — cheap, do opportunistically.
-5. Later, only if needed: explicit llama-swap warmup/unload hooks at
-   `EventPhaseStarted`/`EventPhaseFinished` (engine.go:575, :600); headless-harness
-   adapter phase type; capped-tool-rounds middle ground (`max_tool_rounds` via a
-   BudgetLLM-style decorator, internal/llm/budget.go:29 — but single-shot is the
-   better fit at these speeds).
+1. ~~Modification 2 (human gates)~~ — DONE 2026-09-17.
+2. ~~Modification 3 (dependencies)~~ — DONE 2026-09-17.
+3. **Modification 1 (lifecycle + exclusive lock)** — the remaining core reliability work;
+   do it against the live server with `dryrun` flavors first (dryrun exercises
+   the phase machinery without burning GPU), then one real issue end-to-end:
+   research (fast) → human gate → plan (slow, single-shot) → human gate →
+   implementation (mid), verifying load/unload events, swap-wait timeout
+   headroom, and digest budget.
+4. **Modification 4 (example config/docs)** — land alongside 3's verification.
 
-## Open questions — RESOLVED 2026-08-25
+Deferred (unchanged, only if real need shows): big-model plan-vs-diff review
+loop, headless-harness adapter phase type, `max_tool_rounds` cap
+(`BudgetLLM.callCount` is tracked but unused — the hook exists),
+effort-gate removal (now redundant), multi-endpoint scheduling beyond the
+keyed lock.
 
-- **colibri vs llama.cpp mmap streaming for the MoE**: still empirical. Resolve in
-  pre-flight (step 0 below) with a measurement run before tuning timeouts; llama-swap
-  makes the backend swappable afterward, so this does not block any code work.
-- **llama-swap feature set**: verified against upstream
-  (https://github.com/mostlygeek/llama-swap) — actively maintained; groups
-  (mutually-exclusive swap sets), `/unload`, `/running`, and request-holding during
-  model loads all exist. Still smoke-test the exact version deployed (step 0).
-- **Review-loop budget**: DEFERRED. There is no plan↔implementation feedback loop in
-  the code today — adjudicator Retry only re-runs the *same* phase, and adjudicators
-  are `null|self|human` only (internal/adjudication/adjudicator.go). A big-model
-  plan-vs-diff review is net-new machinery; rely on the human effort gate +
-  implementation self-adjudication until real output quality says otherwise.
-- **Effort gate for single-shot planner**: RESOLVED — always gate. No `finish_task`
-  → `finishEffort=""` → `EffectiveEffort("")="high"` (effort.go:40-46) → with the
-  default `effort_gate_min: high`, `maybeHoldForEffort` (service.go:724) always holds
-  for a human. This is the desired swap point. No effort parsing.
+## Verification
 
-Additional decisions made 2026-08-25:
-
-- **Model-residency lock: DEFERRED.** `max_concurrent_issues: 1` is the thrash
-  guard for now. Build the keyed mutex (original mod 3) only when raising
-  concurrency. Note for then: `recordEvent` (engine.go:1731) is read-modify-write
-  with no locking — safe per (issue, phase) path, but revisit alongside the lock.
-- **Repo digest: byte budget + explicit list.** Both knobs: auto-digest fills
-  `single_shot_context_bytes` (default 16-32 KiB) in sorted path order,
-  gitignore-filtered, with a truncation marker; a flavor may instead pin
-  `context_files: [...]` for targeted stuffing.
-
-## Verification corrections (code read 2026-08-25)
-
-All line refs in this document checked out exactly. Sharpenings:
-
-- `SelfAdjudicator` never returns Fail and trusts `done=true` blindly — a
-  single-shot runner returning `done=true` always passes. There is NO quality check
-  on single-shot output other than the human gate. Mitigation: empty-output check
-  in runSingleShot (mirrors engine.go:1113).
-- Never calling `finish_task` fails the phase directly (engine.go:1117-1119),
-  bypassing adjudication — irrelevant once the loop is bypassed.
-- SIGTERM handling lives in internal/cli/serve.go:106-116 (not daemon.go); the
-  behavior described (in-flight generation killed, phase re-run from scratch on
-  recovery) is accurate.
-- BudgetLLM (internal/llm/budget.go) caps tokens only; `callCount` is tracked but
-  unused. Fine — single-shot needs no round cap.
-- `MergeAgent` is non-zero-wins, so `SingleShot` MUST be `*bool` (tri-state like
-  `Temperature`), else a flavor can never turn off a globally-enabled single-shot.
-- `defaultAgentConfig` (config.go:755-778) ALWAYS sets `SystemPrompt` to the
-  tool-referencing default, so single-shot cannot tell "user override" from
-  "built-in default" by emptiness. Resolution: export the defaults from config and
-  compare (see step 3).
-- PRE-EXISTING BUG (fix in passing, step 4): human feedback given at the
-  effort-gate retry never reaches the implementer. The hold result has `attempt: 0`;
-  a human retry keeps attempt 0, so `runPhase` starts at attempt 1 and
-  `buildRetryContext` (engine.go:676, gated on `attempt > 1`) never injects
-  `feedback.md`. With always-gate single-shot planning this is the main feedback
-  path into implementation, so it matters now.
-
-## Implementation plan (2026-08-25)
-
-**Status: steps 1-5 landed** (config schema + validation, repo digest,
-single-shot execution, dryrun support, gate-feedback fix, examples/docs, tests).
-
-### Step 0 — Pre-flight, no code
-
-- llama-swap: config with both models, smoke-test model-field routing, swap-wait
-  request holding, `/running`, `/unload`.
-- Measure colibri vs llama.cpp mmap streaming for the MoE; pick backend.
-- gorchestrator config-only run: project with two flavors per agent type
-  (`deepseek-moe` for researcher/planner, `qwen` for implementer), both
-  `provider: openai`, same `base_url` (llama-swap), different `model` names;
-  `max_concurrent_issues: 1`. Run an issue with `dryrun` and inspect the written
-  `task.json` (`Model` block, engine.go:1156-1161) to confirm flavor resolution
-  before burning GPU time.
-- Sizing math for the MoE flavor (from measured 0.47 tok/s prompt, ~55 s/token gen):
-  32 KiB digest ≈ 8k tokens ≈ 4.5 h prompt time; 1024 gen tokens ≈ 15 h. Set
-  `max_tokens` explicitly (start ~1024-2048) and `timeout` in hours (e.g. `24h`);
-  `http.Client.Timeout` covers the whole body read including llama-swap swap-wait.
-
-### Step 1 — Config schema + validation
-
-- `internal/config/config.go` AgentConfig (:46-58): add
-  `SingleShot *bool` (`single_shot`), `SingleShotContextBytes int`
-  (`single_shot_context_bytes`), `ContextFiles []string` (`context_files`),
-  with yaml+json tags (project configs round-trip through SQLite `config_json`).
-- `MergeAgent` (:699): `SingleShot` override when non-nil (deep-copy, like
-  `Temperature`); `SingleShotContextBytes` when `> 0`; `ContextFiles` replace when
-  non-empty (like `Tools`).
-- Validation: reject unparseable `model.timeout` at load for global `agents.<type>`
-  and every project flavor (walk in `normalizeProjects`, :434), matching the
-  existing `default_model.timeout` check (:399-402); reject negative
-  `single_shot_context_bytes`.
-- `modelTimeout` (engine.go:1700): `log.Printf` on parse-failure fallback.
-- Tests: merge tri-state semantics; validation accept/reject.
-
-### Step 2 — Repo digest (lands together with step 3)
-
-- Export gitignore matching from `internal/tools/gitignore.go`: add
-  `ParseGitignore(io.Reader) (*GitignoreMatcher, error)` + exported `Match`;
-  keep `loadGitignore` as a thin wrapper (digest reads `.gitignore` from the
-  storage snapshot via `store.Read`, not the host FS).
-- New `internal/orchestrator/digest.go`:
-  `Engine.buildRepoDigest(ctx, projectID, issueID int64, cfg config.AgentConfig) string`.
-  - Enumerate with `listRecursive` (engine.go:1610) under
-    `storage.SourcePath(pid, iid)`; strip prefix for rel paths.
-  - Skip: `.gitignore`-matched, non-text (`looksMostlyText`, scope.go:142 — same
-    package, no export needed), and files that don't fit the remaining budget
-    (skip, don't stop — small later files still get in).
-  - `ContextFiles` non-empty → exactly those repo-relative paths, listed order;
-    missing file → inline marker, not an error. Budget still applies (default
-    64 KiB when `single_shot_context_bytes` is 0).
-  - Emit: full path listing (cheap, tells the model what exists), then
-    `## <relpath>` + fenced content sections, then a truncation marker naming the
-    omitted-file count.
-- Injection: in `runPipeline` after `buildBaseInput` (engine.go:580) — digest is
-  constant per issue (source snapshot is frozen at issue creation), append once to
-  `baseInput` when `SingleShot` is on and a budget/list is configured. Retries and
-  the plan phase's inlined research output are unaffected.
-- Tests with a temp-dir FS store: gitignore filtering, binary skip, budget
-  truncation marker, explicit list, missing-file marker.
-
-### Step 3 — Single-shot execution
-
-- Prompts: export the built-in defaults from config
-  (`DefaultSystemPrompt(agentType)` accessor over the existing private funcs) and
-  add single-shot defaults (`singleShotResearcherPrompt` /
-  `singleShotPlannerPrompt`: no tool references, "reply with the complete document
-  as plain text", planner keeps its self-containedness requirements). Effective
-  single-shot instruction:
-  - `cfg.SystemPrompt` == built-in default → use the single-shot default;
-  - has prefix `default + "\n\n"` (i.e. only `system_prompt_append` was set) →
-    single-shot default + the appended suffix (MergeAgent bakes appends with
-    exactly `"\n\n"`, config.go:722-726, so this split is exact);
-  - anything else → full user override, used as-is.
-- New `internal/orchestrator/single_shot.go`,
-  `Engine.runSingleShot(...) ([]byte, bool, string, string, int, error)` — SAME
-  signature as `runAgentLoop` so `runPhase` (attempts, result.json, adjudication)
-  is untouched:
-  1. `adkmodel.LLMRequest{Contents: []*genai.Content{loopInput}, Config:
-     &genai.GenerateContentConfig{SystemInstruction: <resolved above>}}` — no tools.
-     `OpenAIModel.convertContents` (openai.go:198) maps this unchanged.
-  2. One `GenerateContent(ctx, req, false)`; concatenate text parts; empty → error
-     (phase fails, same semantics as engine.go:1113).
-  3. Write text to `outputPath` via `e.store.Write` (lands at the same
-     `attempts/<n>/output.md` the tool-loop path uses, so `LatestOutput` /
-     `buildBaseInput` for the next phase work unchanged).
-  4. Record `usage` (from `UsageMetadata`) and `model_turn` (via `cappedText`,
-     4096) events with the same `eventRecord` shape as engine.go:1021/:1065 so
-     budget rehydration (`sumUsageFromEvents`) and the dashboard keep working.
-  5. Return `(output, true, "", "", tokens, nil)` — done=true (self-adjudicator
-     passes), effort="" (→ always human gate after plan, per decision).
-- Branch in `runAgentLoop`: extract model construction + budget wrap
-  (engine.go:939-966) into a small helper; if `cfg.SingleShot != nil &&
-  *cfg.SingleShot`, call it and delegate to `runSingleShot` BEFORE the tool
-  registry/MCP block (:919-937) — single-shot must not build tools or connect MCP.
-- `internal/llm/dryrun.go`: when the request carries no tool declarations, return
-  a plain-text canned response (keeps `dryrun` e2e validation working for
-  single-shot flavors).
-- Config guidance for slow flavors: `max_attempts: 1` (adjudicator retry can't
-  fire with done=true anyway); human `retry` re-runs the whole generation —
-  documented behavior, feedback DOES reach the next attempt via the step-4 fix.
-- Tests: stub `model.LLM` (fixed text + usage) → output file written, events
-  recorded, done=true; empty text → error; prompt resolution matrix
-  (default / append-only / full override); dryrun no-tools path; e2e run_test.go-
-  style: single-shot research+plan → waiting_human after plan (effort gate).
-
-### Step 4 — Effort-gate feedback fix
-
-- In `runPhase`, inject human feedback even when `attempt == 1`: if
-  `storage.FeedbackPath(pid, iid, phase, attempt)` exists (written by `Decide`,
-  service.go:287-317), append it to the attempt input. Keep the existing
-  `attempt > 1` retry-context behavior untouched.
-- Test: effort-hold → human retry with feedback → feedback present in the next
-  implementer input.
-
-### Step 5 — Examples + docs
-
-- `configs/config.local.example.yaml`: two-flavor llama-swap setup with the
-  token/time math in comments (digest bytes ↔ prompt hours, max_tokens ↔ gen
-  hours), `max_attempts: 1` on single-shot flavors, `max_concurrent_issues: 1`.
-- Update this document's status; note the deferred items (model-residency lock,
-  big-model review loop, llama-swap warmup/unload hooks at EventPhaseStarted/
-  Finished, headless-harness adapter, `max_tool_rounds`) as future work.
-
-### Verification
-
-- `go build ./... && go test ./...` after each step; existing suite
-  (run_test.go, budget_test.go, phase_status_test.go, service_test.go, …) must
-  stay green — non-single-shot behavior is untouched.
-- Final: one real issue end-to-end against llama-swap (research → gate-free?
-  no — research done, plan done, human gate, implementation on Qwen), confirming
-  swap-wait timeout headroom and that the digest fits the measured prompt budget.
+- `go build ./... && go test ./...` after each step; existing suite stays green.
+- Modification 1: unit-test the controller against a stub HTTP server (warmup
+  called, unload polled, unload-timeout error blocks next phase); lock test
+  with two concurrent phases on one key.
+- Modification 2: config-load tests for adjudicator names; suite-wide default
+  flip.
+- Modification 3: claim-query tests as listed above.
+- Final e2e: one real issue through all three stages on the live llama-swap
+  server with human gates, plus one queued dependent issue proving it waits for
+  its blocker.

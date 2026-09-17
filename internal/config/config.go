@@ -492,6 +492,13 @@ func validateAgentOverrides(cfg *Config) error {
 				return fmt.Errorf("%s: parse model.timeout: %w", where, err)
 			}
 		}
+		if ac.Adjudicator != "" {
+			switch ac.Adjudicator {
+			case "null", "self", "human":
+			default:
+				return fmt.Errorf("%s: unknown adjudicator %q (want null|self|human)", where, ac.Adjudicator)
+			}
+		}
 		if ac.SingleShotContextBytes < 0 {
 			return fmt.Errorf("%s: single_shot_context_bytes must be >= 0, got %d", where, ac.SingleShotContextBytes)
 		}
@@ -818,7 +825,7 @@ func defaultAgentConfig(name string, defaultModel ModelConfig) AgentConfig {
 			BaseURL:   defaultModel.BaseURL,
 			Timeout:   defaultModel.Timeout,
 		},
-		Adjudicator: "self",
+		Adjudicator: "human",
 		MaxAttempts: 3,
 		Loops:       1,
 		Rubric:      "The output is complete, accurate, and ready for the next phase.",

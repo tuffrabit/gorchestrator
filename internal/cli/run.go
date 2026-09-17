@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
@@ -31,6 +33,7 @@ func Run(fs *flag.FlagSet, args []string) error {
 	fs.Var(&attach, "attach", "optional text attachment file (repeatable; extension must be text-like)")
 	project := fs.String("project", "", "project name (must be declared under projects: in config YAML)")
 	dryRun := fs.Bool("dry-run", false, "use the dry-run LLM adapter")
+	dependsOn := fs.String("depends-on", "", "comma-separated IDs of issues that must be done before this one is claimable")
 	configPath := fs.String("config", "", "path to config yaml (default: ~/.config/gorchestrator/config.yaml)")
 
 	if err := fs.Parse(args); err != nil {
@@ -39,6 +42,11 @@ func Run(fs *flag.FlagSet, args []string) error {
 
 	if *issue == "" || *project == "" {
 		return fmt.Errorf("--issue and --project are required")
+	}
+
+	deps, err := parseDependsOnFlag(*dependsOn)
+	if err != nil {
+		return err
 	}
 
 	description := *body
@@ -62,7 +70,6 @@ func Run(fs *flag.FlagSet, args []string) error {
 	}
 
 	var cfg *config.Config
-	var err error
 	if *configPath != "" {
 		cfg, err = config.LoadFrom(*configPath)
 	} else {
@@ -89,7 +96,29 @@ func Run(fs *flag.FlagSet, args []string) error {
 		Description: description,
 		Attachments: attachments,
 		DryRun:      *dryRun,
+		DependsOn:   deps,
 	}
 
 	return orchestrator.Run(ctx, cfg, opts)
+}
+
+// parseDependsOnFlag parses a comma-separated issue ID list ("12,14").
+func parseDependsOnFlag(raw string) ([]int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []int64
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("--depends-on: invalid issue id %q", part)
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }

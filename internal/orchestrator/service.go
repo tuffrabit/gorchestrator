@@ -51,6 +51,9 @@ type IssueView struct {
 	Phases     []PhaseStep // research → plan → implementation strip
 	// Attachments are basenames under attachments/ (issue context uploads).
 	Attachments []string
+	// BlockedBy lists unsatisfied dependency IDs for queued issues (read-time
+	// view; "blocked" is not a status). Empty when not blocked.
+	BlockedBy []int64
 }
 
 // SubmitIssue creates the issue (snapshot source if configured), sets status
@@ -76,9 +79,21 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 	if source == "" {
 		source = "manual"
 	}
-	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID, castJSON)
+	dependsOnJSON, err := e.validateDependsOn(opts.DependsOn)
+	if err != nil {
+		return nil, err
+	}
+	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID, castJSON, dependsOnJSON)
 	if err != nil {
 		return nil, fmt.Errorf("create issue: %w", err)
+	}
+	// Defensive: deps are validated against existing issues before insert, so
+	// the new ID cannot appear among them; reject if it somehow does.
+	for _, id := range opts.DependsOn {
+		if id == issue.ID {
+			_ = e.issues.Delete(issue.ID)
+			return nil, fmt.Errorf("depends_on cannot reference the issue being created (%d)", id)
+		}
 	}
 
 	if err := e.persistIssueContext(ctx, issue, opts.IssueTitle, opts.Description, opts.Attachments); err != nil {
@@ -524,6 +539,12 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 	if project != nil {
 		atts, _ = e.listAttachmentNames(ctx, project.ID, issue.ID)
 	}
+	var blockedBy []int64
+	if issue.Status == sqlite.StatusQueued {
+		if deps := sqlite.ParseDependsOn(issue.DependsOnJSON); len(deps) > 0 {
+			blockedBy, _ = e.issues.UnsatisfiedDeps(deps)
+		}
+	}
 	return &IssueView{
 		Issue:       issue,
 		ProjectName: name,
@@ -533,6 +554,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		HoldReason:  holdReason,
 		Phases:      phases,
 		Attachments: atts,
+		BlockedBy:   blockedBy,
 	}, nil
 }
 

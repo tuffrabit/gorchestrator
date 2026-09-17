@@ -374,6 +374,57 @@ func TestRun_DryRun_Cancellation(t *testing.T) {
 	}
 }
 
+func TestRun_DefaultAdjudicatorWaitsForHuman(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	// No adjudicator configured for the researcher: the built-in default is a
+	// human gate, so the pipeline pauses after the research phase.
+	delete(cfg.Agents, "researcher")
+
+	opts := RunOptions{
+		ProjectName: "foo",
+		IssueTitle:  "add auth",
+		DryRun:      true,
+	}
+
+	if err := Run(ctx, cfg, opts); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	defer db.Close()
+
+	_, iid := firstIssueIDs(t, cfg.DBPath)
+	issue, err := sqlite.NewIssueRepo(db).Get(iid)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if issue.Status != "waiting_human" {
+		t.Fatalf("issue status = %q, want waiting_human", issue.Status)
+	}
+
+	store, err := storage.NewFS(tmp)
+	if err != nil {
+		t.Fatalf("init storage: %v", err)
+	}
+	resultPath := storage.ResultPath(issue.ProjectID, issue.ID, "research")
+	resultData, err := store.Read(ctx, resultPath)
+	if err != nil {
+		t.Fatalf("read result.json: %v", err)
+	}
+	var result PhaseResult
+	if err := json.Unmarshal(resultData, &result); err != nil {
+		t.Fatalf("parse result.json: %v", err)
+	}
+	if result.Status != "waiting_human" {
+		t.Fatalf("research result status = %q, want waiting_human", result.Status)
+	}
+}
+
 func TestResume_RetryWithFeedback(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()

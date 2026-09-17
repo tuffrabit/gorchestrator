@@ -35,6 +35,10 @@
       accept=".txt,.md,.markdown,.html,.htm,.json,.jsonl,.yaml,.yml,.xml,.csv,.tsv,.log,.toml,.ini,.cfg,.conf,.rst,.tex,.diff,.patch,.go,.py,.js,.ts,.tsx,.jsx,.css,.sql,.sh,.bash,.env,.properties">
     <p class="card-meta" style="margin-top:0.35rem">Text-like extensions only (e.g. .md, .txt, .log, .json). Max 20 files, 1&nbsp;MB each.</p>
   </div>
+  <div class="form-row">
+    <label for="depends_on">Depends on <span class="card-meta">(optional, comma-separated issue IDs)</span></label>
+    <input id="depends_on" name="depends_on" placeholder="12,14" value="{{.DependsOn}}">
+  </div>
   <div id="agent-flavors">
     {{template "partials/submit_flavors.html" .}}
   </div>

@@ -17,9 +17,10 @@ import (
 // treats the reply text as the phase output. It mirrors runAgentLoop's return
 // contract (output, done, rationale, effort, tokens, err) so runPhase's
 // attempt/adjudication machinery applies unchanged. done is always true: there
-// is no finish_task, so self-adjudication passes and (for the planner) the
-// missing effort tag defaults to high, forcing the human gate before
-// implementation.
+// is no finish_task, and with the human-gate default the boundary pauses for a
+// human decision regardless (under an explicit `self` opt-in it passes; for
+// the planner the missing effort tag defaults to high, forcing the human gate
+// before implementation).
 func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, attempt, loop int) ([]byte, bool, string, string, int, error) {
 	instruction := resolveSingleShotPrompt(phase, cfg)
 	if instruction == "" {

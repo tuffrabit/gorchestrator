@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -29,6 +30,7 @@ type Issue struct {
 	ExternalID          string
 	AgentFlavorsJSON    string // frozen cast: {"researcher":"cheap",...}
 	BudgetOverridesJSON string // provider → absolute session ceiling: {"openai":200000}
+	DependsOnJSON       string // issue IDs that must be done first: [12,14]
 	CreatedAt           string
 	UpdatedAt           string
 }
@@ -53,29 +55,30 @@ func NewIssueRepo(db *sql.DB) *IssueRepo {
 
 // Create inserts an issue as in_progress (CLI path) and returns it.
 func (r *IssueRepo) Create(projectID int64, title string) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "", "{}")
+	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "", "{}", "[]")
 }
 
 // CreateQueued inserts an issue with status queued for the daemon worker pool.
 func (r *IssueRepo) CreateQueued(projectID int64, title string, dryRun bool) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, "manual", "", "{}")
+	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, "manual", "", "{}", "[]")
 }
 
-// CreateQueuedFrom creates a queued issue with provenance (webhook/github/jira).
-func (r *IssueRepo) CreateQueuedFrom(projectID int64, title string, dryRun bool, source, externalID, agentFlavorsJSON string) (*Issue, error) {
+// CreateQueuedFrom creates a queued issue with provenance (webhook/github/jira)
+// and an optional dependency list (JSON array of issue IDs, "" = none).
+func (r *IssueRepo) CreateQueuedFrom(projectID int64, title string, dryRun bool, source, externalID, agentFlavorsJSON, dependsOnJSON string) (*Issue, error) {
 	if source == "" {
 		source = "manual"
 	}
-	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, source, externalID, agentFlavorsJSON)
+	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, source, externalID, agentFlavorsJSON, dependsOnJSON)
 }
 
 // CreateWithCast inserts an in_progress issue with a frozen agent cast (CLI Run path).
-func (r *IssueRepo) CreateWithCast(projectID int64, title, agentFlavorsJSON string) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "", agentFlavorsJSON)
+func (r *IssueRepo) CreateWithCast(projectID int64, title, agentFlavorsJSON, dependsOnJSON string) (*Issue, error) {
+	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "", agentFlavorsJSON, dependsOnJSON)
 }
 
 // CreateWithStatus inserts an issue with the given status and dry-run flag.
-func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryRun bool, source, externalID, agentFlavorsJSON string) (*Issue, error) {
+func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryRun bool, source, externalID, agentFlavorsJSON, dependsOnJSON string) (*Issue, error) {
 	dry := 0
 	if dryRun {
 		dry = 1
@@ -86,9 +89,12 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 	if agentFlavorsJSON == "" {
 		agentFlavorsJSON = "{}"
 	}
+	if dependsOnJSON == "" {
+		dependsOnJSON = "[]"
+	}
 	res, err := r.db.Exec(
-		`INSERT INTO issues (project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json) VALUES (?, ?, '', ?, 'research', ?, ?, ?, ?)`,
-		projectID, title, status, dry, source, externalID, agentFlavorsJSON,
+		`INSERT INTO issues (project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, depends_on_json) VALUES (?, ?, '', ?, 'research', ?, ?, ?, ?, ?)`,
+		projectID, title, status, dry, source, externalID, agentFlavorsJSON, dependsOnJSON,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert issue: %w", err)
@@ -100,11 +106,12 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 	return r.Get(id)
 }
 
+// issueColumns is the canonical SELECT list for an issue row.
+const issueColumns = `id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, depends_on_json, created_at, updated_at`
+
 // Get fetches an issue by id.
 func (r *IssueRepo) Get(id int64) (*Issue, error) {
-	row := r.db.QueryRow(`
-		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, created_at, updated_at
-		FROM issues WHERE id = ?`, id)
+	row := r.db.QueryRow(`SELECT `+issueColumns+` FROM issues WHERE id = ?`, id)
 	return scanIssue(row)
 }
 
@@ -140,8 +147,14 @@ func (r *IssueRepo) UpdateStatus(id int64, status, phase string) error {
 	return err
 }
 
-// ClaimQueued atomically claims the oldest queued issue by setting it in_progress.
-// Returns nil, nil when the queue is empty.
+// claimCandidateLimit bounds how many queued rows ClaimQueued inspects per attempt.
+const claimCandidateLimit = 50
+
+// ClaimQueued atomically claims the oldest queued issue with satisfied
+// dependencies by setting it in_progress. Queued issues whose depends_on IDs
+// are not all done are skipped (failed/cancelled deps do NOT unblock); FIFO
+// order is preserved among the eligible. Returns nil, nil when the queue is
+// empty or every candidate is blocked.
 func (r *IssueRepo) ClaimQueued() (*Issue, error) {
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -149,40 +162,140 @@ func (r *IssueRepo) ClaimQueued() (*Issue, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var id int64
-	err = tx.QueryRow(`
-		SELECT id FROM issues
+	rows, err := tx.Query(`
+		SELECT id, depends_on_json FROM issues
 		WHERE status = ?
 		ORDER BY created_at ASC, id ASC
-		LIMIT 1`, StatusQueued).Scan(&id)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+		LIMIT ?`, StatusQueued, claimCandidateLimit)
 	if err != nil {
 		return nil, fmt.Errorf("select queued: %w", err)
 	}
-
-	res, err := tx.Exec(`
-		UPDATE issues
-		SET status = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND status = ?`,
-		StatusInProgress, id, StatusQueued,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("claim update: %w", err)
+	type candidate struct {
+		id        int64
+		dependsOn string
 	}
-	n, err := res.RowsAffected()
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.dependsOn); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan queued: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("select queued: %w", err)
+	}
+	rows.Close()
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	for _, c := range candidates {
+		if deps := ParseDependsOn(c.dependsOn); len(deps) > 0 {
+			statuses, err := statusesByID(tx, deps)
+			if err != nil {
+				return nil, fmt.Errorf("check deps for issue %d: %w", c.id, err)
+			}
+			if len(unsatisfiedDeps(deps, statuses)) > 0 {
+				continue // blocked; try the next candidate
+			}
+		}
+
+		res, err := tx.Exec(`
+			UPDATE issues
+			SET status = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND status = ?`,
+			StatusInProgress, c.id, StatusQueued,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("claim update: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			// Lost the race; treat as empty for this attempt.
+			return nil, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit claim: %w", err)
+		}
+		return r.Get(c.id)
+	}
+	// Every queued candidate is blocked by unsatisfied dependencies.
+	return nil, nil
+}
+
+// UnsatisfiedDeps returns the subset of deps whose issues are missing or not
+// done. Read-side helper for the "blocked" view of queued issues.
+func (r *IssueRepo) UnsatisfiedDeps(deps []int64) ([]int64, error) {
+	if len(deps) == 0 {
+		return nil, nil
+	}
+	statuses, err := statusesByID(r.db, deps)
 	if err != nil {
 		return nil, err
 	}
-	if n == 0 {
-		// Lost the race; treat as empty for this attempt.
-		return nil, nil
+	return unsatisfiedDeps(deps, statuses), nil
+}
+
+// ParseDependsOn decodes the depends_on_json column (JSON array of issue IDs).
+// Empty/invalid values yield no dependencies, mirroring the cast JSON helpers.
+func ParseDependsOn(raw string) []int64 {
+	if raw == "" || raw == "[]" {
+		return nil
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit claim: %w", err)
+	var out []int64
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
 	}
-	return r.Get(id)
+	return out
+}
+
+type idQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// statusesByID fetches current statuses for the given issue IDs.
+func statusesByID(q idQuerier, ids []int64) (map[int64]string, error) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := q.Query(
+		`SELECT id, status FROM issues WHERE id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("select dep statuses: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int64]string, len(ids))
+	for rows.Next() {
+		var id int64
+		var status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return nil, err
+		}
+		out[id] = status
+	}
+	return out, rows.Err()
+}
+
+// unsatisfiedDeps returns deps that are missing or whose status is not done.
+func unsatisfiedDeps(deps []int64, statuses map[int64]string) []int64 {
+	var out []int64
+	for _, id := range deps {
+		if statuses[id] != StatusDone {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // List returns issues matching the filter, newest updated first.
@@ -207,11 +320,11 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 	}
 	args = append(args, limit, f.Offset)
 	q := fmt.Sprintf(`
-		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, created_at, updated_at
+		SELECT %s
 		FROM issues
 		%s
 		ORDER BY updated_at DESC, id DESC
-		LIMIT ? OFFSET ?`, where)
+		LIMIT ? OFFSET ?`, issueColumns, where)
 	rows, err := r.db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
@@ -222,8 +335,7 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 
 // ListNonTerminal returns issues that are not in a terminal status.
 func (r *IssueRepo) ListNonTerminal() ([]*Issue, error) {
-	rows, err := r.db.Query(`
-		SELECT id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, created_at, updated_at
+	rows, err := r.db.Query(`SELECT `+issueColumns+`
 		FROM issues
 		WHERE status NOT IN (?, ?, ?)
 		ORDER BY id ASC`,
@@ -284,19 +396,14 @@ func (r *IssueRepo) Delete(id int64) error {
 func scanIssue(row *sql.Row) (*Issue, error) {
 	i := &Issue{}
 	var dry int
-	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.DependsOnJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
 	i.DryRun = dry != 0
-	if i.AgentFlavorsJSON == "" {
-		i.AgentFlavorsJSON = "{}"
-	}
-	if i.BudgetOverridesJSON == "" {
-		i.BudgetOverridesJSON = "{}"
-	}
+	i.normalizeJSON()
 	return i, nil
 }
 
@@ -305,17 +412,24 @@ func scanIssues(rows *sql.Rows) ([]*Issue, error) {
 	for rows.Next() {
 		i := &Issue{}
 		var dry int
-		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.DependsOnJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		i.DryRun = dry != 0
-		if i.AgentFlavorsJSON == "" {
-			i.AgentFlavorsJSON = "{}"
-		}
-		if i.BudgetOverridesJSON == "" {
-			i.BudgetOverridesJSON = "{}"
-		}
+		i.normalizeJSON()
 		out = append(out, i)
 	}
 	return out, rows.Err()
+}
+
+func (i *Issue) normalizeJSON() {
+	if i.AgentFlavorsJSON == "" {
+		i.AgentFlavorsJSON = "{}"
+	}
+	if i.BudgetOverridesJSON == "" {
+		i.BudgetOverridesJSON = "{}"
+	}
+	if i.DependsOnJSON == "" {
+		i.DependsOnJSON = "[]"
+	}
 }

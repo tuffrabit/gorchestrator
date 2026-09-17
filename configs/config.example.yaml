@@ -19,7 +19,7 @@ tools:
 # Merge: built-in defaults → default_model → agents.<type> → project flavor → frozen issue cast.
 # agents:
 #   researcher:
-#     adjudicator: self
+#     adjudicator: human  # default; "self" opts back into agent self-approval
 #     max_attempts: 3
 #     loops: 1
 #     temperature: 0.2
@@ -39,11 +39,11 @@ tools:
 #       provider: openai
 #       model: o3-mini
 #   planner:
-#     adjudicator: self
+#     adjudicator: human  # default; "self" opts back into agent self-approval
 #     max_attempts: 3
 #     loops: 1
 #   implementer:
-#     adjudicator: self
+#     adjudicator: human  # default; "self" opts back into agent self-approval
 #     max_attempts: 3
 #     loops: 1
 #     mcp_servers: []          # per-agent MCP server allowlist (deny by default)

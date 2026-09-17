@@ -281,6 +281,11 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
+	dependsOn, err := parseDependsOnForm(r.FormValue("depends_on"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
 		ProjectName:  project,
 		IssueTitle:   title,
@@ -288,6 +293,7 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 		Attachments:  attachments,
 		DryRun:       dryRun,
 		AgentFlavors: flavors,
+		DependsOn:    dependsOn,
 	})
 	if err != nil {
 		msg := err.Error()
@@ -323,6 +329,27 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	if err := render(w, "partials/issue_card.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// parseDependsOnForm parses a comma-separated issue ID list ("12,14").
+func parseDependsOnForm(raw string) ([]int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []int64
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("depends_on: invalid issue id %q", part)
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 // collectFormAttachments reads multipart files named "attachments".
@@ -375,6 +402,7 @@ func (s *Server) submitFormData(r *http.Request, selectedProject, title string, 
 		"SelectedProject": selectedProject,
 		"Title":           title,
 		"Description":     "",
+		"DependsOn":       "",
 		"DryRun":          dryRun,
 		"CSRF":            auth.CSRFToken(r),
 		"FlavorSelects":   s.flavorSelectsForProject(selectedProject),

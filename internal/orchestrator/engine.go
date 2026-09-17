@@ -349,6 +349,9 @@ type RunOptions struct {
 	// AgentFlavors is an optional cast: map agent type → flavor name.
 	// Missing keys are filled from the project's default when flavors exist.
 	AgentFlavors map[string]string
+	// DependsOn lists issue IDs that must reach done before this issue is
+	// claimable by daemon workers. Every ID must reference an existing issue.
+	DependsOn []int64
 }
 
 // Run creates a new issue and executes the full pipeline.
@@ -363,7 +366,12 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 		return err
 	}
 
-	issue, err := e.issues.CreateWithCast(project.ID, opts.IssueTitle, castJSON)
+	dependsOnJSON, err := e.validateDependsOn(opts.DependsOn)
+	if err != nil {
+		return err
+	}
+
+	issue, err := e.issues.CreateWithCast(project.ID, opts.IssueTitle, castJSON, dependsOnJSON)
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)
 	}
@@ -508,6 +516,39 @@ func (e *Engine) resolveAndMarshalCast(projectName string, requested map[string]
 	data, err := json.Marshal(cast)
 	if err != nil {
 		return "", fmt.Errorf("marshal agent flavors: %w", err)
+	}
+	return string(data), nil
+}
+
+// validateDependsOn verifies that every dependency references an existing issue
+// and marshals the deduplicated list for storage. Deps can only point at issues
+// that already exist at submit time, so cycles are impossible by construction.
+func (e *Engine) validateDependsOn(deps []int64) (string, error) {
+	if len(deps) == 0 {
+		return "[]", nil
+	}
+	seen := make(map[int64]bool, len(deps))
+	ids := make([]int64, 0, len(deps))
+	for _, id := range deps {
+		if id <= 0 {
+			return "", fmt.Errorf("depends_on issue id %d is invalid", id)
+		}
+		if seen[id] {
+			continue
+		}
+		dep, err := e.issues.Get(id)
+		if err != nil {
+			return "", fmt.Errorf("depends_on lookup issue %d: %w", id, err)
+		}
+		if dep == nil {
+			return "", fmt.Errorf("depends_on issue %d does not exist", id)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return "", fmt.Errorf("marshal depends_on: %w", err)
 	}
 	return string(data), nil
 }

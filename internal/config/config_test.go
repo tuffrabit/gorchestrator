@@ -177,6 +177,50 @@ projects:
 	}
 }
 
+func TestLoadAcceptsKnownAdjudicators(t *testing.T) {
+	for _, name := range []string{"null", "self", "human"} {
+		cfg, err := loadFromString(t, "agents:\n  planner:\n    adjudicator: \""+name+"\"\n")
+		if err != nil {
+			t.Fatalf("adjudicator %q: load: %v", name, err)
+		}
+		if cfg.Agents["planner"].Adjudicator != name {
+			t.Fatalf("adjudicator = %q, want %q", cfg.Agents["planner"].Adjudicator, name)
+		}
+	}
+	// Unset inherits the built-in default, which is the human gate.
+	cfg, err := loadFromString(t, "")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Agent("planner").Adjudicator; got != "human" {
+		t.Fatalf("default adjudicator = %q, want human", got)
+	}
+}
+
+func TestLoadRejectsUnknownAdjudicator(t *testing.T) {
+	_, err := loadFromString(t, `
+agents:
+  researcher:
+    adjudicator: selff
+`)
+	if err == nil || !strings.Contains(err.Error(), `agents.researcher: unknown adjudicator "selff"`) {
+		t.Fatalf("want agents.researcher adjudicator error, got %v", err)
+	}
+
+	_, err = loadFromString(t, `
+projects:
+  proj:
+    agents:
+      planner:
+        flavors:
+          fast:
+            adjudicator: selff
+`)
+	if err == nil || !strings.Contains(err.Error(), `projects.proj.agents.planner.flavors.fast: unknown adjudicator "selff"`) {
+		t.Fatalf("want flavor-path adjudicator error, got %v", err)
+	}
+}
+
 func TestDefaultPromptAccessors(t *testing.T) {
 	for _, agentType := range []string{"researcher", "planner", "implementer"} {
 		if DefaultSystemPrompt(agentType) == "" {

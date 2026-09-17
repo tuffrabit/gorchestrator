@@ -24,6 +24,7 @@ type submitIssueRequest struct {
 	SourcePath   string            `json:"source_path"` // rejected if set
 	DryRun       bool              `json:"dry_run"`
 	AgentFlavors map[string]string `json:"agent_flavors"`
+	DependsOn    []int64           `json:"depends_on"`
 }
 
 type decideRequest struct {
@@ -62,6 +63,7 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		Description:  desc,
 		DryRun:       req.DryRun,
 		AgentFlavors: req.AgentFlavors,
+		DependsOn:    req.DependsOn,
 	})
 	if err != nil {
 		msg := err.Error()
@@ -407,6 +409,9 @@ func viewToJSON(v *orchestrator.IssueView) map[string]any {
 	if v.HoldReason != "" {
 		m["hold_reason"] = v.HoldReason
 	}
+	if len(v.BlockedBy) > 0 {
+		m["blocked_by"] = v.BlockedBy
+	}
 	if len(v.Attachments) > 0 {
 		m["attachments"] = v.Attachments
 	} else {
@@ -464,6 +469,7 @@ func isSubmitClientError(msg string) bool {
 		strings.Contains(msg, "no projects declared") ||
 		strings.Contains(msg, "flavor") ||
 		strings.Contains(msg, "agent_flavors") ||
+		strings.Contains(msg, "depends_on") ||
 		strings.Contains(msg, "has no ") ||
 		strings.Contains(msg, "attachment") ||
 		strings.Contains(msg, "description exceeds") ||

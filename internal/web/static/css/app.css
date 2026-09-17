@@ -336,6 +336,15 @@ button, input, select, textarea {
   border: 1px solid color-mix(in srgb, var(--bar-waiting) 55%, transparent);
   background: color-mix(in srgb, var(--bar-waiting) 12%, transparent);
 }
+.blocked-chip {
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  color: var(--bar-waiting);
+  border: 1px solid color-mix(in srgb, var(--bar-waiting) 55%, transparent);
+  background: color-mix(in srgb, var(--bar-waiting) 12%, transparent);
+}
 .hold-text {
   font-family: var(--font-mono);
   font-size: 0.82rem;

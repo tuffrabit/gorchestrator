@@ -363,6 +363,90 @@ func TestPartialSubmit_RendersFlavorSelects(t *testing.T) {
 	}
 }
 
+func TestAPI_Submit_DependsOn(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	// Missing dependency → 422.
+	body := `{"project":"acme","title":"orphan","dry_run":true,"depends_on":[999]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("missing dep status = %d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+
+	// Submit a blocker, then a dependent on it.
+	body = `{"project":"acme","title":"blocker","dry_run":true}`
+	req = httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("blocker submit status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var blocker map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &blocker); err != nil {
+		t.Fatal(err)
+	}
+	blockerID := int64(blocker["id"].(float64))
+
+	body = `{"project":"acme","title":"dependent","dry_run":true,"depends_on":[` + itoa(blockerID) + `]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/issues", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dependent submit status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var dependent map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &dependent); err != nil {
+		t.Fatal(err)
+	}
+
+	// Blocker is queued, not done → dependent lists blocked_by.
+	blocked, ok := dependent["blocked_by"].([]any)
+	if !ok || len(blocked) != 1 || int64(blocked[0].(float64)) != blockerID {
+		t.Fatalf("blocked_by = %#v, want [%d]", dependent["blocked_by"], blockerID)
+	}
+
+	// List endpoint surfaces the same derived field.
+	req = httptest.NewRequest(http.MethodGet, "/api/issues", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"blocked_by":[`) {
+		t.Fatalf("list payload missing blocked_by: %s", rec.Body.String())
+	}
+
+	// Blocker done → dependent no longer blocked.
+	if err := eng.Issues().UpdateStatus(blockerID, sqlite.StatusDone, "implementation"); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/issues/"+itoa(int64(dependent["id"].(float64))), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "blocked_by") {
+		t.Fatalf("blocked_by should be absent after dep done: %s", rec.Body.String())
+	}
+}
+
 func itoa(id int64) string {
 	return strconv.FormatInt(id, 10)
 }
