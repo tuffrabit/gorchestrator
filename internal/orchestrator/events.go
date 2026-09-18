@@ -17,6 +17,10 @@ const (
 	EventDecisionRequested = "decision_requested"
 	EventDecisionApplied   = "decision_applied"
 	EventRunEvent          = "run_event"
+	// EventModelActivity fires when an issue starts/finishes waiting on the
+	// exclusive-mode lock, loading a model, or unloading — so the dashboard
+	// can show why a long phase hasn't started/finished yet.
+	EventModelActivity = "model_activity"
 )
 
 // Event is a daemon bus message for SSE and internal subscribers.

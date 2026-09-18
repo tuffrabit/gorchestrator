@@ -409,6 +409,9 @@ func viewToJSON(v *orchestrator.IssueView) map[string]any {
 	if v.HoldReason != "" {
 		m["hold_reason"] = v.HoldReason
 	}
+	if v.ModelActivity != nil {
+		m["model_activity"] = v.ModelActivity
+	}
 	if len(v.BlockedBy) > 0 {
 		m["blocked_by"] = v.BlockedBy
 	}

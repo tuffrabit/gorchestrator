@@ -287,6 +287,7 @@ document.addEventListener('DOMContentLoaded', function () {
     es.addEventListener('issue_status', onIssueEvent);
     es.addEventListener('phase_started', onIssueEvent);
     es.addEventListener('phase_finished', onIssueEvent);
+    es.addEventListener('model_activity', onIssueEvent);
     es.addEventListener('decision_requested', onIssueEvent);
     es.addEventListener('decision_applied', onIssueEvent);
     es.addEventListener('issue_submitted', onIssueEvent);

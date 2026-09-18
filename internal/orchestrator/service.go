@@ -54,6 +54,9 @@ type IssueView struct {
 	// BlockedBy lists unsatisfied dependency IDs for queued issues (read-time
 	// view; "blocked" is not a status). Empty when not blocked.
 	BlockedBy []int64
+	// ModelActivity is in-flight inference lifecycle work (waiting on the
+	// exclusive-mode server lock, loading, or unloading). Nil when idle.
+	ModelActivity *ModelActivity
 }
 
 // SubmitIssue creates the issue (snapshot source if configured), sets status
@@ -569,16 +572,22 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 			blockedBy, _ = e.issues.UnsatisfiedDeps(deps)
 		}
 	}
+	var modelAct *ModelActivity
+	if act, ok := e.currentModelActivity(issue.ID); ok {
+		a := act
+		modelAct = &a
+	}
 	return &IssueView{
-		Issue:       issue,
-		ProjectName: name,
-		TokenTotal:  tokens,
-		Attempt:     attempt,
-		PhaseStatus: phaseStatus,
-		HoldReason:  holdReason,
-		Phases:      phases,
-		Attachments: atts,
-		BlockedBy:   blockedBy,
+		Issue:         issue,
+		ProjectName:   name,
+		TokenTotal:    tokens,
+		Attempt:       attempt,
+		PhaseStatus:   phaseStatus,
+		HoldReason:    holdReason,
+		Phases:        phases,
+		Attachments:   atts,
+		BlockedBy:     blockedBy,
+		ModelActivity: modelAct,
 	}, nil
 }
 

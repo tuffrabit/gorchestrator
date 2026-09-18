@@ -20,6 +20,7 @@
     <span class="card-meta">
       <span class="status-chip">{{statusLabel $issue.Status}}</span>
       <span class="phase-chip" title="current phase">{{$issue.CurrentPhase}}</span>
+      {{if .Issue.ModelActivity}}<span class="model-chip" title="inference server is busy for this issue"><span class="model-chip-dot" aria-hidden="true"></span>{{.Issue.ModelActivity.Label}}</span>{{end}}
       {{if .Issue.BlockedBy}}<span class="blocked-chip" title="queued — waiting on dependencies">blocked by {{range $i, $dep := .Issue.BlockedBy}}{{if $i}}, {{end}}#{{$dep}}{{end}}</span>{{end}}
       {{if .Issue.PhaseStatus}}<span class="mono" title="phase result status">{{.Issue.PhaseStatus}}</span>{{end}}
       {{if .Issue.Attempt}}<span>attempt {{.Issue.Attempt}}</span>{{end}}

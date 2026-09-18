@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -138,6 +139,28 @@ func TestRun_Inference_UnloadOnWaitingHuman(t *testing.T) {
 // when the inference block is absent.
 type spyController struct {
 	calls int
+}
+
+// blockingController blocks inside EnsureLoaded until released, simulating a
+// slow model load so the dashboard activity state can be observed mid-load.
+type blockingController struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (c *blockingController) EnsureLoaded(ctx context.Context, model string, timeout time.Duration) error {
+	c.enteredOnce.Do(func() { close(c.entered) })
+	select {
+	case <-c.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *blockingController) UnloadAll(ctx context.Context) error {
+	return nil
 }
 
 func (s *spyController) EnsureLoaded(ctx context.Context, model string, timeout time.Duration) error {
@@ -410,6 +433,127 @@ func TestRun_Inference_LoadFailureNonExclusive(t *testing.T) {
 	}
 	if claimed.ID != other.ID {
 		t.Fatalf("ClaimIssue claimed %d, want %d", claimed.ID, other.ID)
+	}
+}
+
+func TestRun_Inference_ModelActivityVisibleDuringLoad(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: "http://127.0.0.1:1", // unused: controller is replaced below
+		Mode:    "exclusive",
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+	ctl := &blockingController{entered: make(chan struct{}), release: make(chan struct{})}
+	eng.controller = ctl
+
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	eventCh := eng.Subscribe(subCtx, EventFilter{IssueID: issue.ID})
+
+	done := make(chan error, 1)
+	go func() { done <- eng.runPipeline(ctx, project, issue, true) }()
+
+	select {
+	case <-ctl.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EnsureLoaded not entered")
+	}
+
+	// While the load is blocked, the issue view must surface it.
+	view, err := eng.GetIssue(ctx, issue.ID)
+	if err != nil || view == nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if view.ModelActivity == nil || view.ModelActivity.Op != ModelOpLoad {
+		t.Fatalf("ModelActivity = %+v, want op %q", view.ModelActivity, ModelOpLoad)
+	}
+	if view.ModelActivity.Model != "dryrun-model" {
+		t.Fatalf("ModelActivity.Model = %q, want dryrun-model", view.ModelActivity.Model)
+	}
+
+	// SSE: the model_activity event was published with the label.
+	var sawActivity bool
+	for _, ev := range drainEvents(eventCh) {
+		if ev.Type == EventModelActivity && strings.Contains(ev.Message, "loading model dryrun-model") {
+			sawActivity = true
+		}
+	}
+	if !sawActivity {
+		t.Fatal("missing model_activity SSE event for load")
+	}
+
+	close(ctl.release)
+	if err := <-done; err != nil {
+		t.Fatalf("runPipeline: %v", err)
+	}
+
+	// After the pipeline completes, no activity remains.
+	view, err = eng.GetIssue(ctx, issue.ID)
+	if err != nil || view == nil {
+		t.Fatalf("GetIssue after completion: %v", err)
+	}
+	if view.ModelActivity != nil {
+		t.Fatalf("ModelActivity after completion = %+v, want nil", view.ModelActivity)
+	}
+}
+
+func TestRun_Inference_ModelActivityWaitOnExclusiveLock(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	stub := newLlamaSwapStub()
+	srv := newStubServer(t, stub)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: srv.URL,
+		Mode:    "exclusive",
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+
+	// Hold the exclusive lock so the pipeline blocks before loading.
+	modelLocks.Lock(srv.URL)
+
+	done := make(chan error, 1)
+	go func() { done <- eng.runPipeline(ctx, project, issue, true) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if act, ok := eng.currentModelActivity(issue.ID); ok && act.Op == ModelOpWait {
+			break
+		}
+		if time.Now().After(deadline) {
+			modelLocks.Unlock(srv.URL)
+			t.Fatal("issue never showed waiting-on-lock activity")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	view, err := eng.GetIssue(ctx, issue.ID)
+	if err != nil || view == nil {
+		modelLocks.Unlock(srv.URL)
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if view.ModelActivity == nil || view.ModelActivity.Op != ModelOpWait {
+		modelLocks.Unlock(srv.URL)
+		t.Fatalf("ModelActivity = %+v, want op %q", view.ModelActivity, ModelOpWait)
+	}
+	if view.ModelActivity.Label() != "waiting for model server" {
+		modelLocks.Unlock(srv.URL)
+		t.Fatalf("Label = %q, want %q", view.ModelActivity.Label(), "waiting for model server")
+	}
+
+	modelLocks.Unlock(srv.URL)
+	if err := <-done; err != nil {
+		t.Fatalf("runPipeline: %v", err)
+	}
+	if act, ok := eng.currentModelActivity(issue.ID); ok {
+		t.Fatalf("activity after completion = %+v, want cleared", act)
 	}
 }
 

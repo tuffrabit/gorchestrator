@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/v2/agent"
@@ -85,23 +86,27 @@ type eventRecord struct {
 
 // Engine executes the multi-agent pipeline.
 type Engine struct {
-	cfg       *config.Config
-	store     storage.Port
-	db        *sql.DB
-	projects  *sqlite.ProjectRepo
-	issues    *sqlite.IssueRepo
-	runs      *sqlite.RunRepo
-	decisions *sqlite.DecisionRepo
-	users     *sqlite.UserRepo
-	sessions  *sqlite.SessionRepo
-	audit     *sqlite.AuditRepo
-	notifs    *sqlite.NotificationRepo
+	cfg        *config.Config
+	store      storage.Port
+	db         *sql.DB
+	projects   *sqlite.ProjectRepo
+	issues     *sqlite.IssueRepo
+	runs       *sqlite.RunRepo
+	decisions  *sqlite.DecisionRepo
+	users      *sqlite.UserRepo
+	sessions   *sqlite.SessionRepo
+	audit      *sqlite.AuditRepo
+	notifs     *sqlite.NotificationRepo
 	bus        *EventBus
 	notifier   *notify.Dispatcher
 	escalator  *notify.Escalator
 	mcp        *gorchmcp.Manager
 	controller Controller
 	breaker    *inferenceBreaker
+	// modelActMu guards modelActivity: per-issue in-flight inference
+	// lifecycle work (wait/load/unload), surfaced on the dashboard.
+	modelActMu    sync.Mutex
+	modelActivity map[int64]ModelActivity
 }
 
 // NewEngine creates an engine from configuration.
@@ -747,19 +752,38 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 		ev.Timestamp = time.Now().UTC().Format(time.RFC3339)
 		recordEvent(ctx, e.store, eventsPath, ev)
 	}
+	// publishActivity mirrors lifecycle transitions to the dashboard: a nil
+	// act clears the chip, otherwise the card re-renders showing it.
+	publishActivity := func(act *ModelActivity) {
+		msg := ""
+		if act != nil {
+			e.setModelActivity(issue.ID, *act)
+			msg = act.Label()
+		} else {
+			e.clearModelActivity(issue.ID)
+		}
+		e.Publish(Event{
+			Type: EventModelActivity, IssueID: issue.ID, ProjectID: project.ID,
+			Phase: phaseName, Message: msg,
+		})
+	}
 
 	locked := false
 	if inf.Mode == "exclusive" {
 		key := inf.BaseURL
 		if !modelLocks.TryLock(key) {
 			record(eventRecord{Type: "model_wait", Model: model})
+			publishActivity(&ModelActivity{Op: ModelOpWait, Model: model, Phase: phaseName})
 			modelLocks.Lock(key)
+			publishActivity(nil)
 		}
 		locked = true
 	}
 
+	publishActivity(&ModelActivity{Op: ModelOpLoad, Model: model, Phase: phaseName})
 	start := time.Now()
 	loadErr := e.controller.EnsureLoaded(ctx, model, modelTimeout(phaseCfg.Model))
+	publishActivity(nil)
 	loadEv := eventRecord{Type: "model_load", Model: model, DurationMs: time.Since(start).Milliseconds()}
 	if loadErr != nil {
 		loadEv.Error = loadErr.Error()
@@ -771,20 +795,22 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 	}
 	record(loadEv)
 
-		return func() error {
-			start := time.Now()
-			err := e.controller.UnloadAll(ctx)
-			ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
-			if err != nil {
-				ev.Error = err.Error()
-				log.Printf("issue %d phase %s: model unload failed: %v", issue.ID, phaseName, err)
-			}
-			record(ev)
-			if locked {
-				modelLocks.Unlock(inf.BaseURL)
-			}
-			return err
-		}, nil
+	return func() error {
+		publishActivity(&ModelActivity{Op: ModelOpUnload, Model: model, Phase: phaseName})
+		defer publishActivity(nil)
+		start := time.Now()
+		err := e.controller.UnloadAll(ctx)
+		ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
+		if err != nil {
+			ev.Error = err.Error()
+			log.Printf("issue %d phase %s: model unload failed: %v", issue.ID, phaseName, err)
+		}
+		record(ev)
+		if locked {
+			modelLocks.Unlock(inf.BaseURL)
+		}
+		return err
+	}, nil
 }
 
 // failIssueInferenceError marks an issue failed after an inference-side error
