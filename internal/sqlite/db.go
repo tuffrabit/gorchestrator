@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -197,7 +198,16 @@ func Open(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout and foreign_keys are per-connection pragmas: setting them
+	// via Exec would only cover one pooled connection, so concurrent daemon
+	// workers on fresh connections hit SQLITE_BUSY. The _pragma DSN options
+	// apply to every connection the pool opens.
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	u.RawQuery = q.Encode()
+	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}

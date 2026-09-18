@@ -15,6 +15,7 @@ const (
 	StatusDone         = "done"
 	StatusFailed       = "failed"
 	StatusCancelled    = "cancelled"
+	StatusStopped      = "stopped"
 )
 
 // Issue represents an issue row.
@@ -337,9 +338,9 @@ func (r *IssueRepo) List(f IssueListFilter) ([]*Issue, error) {
 func (r *IssueRepo) ListNonTerminal() ([]*Issue, error) {
 	rows, err := r.db.Query(`SELECT `+issueColumns+`
 		FROM issues
-		WHERE status NOT IN (?, ?, ?)
+		WHERE status NOT IN (?, ?, ?, ?)
 		ORDER BY id ASC`,
-		StatusDone, StatusFailed, StatusCancelled,
+		StatusDone, StatusFailed, StatusCancelled, StatusStopped,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list non-terminal issues: %w", err)

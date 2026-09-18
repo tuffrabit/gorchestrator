@@ -180,6 +180,7 @@ button, input, select, textarea {
 .issue-card.status-failed { background: var(--wash-failed); border-left-color: var(--bar-failed); }
 .issue-card.status-done { background: var(--wash-done); border-left-color: var(--bar-done); }
 .issue-card.status-cancelled { background: var(--wash-cancelled); border-left-color: var(--bar-cancelled); }
+.issue-card.status-stopped { background: var(--wash-cancelled); border-left-color: var(--bar-cancelled); }
 
 @keyframes pulse-edge {
   0%, 100% { box-shadow: inset 0 0 0 1px rgba(255, 45, 149, 0.15); }

@@ -52,6 +52,7 @@
         <option value="done" {{if eq .FilterStatus "done"}}selected{{end}}>done</option>
         <option value="failed" {{if eq .FilterStatus "failed"}}selected{{end}}>failed</option>
         <option value="cancelled" {{if eq .FilterStatus "cancelled"}}selected{{end}}>cancelled</option>
+        <option value="stopped" {{if eq .FilterStatus "stopped"}}selected{{end}}>stopped</option>
       </select>
       <a class="chip {{if eq .FilterStatus "waiting_human"}}active{{end}}" href="/?status=needs_you">Needs you</a>
     </form>

@@ -56,6 +56,8 @@ func statusClass(status string) string {
 		return "status-done"
 	case "cancelled":
 		return "status-cancelled"
+	case "stopped":
+		return "status-stopped"
 	default:
 		return "status-queued"
 	}
@@ -75,6 +77,8 @@ func statusLabel(status string) string {
 		return "done"
 	case "cancelled":
 		return "cancelled"
+	case "stopped":
+		return "stopped"
 	default:
 		return status
 	}

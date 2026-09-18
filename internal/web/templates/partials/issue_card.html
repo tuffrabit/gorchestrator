@@ -90,6 +90,16 @@
         onclick="openArtifactDrawer({{$issue.ID}}, 'output', 'implementation')"
         title="Implementation workspace tree and per-file diffs">workspace</button>
       {{if .CanWrite}}
+      {{if eq $issue.Status "in_progress"}}
+      <button class="btn btn-danger" type="button"
+        title="Stop the active agent: aborts in-flight inference and unloads the model"
+        hx-post="/partials/issues/{{$issue.ID}}/stop"
+        hx-target="#issue-{{$issue.ID}}"
+        hx-swap="outerHTML"
+        hx-confirm="Stop the active agent on issue #{{$issue.ID}} «{{$issue.Title}}»? The run is aborted and the issue is marked stopped.">
+        Stop agent
+      </button>
+      {{else}}
       <button class="btn btn-danger" type="button"
         title="Permanently delete this issue and all artifacts"
         hx-delete="/partials/issues/{{$issue.ID}}"
@@ -99,9 +109,10 @@
         Delete
       </button>
       {{end}}
+      {{end}}
     </div>
     {{if .CanWrite}}
-      {{if or (eq $issue.Status "waiting_human") (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
+      {{if or (eq $issue.Status "waiting_human") (eq $issue.Status "failed") (eq $issue.Status "cancelled") (eq $issue.Status "stopped")}}
     <form class="adjudicate"
       hx-post="/partials/issues/{{$issue.ID}}/decisions"
       hx-target="#issue-{{$issue.ID}}"
@@ -110,7 +121,7 @@
       {{/* Single named field: FormData omits submit buttons, so decision must live here. */}}
       <input type="hidden" name="decision" value="">
       <textarea name="feedback" placeholder="why? (context for fail/retry — injected into the next attempt)"></textarea>
-      {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
+      {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled") (eq $issue.Status "stopped")}}
       <div class="budget-override" title="Optional: raise provider session ceiling after budget_exceeded">
         <label class="card-meta">Budget raise (optional)</label>
         <div class="budget-override-row">
@@ -127,8 +138,8 @@
         <button class="btn btn-retry" type="submit"
           onclick="this.form.decision.value='retry'; return warnEmptyFeedback(this.form)">Retry</button>
       </div>
-      {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled")}}
-      <p class="card-meta">Failed/cancelled issues can be retried with better feedback.</p>
+      {{if or (eq $issue.Status "failed") (eq $issue.Status "cancelled") (eq $issue.Status "stopped")}}
+      <p class="card-meta">Failed/cancelled/stopped issues can be retried with better feedback.</p>
       {{end}}
       {{if and (eq $issue.Status "waiting_human") .Issue.HoldReason}}
       <p class="card-meta">Held for confirmation — Pass continues the pipeline; Fail closes the issue.</p>

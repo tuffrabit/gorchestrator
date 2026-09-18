@@ -107,6 +107,18 @@ type Engine struct {
 	// lifecycle work (wait/load/unload), surfaced on the dashboard.
 	modelActMu    sync.Mutex
 	modelActivity map[int64]ModelActivity
+	// runMu guards runRegs: per-issue in-flight pipeline runs, keyed by
+	// issue ID. StopIssue cancels the registered run's context.
+	runMu   sync.Mutex
+	runRegs map[int64]*runReg
+}
+
+// runReg tracks one in-flight pipeline run for an issue. stopped records
+// that cancellation came from a user stop (vs daemon shutdown) so
+// runPipeline can land the issue on StatusStopped instead of cancelled.
+type runReg struct {
+	cancel  context.CancelFunc
+	stopped bool
 }
 
 // NewEngine creates an engine from configuration.
@@ -133,6 +145,7 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		notifs:    sqlite.NewNotificationRepo(db),
 		bus:       NewEventBus(),
 		breaker:   &inferenceBreaker{},
+		runRegs:   map[int64]*runReg{},
 	}
 	if cfg.Inference.Type != "" {
 		e.controller = NewController(cfg.Inference)
@@ -666,6 +679,15 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			// Hard error: result.json may not be persisted. Still release the
 			// model/lock, but don't let an unload failure mask the real error.
 			_ = releaseModel()
+			if e.stopRequested(issue.ID) {
+				// User-requested stop: not an error — land on stopped.
+				_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusStopped, phaseName)
+				e.Publish(Event{
+					Type: EventIssueStatus, IssueID: issue.ID, ProjectID: project.ID,
+					Phase: phaseName, Status: sqlite.StatusStopped, Message: "stopped by user",
+				})
+				return nil
+			}
 			return fmt.Errorf("run phase %s: %w", phaseName, err)
 		}
 
@@ -680,6 +702,9 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		}
 
 		issueStatus := mapPhaseResultToIssueStatus(result.Status)
+		if issueStatus == sqlite.StatusCancelled && e.stopRequested(issue.ID) {
+			issueStatus = sqlite.StatusStopped
+		}
 		// On phase success, point current_phase at the *next* stage immediately so
 		// the dashboard shows the transition before the next phase_started lands.
 		phaseForIssue := phaseName
@@ -721,6 +746,11 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			notify.NotifyHumanGate(ctx, e.notifier, issue.ID, phaseName, project.Name, issue.Title, e.adminEmails())
 			return nil
 		default:
+			if issueStatus == sqlite.StatusStopped {
+				// User-requested stop: not bad output — no notifications or
+				// escalation, and no error for the worker to log.
+				return nil
+			}
 			notify.NotifyBadOutput(ctx, e.notifier, issue.ID, phaseName, result.Error, e.adminEmails())
 			e.observeEscalation(ctx, project.Name, issue.ID, phaseName, result.Error)
 			return fmt.Errorf("phase %s %s: %s", phaseName, result.Status, result.Error)
@@ -799,7 +829,12 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 		publishActivity(&ModelActivity{Op: ModelOpUnload, Model: model, Phase: phaseName})
 		defer publishActivity(nil)
 		start := time.Now()
-		err := e.controller.UnloadAll(ctx)
+		// Unload with a fresh context: the run ctx may already be cancelled
+		// (user stop / daemon shutdown), and the model must still be
+		// unloaded so exclusive mode does not wedge on a resident model.
+		unloadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		err := e.controller.UnloadAll(unloadCtx)
 		ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
 		if err != nil {
 			ev.Error = err.Error()

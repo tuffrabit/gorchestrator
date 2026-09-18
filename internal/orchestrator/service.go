@@ -154,7 +154,7 @@ func (e *Engine) Decide(ctx context.Context, opts DecideOptions) error {
 	}
 
 	if !canHumanDecide(issue.Status, fsStatus, opts.Force) {
-		return fmt.Errorf("issue %d cannot be decided in status %s (fs=%s); need waiting_human, failed, or cancelled",
+		return fmt.Errorf("issue %d cannot be decided in status %s (fs=%s); need waiting_human, failed, cancelled, or stopped",
 			issue.ID, issue.Status, fsStatus)
 	}
 
@@ -251,7 +251,7 @@ func canHumanDecide(issueStatus, fsStatus string, force bool) bool {
 		return true
 	}
 	switch issueStatus {
-	case sqlite.StatusWaitingHuman, sqlite.StatusFailed, sqlite.StatusCancelled:
+	case sqlite.StatusWaitingHuman, sqlite.StatusFailed, sqlite.StatusCancelled, sqlite.StatusStopped:
 		return true
 	}
 	switch fsStatus {
@@ -481,7 +481,11 @@ func (e *Engine) ProcessIssue(ctx context.Context, issueID int64) error {
 		Phase: issue.CurrentPhase, Status: sqlite.StatusInProgress,
 	})
 
-	err = e.runPipeline(ctx, project, issue, issue.DryRun)
+	// Register a per-issue cancel context so StopIssue can abort this run.
+	runCtx, unregister := e.registerRun(issue.ID, ctx)
+	defer unregister()
+
+	err = e.runPipeline(runCtx, project, issue, issue.DryRun)
 
 	// Refresh status after pipeline.
 	issue, _ = e.issues.Get(issueID)
@@ -675,9 +679,16 @@ func IssueIDString(id int64) string {
 // ErrIssueNotFound is returned when DeleteIssue targets a missing id.
 var ErrIssueNotFound = fmt.Errorf("issue not found")
 
+// ErrIssueActive is returned when DeleteIssue targets an issue with an
+// in-flight pipeline run; stop the agent first.
+var ErrIssueActive = fmt.Errorf("issue has an active agent; stop it first")
+
 // DeleteIssue permanently removes an issue: its storage directory tree
 // (projects/{pid}/issues/{iid}/…) and all related DB rows (issue, runs,
 // decisions, notifications). Audit history is kept. This is a hard delete.
+// Issues with an in-flight run are refused with ErrIssueActive (stop the
+// agent first); deleting the issue that tripped the inference breaker
+// releases it.
 func (e *Engine) DeleteIssue(ctx context.Context, issueID int64) error {
 	issue, err := e.issues.Get(issueID)
 	if err != nil {
@@ -686,6 +697,14 @@ func (e *Engine) DeleteIssue(ctx context.Context, issueID int64) error {
 	if issue == nil {
 		return ErrIssueNotFound
 	}
+
+	if e.runActive(issueID) {
+		return ErrIssueActive
+	}
+
+	// Deleting the issue that tripped the exclusive-mode inference breaker is
+	// the operator's decision on it — release the latch so claiming resumes.
+	e.breaker.Clear(issueID)
 
 	dir := storage.IssueDir(issue.ProjectID, issue.ID)
 	if err := e.store.RemoveAll(ctx, dir); err != nil {
@@ -708,6 +727,43 @@ func (e *Engine) DeleteIssue(ctx context.Context, issueID int64) error {
 		Message:   issue.Title,
 	})
 	return nil
+}
+
+// StopIssue cancels an issue's in-flight pipeline run (aborting in-flight
+// inference HTTP calls and unloading the model in exclusive mode via the
+// pipeline's release path), or marks a queued issue stopped before a worker
+// claims it. The run unwinds asynchronously and lands on StatusStopped;
+// stopped issues are terminal but remain decidable (retry requeues them).
+func (e *Engine) StopIssue(ctx context.Context, issueID int64) error {
+	issue, err := e.issues.Get(issueID)
+	if err != nil {
+		return fmt.Errorf("get issue: %w", err)
+	}
+	if issue == nil {
+		return ErrIssueNotFound
+	}
+
+	if e.requestStop(issueID) {
+		e.Publish(Event{
+			Type: EventIssueStatus, IssueID: issue.ID, ProjectID: issue.ProjectID,
+			Phase: issue.CurrentPhase, Status: sqlite.StatusInProgress, Message: "stopping",
+		})
+		return nil
+	}
+
+	if issue.Status == sqlite.StatusQueued {
+		// Not yet claimed: mark stopped directly.
+		if err := e.issues.UpdateStatus(issue.ID, sqlite.StatusStopped, issue.CurrentPhase); err != nil {
+			return fmt.Errorf("stop issue: %w", err)
+		}
+		e.Publish(Event{
+			Type: EventIssueStatus, IssueID: issue.ID, ProjectID: issue.ProjectID,
+			Phase: issue.CurrentPhase, Status: sqlite.StatusStopped, Message: "stopped by user",
+		})
+		return nil
+	}
+
+	return fmt.Errorf("issue %d has no active agent (status %s)", issueID, issue.Status)
 }
 
 // maybeHoldForScope evaluates scope heuristics after issue context is on disk.

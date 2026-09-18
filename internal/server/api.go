@@ -196,6 +196,10 @@ func (s *Server) handleDeleteIssue(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusNotFound, "issue not found")
 			return
 		}
+		if errors.Is(err, orchestrator.ErrIssueActive) {
+			writeJSONError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -206,6 +210,29 @@ func (s *Server) handleDeleteIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.eng.Audit().Record(uid, "delete_issue", "issue", orchestrator.IssueIDString(id), nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": id})
+}
+
+func (s *Server) handleStopIssue(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid issue id")
+		return
+	}
+	if err := s.eng.StopIssue(r.Context(), id); err != nil {
+		if errors.Is(err, orchestrator.ErrIssueNotFound) {
+			writeJSONError(w, http.StatusNotFound, "issue not found")
+			return
+		}
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	var uid *int64
+	if u != nil {
+		uid = &u.ID
+	}
+	_ = s.eng.Audit().Record(uid, "stop_issue", "issue", orchestrator.IssueIDString(id), nil)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stopped": id})
 }
 
 func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {

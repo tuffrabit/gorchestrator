@@ -470,6 +470,10 @@ func (s *Server) handlePartialDeleteIssue(w http.ResponseWriter, r *http.Request
 			http.Error(w, "issue not found", http.StatusNotFound)
 			return
 		}
+		if errors.Is(err, orchestrator.ErrIssueActive) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -481,6 +485,38 @@ func (s *Server) handlePartialDeleteIssue(w http.ResponseWriter, r *http.Request
 	_ = s.eng.Audit().Record(uid, "delete_issue", "issue", orchestrator.IssueIDString(id), nil)
 	// Empty body + outerHTML swap removes the card from the feed.
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handlePartialStopIssue(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	if err := s.eng.StopIssue(r.Context(), id); err != nil {
+		if errors.Is(err, orchestrator.ErrIssueNotFound) {
+			http.Error(w, "issue not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	var uid *int64
+	if u != nil {
+		uid = &u.ID
+	}
+	_ = s.eng.Audit().Record(uid, "stop_issue", "issue", orchestrator.IssueIDString(id), nil)
+	view, _ := s.eng.GetIssue(r.Context(), id)
+	data := map[string]any{
+		"Issue":    view,
+		"Expanded": true,
+		"CSRF":     auth.CSRFToken(r),
+		"CanWrite": true,
+	}
+	if err := render(w, "partials/issue_card.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handlePartialDecide(w http.ResponseWriter, r *http.Request) {
