@@ -109,7 +109,9 @@ func (m *Manager) EnsureCache(ctx context.Context, projectID int64, cfg Config) 
 		}
 		return nil
 	}
-	if err := m.run(ctx, cache, "fetch", "--all", "--prune"); err != nil {
+	// Bare clones configure no remote.origin.fetch refspec; without an
+	// explicit refspec fetch updates only FETCH_HEAD and refs go stale.
+	if err := m.run(ctx, cache, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
 		return fmt.Errorf("git fetch: %w", err)
 	}
 	return nil

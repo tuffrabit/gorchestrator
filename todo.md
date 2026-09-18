@@ -17,4 +17,5 @@
 - ~~per agent/provider token limit~~
 - ~~output and result tabs empty~~
 - "build" system that embeds binary version
+- git mode: `EnsureCache` should detect empty/unborn source repos (no commits, no HEAD ref) and fail with a clear message at clone time — today it cascades into "worktree add: invalid reference" on first run and "git fetch: couldn't find remote ref HEAD" on retry
 - TestDaemon_WorkersProcessQueue failed twice mid-session (SQLITE_BUSY / 15s timeout). I bisected with git stash — the baseline fails the same way under -count=3 without my changes, and both versions pass the full suite on repeat runs. It's a pre-existing flake in the daemon test, not something my diff introduced — but it's real, and worth a look at some point.
