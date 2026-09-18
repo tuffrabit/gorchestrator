@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -388,7 +390,9 @@ func LoadFrom(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true) // fail on unknown keys instead of silently dropping them
+	if err := dec.Decode(&cfg); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
@@ -441,9 +445,6 @@ func LoadFrom(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateAgentOverrides(&cfg); err != nil {
-		return nil, err
-	}
-	if err := rejectAgentTokenBudget(data); err != nil {
 		return nil, err
 	}
 	normalizeProviders(&cfg)
@@ -567,9 +568,6 @@ func validateAgentOverrides(cfg *Config) error {
 	return nil
 }
 
-// rejectAgentTokenBudget fails config load if agents or flavors still set token_budget
-// (removed in Phase 5 — budgets are provider-scoped only).
-
 func validateMCPServers(cfg *Config) error {
 	for i, s := range cfg.MCPServers {
 		if s.Name == "" {
@@ -634,55 +632,6 @@ func validateEscalation(cfg *Config) error {
 		}
 		if r.Project == "" {
 			r.Project = "*"
-		}
-	}
-	return nil
-}
-
-func rejectAgentTokenBudget(data []byte) error {
-	var raw map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil // parse already succeeded into Config; ignore secondary parse issues
-	}
-	if agents, ok := raw["agents"].(map[string]any); ok {
-		for name, v := range agents {
-			if m, ok := v.(map[string]any); ok {
-				if _, has := m["token_budget"]; has {
-					return fmt.Errorf("agents.%s.token_budget is not supported; use providers.<name>.token_budget", name)
-				}
-			}
-		}
-	}
-	if projects, ok := raw["projects"].(map[string]any); ok {
-		for pname, pv := range projects {
-			pm, ok := pv.(map[string]any)
-			if !ok {
-				continue
-			}
-			agents, ok := pm["agents"].(map[string]any)
-			if !ok {
-				continue
-			}
-			for atype, av := range agents {
-				am, ok := av.(map[string]any)
-				if !ok {
-					continue
-				}
-				if _, has := am["token_budget"]; has {
-					return fmt.Errorf("projects.%s.agents.%s.token_budget is not supported; use providers.<name>.token_budget", pname, atype)
-				}
-				flavors, ok := am["flavors"].(map[string]any)
-				if !ok {
-					continue
-				}
-				for fname, fv := range flavors {
-					if fm, ok := fv.(map[string]any); ok {
-						if _, has := fm["token_budget"]; has {
-							return fmt.Errorf("projects.%s.agents.%s.flavors.%s.token_budget is not supported; use providers.<name>.token_budget", pname, atype, fname)
-						}
-					}
-				}
-			}
 		}
 	}
 	return nil

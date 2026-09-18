@@ -11,7 +11,7 @@ import (
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: gorchestrator <command> [args]")
-		fmt.Fprintln(os.Stderr, "Commands: run, resume, serve, version")
+		fmt.Fprintln(os.Stderr, "Commands: run, resume, serve, validate, version")
 		os.Exit(1)
 	}
 
@@ -32,6 +32,12 @@ func main() {
 		serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 		if err := cli.Serve(serveCmd, os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "serve failed: %v\n", err)
+			os.Exit(1)
+		}
+	case "validate":
+		validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
+		if err := cli.Validate(validateCmd, os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "validate failed: %v\n", err)
 			os.Exit(1)
 		}
 	case "version":

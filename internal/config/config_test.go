@@ -321,3 +321,39 @@ func TestLoadRejectsBadInference(t *testing.T) {
 		})
 	}
 }
+
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadFromRejectsUnknownKeys(t *testing.T) {
+	cases := map[string]string{
+		"top-level": "stoage_root: /tmp/x\n",
+		"nested under project (mis-indented project)": "projects:\n  bunny:\n    source_path: /tmp/bunny\n    gorchestrator:\n      source_path: /tmp/other\n",
+		"agent field (stale token_budget)":            "agents:\n  researcher:\n    token_budget: 1000\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadFrom(writeConfig(t, body)); err == nil {
+				t.Fatal("expected unknown-key error, got nil")
+			} else if !strings.Contains(err.Error(), "not found") {
+				t.Fatalf("expected strict-decode error naming the field, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadFromValidConfigStillLoads(t *testing.T) {
+	cfg, err := LoadFrom(writeConfig(t, "projects:\n  bunny:\n    git:\n      repo_url: /tmp/bunny\n      base_branch: main\n"))
+	if err != nil {
+		t.Fatalf("valid config should load: %v", err)
+	}
+	if cfg.Projects["bunny"].Git == nil || cfg.Projects["bunny"].Git.RepoURL != "/tmp/bunny" {
+		t.Fatalf("project not parsed: %+v", cfg.Projects["bunny"])
+	}
+}
