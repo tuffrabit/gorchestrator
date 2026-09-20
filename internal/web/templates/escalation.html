@@ -11,22 +11,36 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">gorchestrator</a>
-    <a class="nav-link" href="/">Issues</a>
-    <a class="nav-link" href="/notifications">
-      Notifications
-      {{if .PendingGates}}<span class="badge">{{.PendingGates}}</span>{{end}}
-    </a>
-    <a class="nav-link" href="/permissions">Permissions</a>
-    <a class="nav-link active" href="/escalation">Escalation</a>
-    <div class="topbar-spacer"></div>
-    {{if .User}}
-    <span class="user-chip">{{.User.Email}}</span>
-    <form method="post" action="/logout" style="display:inline">
-      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-      <button class="btn" type="submit">Logout</button>
-    </form>
-    {{end}}
+    <a class="brand topbar-brand" href="/">gorchestrator</a>
+
+    <input type="checkbox" id="topnav-toggle" class="topnav-toggle" />
+
+    <label class="topnav-toggle-label" for="topnav-toggle">
+      <span class="sr-only">Toggle navigation</span>
+      <span aria-hidden="true">☰</span>
+    </label>
+
+    <nav class="topnav">
+      <ul id="topnav-links" class="topnav-links">
+        <li><a class="nav-link" href="/">Issues</a></li>
+        <li><a class="nav-link" href="/notifications">
+          Notifications
+          {{if .PendingGates}}<span class="badge">{{.PendingGates}}</span>{{end}}
+        </a></li>
+        <li><a class="nav-link" href="/permissions">Permissions</a></li>
+        <li><a class="nav-link active" href="/escalation">Escalation</a></li>
+      </ul>
+    </nav>
+
+    <div class="topbar-actions">
+      {{if .User}}
+      <span class="user-chip">{{.User.Email}}</span>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button class="btn" type="submit">Logout</button>
+      </form>
+      {{end}}
+    </div>
   </header>
 
   <section class="notif-list">
@@ -34,6 +48,7 @@
     <p class="card-meta">Configured in YAML under <code>escalation.rules</code>. Edit config and restart to change. Fires once per subject until reset (no alert storms).</p>
 
     {{if .Rules}}
+    <div class="table-wrap">
     <table class="perm-table">
       <thead>
         <tr><th>Name</th><th>When</th><th>Project</th><th>Threshold</th><th>Notify</th></tr>
@@ -50,6 +65,7 @@
         {{end}}
       </tbody>
     </table>
+    </div>
     {{else}}
     <p class="empty">No escalation rules configured.</p>
     {{end}}
@@ -67,7 +83,7 @@
       </div>
       {{end}}
     {{else}}
-      <p class="empty">No escalations fired since process start.</p>
+    <p class="empty">No escalations fired since process start.</p>
     {{end}}
   </section>
 </body>

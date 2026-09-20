@@ -13,31 +13,45 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">gorchestrator</a>
-    <a class="nav-link" href="/">Issues</a>
-    <a class="nav-link" href="/notifications">
-      Notifications
-      {{if .PendingGates}}<span class="badge" id="notif-badge">{{.PendingGates}}</span>{{end}}
-    </a>
-    {{if .IsAdmin}}
-    <a class="nav-link" href="/permissions">Permissions</a>
-    <a class="nav-link" href="/escalation">Escalation</a>
-    {{end}}
-    <div class="topbar-spacer"></div>
-    {{if .CanWrite}}
-    <button class="btn btn-primary" type="button"
-      hx-get="/partials/submit"
-      hx-target="#drawer-body"
-      hx-swap="innerHTML"
-      onclick="openDrawer('submit')">+ New</button>
-    {{end}}
-    {{if .User}}
-    <span class="user-chip">{{.User.Email}}</span>
-    <form method="post" action="/logout" style="display:inline">
-      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-      <button class="btn" type="submit">Logout</button>
-    </form>
-    {{end}}
+    <a class="brand topbar-brand" href="/">gorchestrator</a>
+
+    <input type="checkbox" id="topnav-toggle" class="topnav-toggle" />
+
+    <label class="topnav-toggle-label" for="topnav-toggle">
+      <span class="sr-only">Toggle navigation</span>
+      <span aria-hidden="true">☰</span>
+    </label>
+
+    <nav class="topnav">
+      <ul id="topnav-links" class="topnav-links">
+        <li><a class="nav-link" href="/">Issues</a></li>
+        <li><a class="nav-link" href="/notifications">
+          Notifications
+          {{if .PendingGates}}<span class="badge" id="notif-badge">{{.PendingGates}}</span>{{end}}
+        </a></li>
+        {{if .IsAdmin}}
+        <li><a class="nav-link" href="/permissions">Permissions</a></li>
+        <li><a class="nav-link" href="/escalation">Escalation</a></li>
+        {{end}}
+      </ul>
+    </nav>
+
+    <div class="topbar-actions">
+      {{if .CanWrite}}
+      <button class="btn btn-primary" type="button"
+        hx-get="/partials/submit"
+        hx-target="#drawer-body"
+        hx-swap="innerHTML"
+        onclick="openDrawer('submit')">+ New</button>
+      {{end}}
+      {{if .User}}
+      <span class="user-chip">{{.User.Email}}</span>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <button class="btn" type="submit">Logout</button>
+      </form>
+      {{end}}
+    </div>
   </header>
   {{block "content" .}}{{end}}
 

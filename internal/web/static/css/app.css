@@ -819,3 +819,393 @@ button, input, select, textarea {
   padding-left: 1.1rem;
 }
 .perm-server h3 code { color: var(--accent-pink); }
+
+/* Responsive: small screens */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.topnav-toggle,
+.topnav-toggle-label {
+  display: none;
+}
+
+.topnav-links {
+  display: flex;
+  gap: 1.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand toggle"
+      "actions actions"
+      "nav nav";
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .brand,
+  .topbar-brand {
+    grid-area: brand;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #topnav-toggle {
+    grid-area: toggle;
+    display: block;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    border: 0;
+  }
+
+  .topnav-toggle-label {
+    grid-area: toggle;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 48px;
+    min-width: 48px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    padding: 0.5rem;
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  #topnav-toggle:focus-visible ~ .topnav-toggle-label {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  #topnav-toggle:checked ~ .topnav-toggle-label {
+    border-color: var(--accent-pink);
+  }
+
+  .topbar-actions {
+    grid-area: actions;
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .topbar-actions .btn,
+  .topbar-actions input[type="submit"],
+  .topbar-actions input[type="button"],
+  .topbar-actions button {
+    min-height: 44px;
+    padding: 0.5rem 0.75rem;
+    font-size: 1rem;
+  }
+
+  .user-chip {
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topnav {
+    grid-area: nav;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    width: 100%;
+  }
+
+  .topnav-links {
+    display: none;
+    flex-direction: column;
+    gap: 0.25rem;
+    width: 100%;
+  }
+
+  #topnav-toggle:checked ~ .topnav .topnav-links {
+    display: flex;
+  }
+
+  .topnav-links > li {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .topnav-links a,
+  .topnav-links button,
+  .topnav-links input[type="submit"],
+  .topnav-links input[type="button"] {
+    display: block;
+    width: 100%;
+    min-height: 48px;
+    padding: 0.75rem;
+    text-decoration: none;
+    font-size: 1rem;
+  }
+
+  .filters {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+    max-width: 100%;
+  }
+
+  .filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .filters select,
+  .filters input,
+  .filters textarea,
+  .filters button,
+  .filters .chip {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .filters .btn {
+    min-height: 48px;
+  }
+
+  main,
+  .feed,
+  .content,
+  .issue-list,
+  .issue-card,
+  .card-body,
+  .card-actions,
+  .card-meta {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .issue-card {
+    overflow-wrap: anywhere;
+  }
+
+  .card-header {
+    padding: 0.75rem;
+  }
+
+  .card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .card-actions,
+  .artifact-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .card-actions .btn,
+  .card-actions input[type="submit"],
+  .card-actions input[type="button"],
+  .card-actions button,
+  .artifact-actions .btn,
+  .adjudicate-actions .btn {
+    min-height: 44px;
+    padding: 0.5rem 0.75rem;
+    font-size: 1rem;
+  }
+
+  .phase-strip {
+    display: flex;
+    gap: 0.5rem;
+    max-width: 100%;
+    overflow-x: auto;
+    min-width: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .phase-step {
+    min-width: 4.5rem;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.85rem;
+  }
+
+  :root {
+    --drawer-width: 100%;
+  }
+
+  .drawer {
+    --drawer-width: 100%;
+    width: var(--drawer-width);
+    max-width: 100vw;
+    min-width: 0;
+    height: 100vh;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+
+  .drawer-header,
+  .drawer-toolbar,
+  .drawer-title,
+  .drawer-body {
+    min-width: 0;
+  }
+
+  .drawer-header,
+  .drawer-toolbar {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .drawer-header .btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .drawer-body {
+    overflow: auto;
+    padding: 0.75rem;
+  }
+
+  .drawer-tabs,
+  .drawer-artifact .drawer-phase-tabs,
+  .drawer-artifact .drawer-tabs-inline {
+    flex-direction: column;
+    gap: 0.25rem;
+    width: 100%;
+  }
+
+  .drawer-tabs button,
+  .drawer-phase-tab,
+  .drawer-artifact .drawer-tabs-inline .btn {
+    min-height: 44px;
+    padding: 0.65rem 0.75rem;
+  }
+
+  .drawer select,
+  .drawer input,
+  .drawer textarea {
+    width: 100%;
+    max-width: 100%;
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .drawer pre,
+  .drawer code,
+  .artifact-output,
+  .output,
+  .workspace-file,
+  .diff {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    font-size: 0.85rem;
+  }
+
+  .drawer pre {
+    white-space: pre-wrap;
+  }
+
+  .drawer .btn,
+  .drawer input[type="submit"],
+  .drawer input[type="button"],
+  .drawer button {
+    min-height: 44px;
+  }
+
+  .table-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .table-wrap > table {
+    font-size: 0.9rem;
+  }
+
+  .notif-list,
+  .login-card {
+    max-width: 100%;
+  }
+
+  .login-card input,
+  .login-card .btn {
+    min-height: 48px;
+    font-size: 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .user-chip {
+    display: none;
+  }
+
+  .brand,
+  .topbar-brand {
+    font-size: 0.95rem;
+  }
+
+  .phase-step {
+    min-width: 4rem;
+    font-size: 0.8rem;
+  }
+
+  .phase-strip {
+    gap: 0.35rem;
+  }
+
+  .topbar-actions .btn,
+  .topbar-actions input[type="submit"],
+  .topbar-actions input[type="button"],
+  .topbar-actions button {
+    min-height: 44px;
+    padding: 0.45rem 0.65rem;
+  }
+}
