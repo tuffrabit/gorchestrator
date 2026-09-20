@@ -132,6 +132,12 @@ func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, ta
 		truncated := false
 		if len(data) > drawerPayloadCap {
 			data = data[:drawerPayloadCap]
+			// Keep only complete lines: a mid-line cut leaves an invalid
+			// trailing JSON record, which would forfeit the tree view for
+			// exactly the large implementation logs that need it most.
+			if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+				data = data[:i]
+			}
 			truncated = true
 		}
 		eventsJSON := eventsToJSONArray(data)

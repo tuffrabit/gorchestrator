@@ -381,6 +381,49 @@ func TestDrawer_ActivityJsonTree(t *testing.T) {
 	}
 }
 
+func TestDrawer_ActivityJsonTreeTruncated(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	h := srv.Handler()
+	issueID, projectID := seedIssueWithPhases(t, eng)
+
+	// An events.jsonl larger than the payload cap: truncation must cut at a
+	// line boundary so the tree view still renders (implementation logs are
+	// the ones that grow this large).
+	line := `{"type":"model_turn","role":"model","content":"` + strings.Repeat("x", 1024) + `"}` + "\n"
+	var buf strings.Builder
+	for buf.Len() < drawerPayloadCap+4096 {
+		buf.WriteString(line)
+	}
+	ctx := context.Background()
+	if err := eng.Store().Write(ctx, storage.EventsPath(projectID, issueID, "implementation"), []byte(buf.String())); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/partials/issues/"+itoa(issueID)+"/drawer?tab=activity&phase=implementation", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("activity status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "js-events-data") || !strings.Contains(body, "json-tree") {
+		t.Fatalf("expected json tree for truncated events, got fallback: %.500s", body)
+	}
+	if !strings.Contains(body, "truncated") {
+		t.Fatalf("expected truncation note in body")
+	}
+}
+
 func TestNormalizePhase(t *testing.T) {
 	if normalizePhase("researcher") != phaseResearch {
 		t.Fatal("researcher")
