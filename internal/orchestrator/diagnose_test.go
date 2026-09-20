@@ -112,6 +112,31 @@ func TestDiagnoseFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("terminal loop error in tail", func(t *testing.T) {
+		store := newDiagStore(t)
+		writeEvents(t, store, "x/events.jsonl",
+			`{"type":"model_turn","role":"model","content":""}`,
+			`{"type":"tool_call","tool_call":{"id":"a1","name":"run_tests","args":{}}}`,
+			`{"type":"loop_error","error":"mcp server filesystem: connection refused"}`,
+		)
+		got := diagnoseFailure(ctx, store, "x/events.jsonl", errors.New("loop 1: mcp server filesystem: connection refused"))
+		if got != "agent loop error: mcp server filesystem: connection refused" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("unanswered tool call in tail", func(t *testing.T) {
+		store := newDiagStore(t)
+		writeEvents(t, store, "x/events.jsonl",
+			`{"type":"model_turn","role":"model","content":"let me write that file"}`,
+			`{"type":"tool_call","tool_call":{"id":"b1","name":"write_file","args":{"path":"a.go"}}}`,
+		)
+		got := diagnoseFailure(ctx, store, "x/events.jsonl", errors.New("loop 1: unexpected EOF"))
+		if got != "failed while executing tool write_file (no tool result recorded)" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
 	t.Run("unknown error, no events", func(t *testing.T) {
 		store := newDiagStore(t)
 		got := diagnoseFailure(ctx, store, "x/events.jsonl", errors.New("boom"))

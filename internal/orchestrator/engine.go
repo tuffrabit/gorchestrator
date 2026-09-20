@@ -1290,6 +1290,15 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 
 	for ev, err := range r.Run(ctx, "user", sessionID, userContent, agent.RunConfig{}) {
 		if err != nil {
+			// Record the terminal error so the activity log ends with an
+			// explanation instead of dangling tool calls.
+			recordEvent(ctx, e.store, eventsPath, eventRecord{
+				Type:      "loop_error",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Attempt:   attempt,
+				Loop:      loop,
+				Error:     err.Error(),
+			})
 			if llm.IsBudgetExceeded(err) {
 				return nil, false, "", "", loopTokens, err
 			}

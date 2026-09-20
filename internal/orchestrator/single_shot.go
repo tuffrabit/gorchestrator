@@ -37,6 +37,13 @@ func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, phase
 	tokens := 0
 	for resp, err := range llmModel.GenerateContent(ctx, req, false) {
 		if err != nil {
+			recordEvent(ctx, e.store, eventsPath, eventRecord{
+				Type:      "loop_error",
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Attempt:   attempt,
+				Loop:      loop,
+				Error:     err.Error(),
+			})
 			if llm.IsBudgetExceeded(err) {
 				return nil, false, "", "", tokens, err
 			}

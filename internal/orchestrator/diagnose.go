@@ -64,14 +64,31 @@ func withDiagnosis(diag, detail string) string {
 	return "failed: " + diag + ": " + detail
 }
 
-// diagnoseFromEvents applies event-tail heuristics: an empty final model
-// turn, or the same tool call repeated over and over (reasoning loop).
+// diagnoseFromEvents applies event-tail heuristics: a terminal error recorded
+// by the loop itself, tool calls that never got results (the run died while
+// executing tools), an empty final model turn, or the same tool call repeated
+// over and over (reasoning loop).
 func diagnoseFromEvents(ctx context.Context, store storage.Port, eventsPath string) string {
 	events := readEventsTail(ctx, store, eventsPath, diagnoseEventsTail)
 	if len(events) == 0 {
 		return ""
 	}
 	// events are in reverse chronological order (most recent first).
+	// A terminal error recorded at the end of the log is the most direct
+	// signal; only the last few records are relevant (a failure ends the
+	// phase, so anything newer than the error is bookkeeping).
+	for i := 0; i < len(events) && i < 3; i++ {
+		ev := events[i]
+		if (ev.Type == "loop_error" || ev.Type == "phase_error") && ev.Error != "" {
+			if strings.HasPrefix(ev.Error, "failed: ") {
+				return ev.Error
+			}
+			return "agent loop error: " + truncate(ev.Error, 160)
+		}
+	}
+	if name, ok := unansweredToolCall(events); ok {
+		return fmt.Sprintf("failed while executing tool %s (no tool result recorded)", name)
+	}
 	for i, ev := range events {
 		if ev.Type != "model_turn" {
 			continue
@@ -97,6 +114,41 @@ func diagnoseFromEvents(ctx context.Context, store storage.Port, eventsPath stri
 		return fmt.Sprintf("model reasoning loop (repeated tool call: %s)", name)
 	}
 	return ""
+}
+
+// unansweredToolCall reports whether the most recent tool_call in the tail
+// never got a matching tool_result (matched by call id) — the signature of
+// a run that died while executing tools.
+func unansweredToolCall(events []eventRecord) (string, bool) {
+	answered := map[string]bool{}
+	for _, ev := range events {
+		if ev.Type != "tool_result" || ev.ToolResult == nil {
+			continue
+		}
+		if id, ok := ev.ToolResult["id"].(string); ok && id != "" {
+			answered[id] = true
+		}
+	}
+	for _, ev := range events {
+		if ev.Type != "tool_call" || ev.ToolCall == nil {
+			continue
+		}
+		// Most recent tool call: check whether its result ever arrived.
+		id, _ := ev.ToolCall["id"].(string)
+		if id != "" && !answered[id] {
+			name, _ := ev.ToolCall["name"].(string)
+			return name, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // repeatedToolCall reports whether the most recent run of consecutive
