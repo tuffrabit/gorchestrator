@@ -615,6 +615,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		}
 		phaseCfg, err := e.agentConfigForIssue(project, issue, phaseName)
 		if err != nil {
+			e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("agent config for %s: %w", phaseName, err)
 		}
 
@@ -658,6 +659,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 
 		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, issue.Title, issue.Description)
 		if err != nil {
+			e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("build input for %s: %w", phaseName, err)
 		}
 
@@ -667,6 +669,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		if phaseCfg.SingleShot != nil && *phaseCfg.SingleShot {
 			digest, err := e.buildRepoDigest(ctx, project.ID, issue.ID, phaseCfg)
 			if err != nil {
+				e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 				return fmt.Errorf("build repo digest for %s: %w", phaseName, err)
 			}
 			if digest != "" {
@@ -688,6 +691,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 				})
 				return nil
 			}
+			e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("run phase %s: %w", phaseName, err)
 		}
 
@@ -879,6 +883,29 @@ func (e *Engine) failIssueInferenceError(ctx context.Context, project *sqlite.Pr
 			Message: "inference breaker tripped: " + msg,
 		})
 	}
+}
+
+// failIssuePhaseError marks an issue failed when a phase dies before a
+// result.json exists (config resolution, input/digest build, workspace
+// preparation). Without it the issue row stays in_progress forever: the
+// daemon worker logs the error and moves on, leaving the UI stuck "active".
+func (e *Engine) failIssuePhaseError(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, cause error) {
+	msg := fmt.Sprintf("phase %s error: %v", phaseName, cause)
+	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusFailed, phaseName)
+	e.Publish(Event{
+		Type: EventPhaseFinished, IssueID: issue.ID, ProjectID: project.ID,
+		Phase: phaseName, Status: sqlite.StatusFailed, Message: msg,
+		Data: map[string]any{
+			"phase_result":  "error",
+			"current_phase": phaseName,
+		},
+	})
+	recordEvent(ctx, e.store, storage.EventsPath(project.ID, issue.ID, phaseName), eventRecord{
+		Type:      "phase_error",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Error:     msg,
+	})
+	notify.NotifyBadOutput(ctx, e.notifier, issue.ID, phaseName, msg, e.adminEmails())
 }
 
 // runPhase runs a single phase with adjudication attempts.

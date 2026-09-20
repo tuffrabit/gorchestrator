@@ -115,6 +115,70 @@ func TestManager_WorktreeLifecycle(t *testing.T) {
 	}
 }
 
+func TestEnsureCacheFetchWithPushedImplementerBranch(t *testing.T) {
+	remote, seed := initBareRemote(t)
+	storageRoot := t.TempDir()
+	m := &Manager{StorageRoot: storageRoot}
+	cfg := Config{RepoURL: remote, BaseBranch: "main"}
+	ctx := context.Background()
+	const projectID int64 = 1
+
+	if err := m.EnsureCache(ctx, projectID, cfg); err != nil {
+		t.Fatalf("EnsureCache: %v", err)
+	}
+
+	// Simulate a completed implementer run: branch committed and pushed to
+	// origin while its worktree still exists (branch checked out).
+	ws := filepath.Join(storageRoot, "projects", "1", "issues", "1", "implementation", "workspace")
+	branch := BranchName(1, 42)
+	if err := m.CreateImplementerWorktree(ctx, projectID, ws, branch, cfg); err != nil {
+		t.Fatalf("CreateImplementerWorktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "feature.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CommitAll(ctx, ws, CommitMessage("add feature", 1, 42), "", ""); err != nil {
+		t.Fatalf("CommitAll: %v", err)
+	}
+	if err := m.Push(ctx, ws, branch); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// The next issue's fetch must not fail pulling the pushed branch back
+	// into a ref that is checked out in the worktree above.
+	if err := m.EnsureCache(ctx, projectID, cfg); err != nil {
+		t.Fatalf("EnsureCache with pushed implementer branch checked out: %v", err)
+	}
+
+	// The base branch still tracks origin: advance main upstream and re-fetch.
+	if err := os.WriteFile(filepath.Join(seed, "second.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.run(ctx, seed, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.run(ctx, seed, "-c", "user.name=test", "-c", "user.email=test@test", "commit", "-m", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.run(ctx, seed, "push", remote, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureCache(ctx, projectID, cfg); err != nil {
+		t.Fatalf("EnsureCache after upstream advance: %v", err)
+	}
+	out, err := exec.Command("git", "-C", m.CachePath(projectID), "rev-parse", "refs/heads/main").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := exec.Command("git", "-C", seed, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != string(want) {
+		t.Fatalf("cache main = %s, want %s", out, want)
+	}
+}
+
 func TestBranchNameAndMessage(t *testing.T) {
 	if got := BranchName(3, 9); got != "ai-implementer/3-9" {
 		t.Fatalf("BranchName: %q", got)

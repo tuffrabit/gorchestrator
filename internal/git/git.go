@@ -109,9 +109,12 @@ func (m *Manager) EnsureCache(ctx context.Context, projectID int64, cfg Config) 
 		}
 		return nil
 	}
-	// Bare clones configure no remote.origin.fetch refspec; without an
-	// explicit refspec fetch updates only FETCH_HEAD and refs go stale.
-	if err := m.run(ctx, cache, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+	// Bare clones configure no remote.origin.fetch refspec, so fetch needs an
+	// explicit one. Track only the base branch: implementer branches are
+	// created in this repo and (with push: true) pushed to origin, and
+	// fetching them back collides with refs checked out in issue worktrees.
+	refspec := "+refs/heads/" + cfg.BaseBranch + ":refs/heads/" + cfg.BaseBranch
+	if err := m.run(ctx, cache, "fetch", "--prune", "origin", refspec); err != nil {
 		return fmt.Errorf("git fetch: %w", err)
 	}
 	return nil
