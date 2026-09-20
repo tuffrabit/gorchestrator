@@ -24,7 +24,17 @@
       onclick="openArtifactDrawer({{$id}}, 'activity', '{{$phase}}')">Activity</button>
   </div>
   <div class="drawer-content-pane">
-  {{if .ContentHTML}}
+  {{if .EventsJSON}}
+    <div class="json-tree-toolbar">
+      <button class="btn" type="button" onclick="jsonTreeAll(this, true)">Expand all</button>
+      <button class="btn" type="button" onclick="jsonTreeAll(this, false)">Collapse all</button>
+      <button class="btn" type="button" onclick="jsonTreeToggleRaw(this)">Raw</button>
+      {{if .Truncated}}<span class="card-meta">truncated — showing first 256 KB</span>{{end}}
+    </div>
+    <pre class="js-events-data" hidden>{{.EventsJSON}}</pre>
+    <div class="json-tree" role="tree"></div>
+    <pre class="json-raw" hidden><code class="language-json">{{.Content}}</code></pre>
+  {{else if .ContentHTML}}
     <div class="md-body">{{.ContentHTML}}</div>
   {{else}}
     <pre><code class="language-json">{{.Content}}</code></pre>
@@ -37,6 +47,10 @@
   }
   if (window.htmx && typeof htmx.process === 'function') {
     htmx.process(document.getElementById('drawer-body'));
+  }
+  var treeEl = document.querySelector('#drawer-body .json-tree');
+  if (treeEl && typeof renderJsonTree === 'function') {
+    renderJsonTree(treeEl);
   }
   var title = document.getElementById('drawer-title');
   if (title) {

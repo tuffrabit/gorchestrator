@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"html/template"
@@ -74,9 +75,19 @@ func phaseAgent(phase string) string {
 	}
 }
 
-func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, tab, phase string) (string, template.HTML, error) {
+// drawerPayload is one rendered drawer tab: raw text (Content) or rendered
+// HTML (ContentHTML), plus — for the activity tab — the events as a single
+// JSON array (EventsJSON) for the collapsible tree view.
+type drawerPayload struct {
+	Content     string
+	ContentHTML template.HTML
+	EventsJSON  string
+	Truncated   bool
+}
+
+func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, tab, phase string) (drawerPayload, error) {
 	if view == nil || view.Issue == nil {
-		return "", "", fmt.Errorf("no issue")
+		return drawerPayload{}, fmt.Errorf("no issue")
 	}
 	issue := view.Issue
 	if phase == "" {
@@ -99,31 +110,65 @@ func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, ta
 		key := storage.ResultPath(projectID, issueID, phase)
 		data, err := s.eng.Store().Read(ctx, key)
 		if err != nil {
-			return "(no result.json yet)", "", nil
+			return drawerPayload{Content: "(no result.json yet)"}, nil
 		}
-		return string(data), "", nil
+		return drawerPayload{Content: string(data)}, nil
 	case "output":
 		if phase == phaseImplementation {
 			html, err := s.renderWorkspaceTree(ctx, view)
 			if err != nil {
-				return err.Error(), "", nil
+				return drawerPayload{Content: err.Error()}, nil
 			}
-			return "", html, nil
+			return drawerPayload{ContentHTML: html}, nil
 		}
-		return s.drawerPhaseOutput(ctx, view, phase)
+		content, contentHTML, err := s.drawerPhaseOutput(ctx, view, phase)
+		return drawerPayload{Content: content, ContentHTML: contentHTML}, err
 	case "activity", "events":
 		key := storage.EventsPath(projectID, issueID, phase)
 		data, err := s.eng.Store().Read(ctx, key)
 		if err != nil {
-			return "(no events yet)", "", nil
+			return drawerPayload{Content: "(no events yet)"}, nil
 		}
+		truncated := false
 		if len(data) > drawerPayloadCap {
-			data = append(data[:drawerPayloadCap], []byte("\n... [truncated]")...)
+			data = data[:drawerPayloadCap]
+			truncated = true
 		}
-		return string(data), "", nil
+		eventsJSON := eventsToJSONArray(data)
+		content := string(data)
+		if truncated {
+			content += "\n... [truncated]"
+		}
+		return drawerPayload{Content: content, EventsJSON: eventsJSON, Truncated: truncated}, nil
 	default:
-		return "", "", fmt.Errorf("unknown tab %q", tab)
+		return drawerPayload{}, fmt.Errorf("unknown tab %q", tab)
 	}
+}
+
+// eventsToJSONArray converts events.jsonl bytes into a single JSON array
+// string for the tree viewer. Returns "" when the payload is empty or any
+// line is not valid JSON — callers then fall back to the raw text view.
+func eventsToJSONArray(data []byte) string {
+	lines := bytes.Split(data, []byte("\n"))
+	raws := make([]json.RawMessage, 0, len(lines))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if !json.Valid(line) {
+			return ""
+		}
+		raws = append(raws, json.RawMessage(line))
+	}
+	if len(raws) == 0 {
+		return ""
+	}
+	out, err := json.Marshal(raws)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 func (s *Server) drawerPhaseOutput(ctx context.Context, view *orchestrator.IssueView, phase string) (string, template.HTML, error) {

@@ -54,6 +54,184 @@ function openArtifactDrawer(issueId, tab, phase) {
   }
 }
 
+// --- Collapsible JSON tree (activity/events drawer tab) ------------------
+
+var JSON_TREE_STRING_CAP = 300;
+
+// renderJsonTree builds a collapsible tree of the phase event log inside
+// container. The JSON array payload lives in a hidden sibling
+// .js-events-data element (HTML-escaped by the template; read via
+// textContent, which decodes it back).
+function renderJsonTree(container) {
+  var scope = container.closest('.drawer-content-pane') || container.parentElement;
+  var dataEl = scope.querySelector('.js-events-data');
+  if (!dataEl) return;
+  var events;
+  try {
+    events = JSON.parse(dataEl.textContent);
+  } catch (err) {
+    container.textContent = 'Could not parse activity events.';
+    return;
+  }
+  container.textContent = '';
+  events.forEach(function (ev, i) {
+    container.appendChild(jsonTreeEventNode(ev, i));
+  });
+}
+
+function jsonTreeEventNode(ev, i) {
+  var body = document.createElement('div');
+  body.appendChild(jsonTreeValue(ev));
+  return jsonTreeToggle('jt-event-head', jsonTreeEventSummary(ev, i), body, false);
+}
+
+function jsonTreeEventSummary(ev, i) {
+  var parts = ['[' + i + ']'];
+  if (ev && typeof ev === 'object') {
+    parts.push(ev.type || 'event');
+    var tc = ev.tool_call;
+    var tr = ev.tool_result;
+    if (tc && tc.name) parts.push(String(tc.name));
+    if (tr && tr.name) parts.push(String(tr.name) + ' result');
+    if (ev.tokens) parts.push(ev.tokens + ' tok');
+    if (ev.error) parts.push('error');
+    if (ev.timestamp) parts.push(String(ev.timestamp));
+  }
+  return parts.join(' · ');
+}
+
+// jsonTreeToggle builds a collapsible node: a .jt-toggle button controlling
+// the sibling .jt-body element.
+function jsonTreeToggle(headClass, labelText, body, expanded) {
+  var node = document.createElement('div');
+  node.className = 'jt-node';
+  var head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'jt-toggle ' + headClass;
+  head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  var caret = document.createElement('span');
+  caret.className = 'jt-caret';
+  caret.textContent = expanded ? '▾' : '▸';
+  head.appendChild(caret);
+  var label = document.createElement('span');
+  label.className = 'jt-label';
+  label.textContent = labelText;
+  head.appendChild(label);
+  body.classList.add('jt-body');
+  body.hidden = !expanded;
+  head.addEventListener('click', function () {
+    jsonTreeSet(head, body, body.hidden);
+  });
+  node.appendChild(head);
+  node.appendChild(body);
+  return node;
+}
+
+function jsonTreeSet(head, body, open) {
+  body.hidden = !open;
+  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  var caret = head.querySelector('.jt-caret');
+  if (caret) caret.textContent = open ? '▾' : '▸';
+}
+
+function jsonTreeLeaf(text, cls) {
+  var span = document.createElement('span');
+  span.className = cls;
+  span.textContent = text;
+  return span;
+}
+
+function jsonTreeString(s) {
+  if (s.length <= JSON_TREE_STRING_CAP) {
+    return jsonTreeLeaf(JSON.stringify(s), 'jt-str');
+  }
+  var wrap = document.createElement('span');
+  var text = jsonTreeLeaf(JSON.stringify(s.slice(0, JSON_TREE_STRING_CAP)) + '… ', 'jt-str');
+  var more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'jt-more';
+  var expanded = false;
+  more.textContent = '(' + (s.length - JSON_TREE_STRING_CAP) + ' more chars)';
+  more.addEventListener('click', function () {
+    expanded = !expanded;
+    text.textContent = expanded ? JSON.stringify(s) : JSON.stringify(s.slice(0, JSON_TREE_STRING_CAP)) + '… ';
+    more.textContent = expanded ? '(less)' : '(' + (s.length - JSON_TREE_STRING_CAP) + ' more chars)';
+  });
+  wrap.appendChild(text);
+  wrap.appendChild(more);
+  return wrap;
+}
+
+function jsonTreeValue(value) {
+  if (value === null || value === undefined) {
+    return jsonTreeLeaf('null', 'jt-null');
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return jsonTreeLeaf('[]', 'jt-null');
+    }
+    var arrBody = document.createElement('div');
+    value.forEach(function (item, i) {
+      arrBody.appendChild(jsonTreeRow('[' + i + ']', item));
+    });
+    return jsonTreeToggle('jt-coll-head', '[… ' + value.length + (value.length === 1 ? ' item' : ' items') + ']', arrBody, true);
+  }
+  if (typeof value === 'object') {
+    var keys = Object.keys(value);
+    if (keys.length === 0) {
+      return jsonTreeLeaf('{}', 'jt-null');
+    }
+    var objBody = document.createElement('div');
+    keys.forEach(function (k) {
+      objBody.appendChild(jsonTreeRow(k + ':', value[k]));
+    });
+    return jsonTreeToggle('jt-coll-head', '{… ' + keys.length + (keys.length === 1 ? ' key' : ' keys') + '}', objBody, true);
+  }
+  if (typeof value === 'string') {
+    return jsonTreeString(value);
+  }
+  if (typeof value === 'number') {
+    return jsonTreeLeaf(String(value), 'jt-num');
+  }
+  return jsonTreeLeaf(String(value), 'jt-bool');
+}
+
+function jsonTreeRow(key, value) {
+  var row = document.createElement('div');
+  row.className = 'jt-row';
+  var keyEl = document.createElement('span');
+  keyEl.className = 'jt-key';
+  keyEl.textContent = key;
+  row.appendChild(keyEl);
+  row.appendChild(jsonTreeValue(value));
+  return row;
+}
+
+// jsonTreeAll expands/collapses every node in the tree containing btn.
+function jsonTreeAll(btn, open) {
+  var scope = btn.closest('.drawer-artifact');
+  if (!scope) return;
+  scope.querySelectorAll('.json-tree .jt-toggle').forEach(function (head) {
+    var body = head.nextElementSibling;
+    if (body && body.classList.contains('jt-body')) {
+      jsonTreeSet(head, body, open);
+    }
+  });
+}
+
+// jsonTreeToggleRaw switches between the tree and the raw JSONL text.
+function jsonTreeToggleRaw(btn) {
+  var scope = btn.closest('.drawer-artifact');
+  if (!scope) return;
+  var tree = scope.querySelector('.json-tree');
+  var raw = scope.querySelector('.json-raw');
+  if (!tree || !raw) return;
+  var showRaw = raw.hidden;
+  raw.hidden = !showRaw;
+  tree.hidden = showRaw;
+  btn.textContent = showRaw ? 'Tree' : 'Raw';
+}
+
 function warnEmptyFeedback(form) {
   var ta = form.querySelector('textarea[name="feedback"]');
   if (ta && !ta.value.trim()) {

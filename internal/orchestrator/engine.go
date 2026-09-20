@@ -861,6 +861,7 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 // failures inside runPhase deliberately do not take this path.
 func (e *Engine) failIssueInferenceError(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, cause error) {
 	msg := fmt.Sprintf("inference error during %s: %v", phaseName, cause)
+	msg = withDiagnosis(diagnoseFailure(ctx, e.store, storage.EventsPath(project.ID, issue.ID, phaseName), cause), msg)
 	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusFailed, phaseName)
 	e.Publish(Event{
 		Type: EventPhaseFinished, IssueID: issue.ID, ProjectID: project.ID,
@@ -891,6 +892,7 @@ func (e *Engine) failIssueInferenceError(ctx context.Context, project *sqlite.Pr
 // daemon worker logs the error and moves on, leaving the UI stuck "active".
 func (e *Engine) failIssuePhaseError(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, cause error) {
 	msg := fmt.Sprintf("phase %s error: %v", phaseName, cause)
+	msg = withDiagnosis(diagnoseFailure(ctx, e.store, storage.EventsPath(project.ID, issue.ID, phaseName), cause), msg)
 	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusFailed, phaseName)
 	e.Publish(Event{
 		Type: EventPhaseFinished, IssueID: issue.ID, ProjectID: project.ID,
@@ -1049,8 +1051,8 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 				status = "cancelled"
 			} else {
 				status = "failed"
+				errMsg = withDiagnosis(diagnoseFailure(ctx, e.store, eventsPath, loopErr), loopErr.Error())
 			}
-			errMsg = loopErr.Error()
 		}
 
 		latestOutput := ""
@@ -1112,7 +1114,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			return result, nil
 		case adjudication.Fail:
 			result.Status = "failed"
-			result.Error = decision.Feedback
+			result.Error = withDiagnosis(diagnoseFailure(ctx, e.store, eventsPath, nil), decision.Feedback)
 			if err := writeResult(ctx, e.store, resultPath, *result); err != nil {
 				return nil, err
 			}
@@ -1131,7 +1133,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 				continue
 			}
 			result.Status = "failed"
-			result.Error = "max attempts exceeded: " + decision.Feedback
+			result.Error = withDiagnosis(diagnoseFailure(ctx, e.store, eventsPath, nil), "max attempts exceeded: "+decision.Feedback)
 			if err := writeResult(ctx, e.store, resultPath, *result); err != nil {
 				return nil, err
 			}
@@ -1148,7 +1150,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 		}
 	}
 
-	return &PhaseResult{Status: "failed", Error: "max attempts exceeded"}, nil
+	return &PhaseResult{Status: "failed", Error: withDiagnosis(diagnoseFailure(ctx, e.store, storage.EventsPath(project.ID, issue.ID, phase), nil), "max attempts exceeded")}, nil
 }
 
 // buildPhaseModel constructs the phase LLM from the merged agent config and

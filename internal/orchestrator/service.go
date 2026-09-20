@@ -48,7 +48,11 @@ type IssueView struct {
 	// HoldReason is result.json error when the issue/phase is waiting_human
 	// (scope / effort / adjudication rationale). Empty otherwise.
 	HoldReason string
-	Phases     []PhaseStep // research → plan → implementation strip
+	// FailureReason is the (diagnosed) error for a failed issue: the current
+	// phase's result.json error, or the last phase_error event when the phase
+	// died before writing a result. Empty otherwise.
+	FailureReason string
+	Phases        []PhaseStep // research → plan → implementation strip
 	// Attachments are basenames under attachments/ (issue context uploads).
 	Attachments []string
 	// BlockedBy lists unsatisfied dependency IDs for queued issues (read-time
@@ -539,6 +543,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 	tokens, _ := e.runs.TokenTotalForIssue(issue.ID)
 	phaseStatus := ""
 	holdReason := ""
+	failureReason := ""
 	attempt := 0
 	var phases []PhaseStep
 	if project != nil {
@@ -562,6 +567,16 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		if holdReason == "" && issue.Status == sqlite.StatusWaitingHuman {
 			if res, err := readResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, issue.CurrentPhase)); err == nil && res.Error != "" {
 				holdReason = res.Error
+			}
+		}
+		// Failed issues: surface the diagnosed error from the current phase's
+		// result.json, falling back to the last phase_error event when the
+		// phase died before a result was written.
+		if issue.Status == sqlite.StatusFailed {
+			if res, err := readResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, issue.CurrentPhase)); err == nil && res.Error != "" {
+				failureReason = res.Error
+			} else if msg := lastPhaseError(ctx, e.store, storage.EventsPath(project.ID, issue.ID, issue.CurrentPhase)); msg != "" {
+				failureReason = msg
 			}
 		}
 		phases = e.buildPhaseSteps(ctx, project.ID, issue)
@@ -588,6 +603,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		Attempt:       attempt,
 		PhaseStatus:   phaseStatus,
 		HoldReason:    holdReason,
+		FailureReason: failureReason,
 		Phases:        phases,
 		Attachments:   atts,
 		BlockedBy:     blockedBy,

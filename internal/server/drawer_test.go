@@ -321,6 +321,66 @@ func TestBuildWorkspaceTree(t *testing.T) {
 	}
 }
 
+func TestDrawer_ActivityJsonTree(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+	eng, err := orchestrator.NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	defer eng.Close()
+	srv, err := New(eng, cfg)
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	h := srv.Handler()
+	issueID, projectID := seedIssueWithPhases(t, eng)
+
+	ctx := context.Background()
+	eventsKey := storage.EventsPath(projectID, issueID, "research")
+	valid := `{"type":"model_turn","role":"model","content":"hello"}` + "\n" +
+		`{"type":"usage","tokens":42}` + "\n"
+	if err := eng.Store().Write(ctx, eventsKey, []byte(valid)); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	// Valid JSONL → tree view with embedded JSON array payload.
+	req := httptest.NewRequest(http.MethodGet, "/partials/issues/"+itoa(issueID)+"/drawer?tab=activity&phase=research", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("activity status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "js-events-data") || !strings.Contains(body, "json-tree") {
+		t.Fatalf("expected json tree markers in body: %s", body)
+	}
+	if !strings.Contains(body, "model_turn") || !strings.Contains(body, "usage") {
+		t.Fatalf("expected event payloads in body: %s", body)
+	}
+	if !strings.Contains(body, "jsonTreeAll") {
+		t.Fatalf("expected tree toolbar buttons in body")
+	}
+
+	// Invalid JSONL → raw text fallback, no tree.
+	if err := eng.Store().Write(ctx, eventsKey, []byte("not json at all\n")); err != nil {
+		t.Fatalf("rewrite events: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/partials/issues/"+itoa(issueID)+"/drawer?tab=activity&phase=research", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("activity fallback status = %d", rec.Code)
+	}
+	body = rec.Body.String()
+	if strings.Contains(body, "js-events-data") {
+		t.Fatalf("expected raw fallback for invalid JSONL: %s", body)
+	}
+	if !strings.Contains(body, "not json at all") {
+		t.Fatalf("expected raw events text in fallback: %s", body)
+	}
+}
+
 func TestNormalizePhase(t *testing.T) {
 	if normalizePhase("researcher") != phaseResearch {
 		t.Fatal("researcher")

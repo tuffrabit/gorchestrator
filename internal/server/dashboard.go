@@ -157,9 +157,9 @@ func (s *Server) handlePartialDrawer(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("tab") == "diff" {
 		phase = phaseImplementation
 	}
-	content, contentHTML, err := s.drawerContent(r, view, tab, phase)
+	payload, err := s.drawerContent(r, view, tab, phase)
 	if err != nil {
-		content = err.Error()
+		payload.Content = err.Error()
 	}
 	// Build phase strip metadata for in-drawer tabs.
 	phaseTabs := make([]map[string]any, 0, len(knownPhases))
@@ -185,8 +185,10 @@ func (s *Server) handlePartialDrawer(w http.ResponseWriter, r *http.Request) {
 		"Phase":       phase,
 		"PhaseLabel":  phaseLabel(phase),
 		"PhaseTabs":   phaseTabs,
-		"Content":     content,
-		"ContentHTML": contentHTML,
+		"Content":     payload.Content,
+		"ContentHTML": payload.ContentHTML,
+		"EventsJSON":  payload.EventsJSON,
+		"Truncated":   payload.Truncated,
 		"CSRF":        auth.CSRFToken(r),
 	}
 	if err := render(w, "partials/drawer_artifact.html", data); err != nil {
