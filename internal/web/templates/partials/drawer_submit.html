@@ -3,8 +3,7 @@
   hx-target="#issue-feed"
   hx-swap="afterbegin settle:0s"
   hx-encoding="multipart/form-data"
-  enctype="multipart/form-data"
-  hx-on::after-request="if(event.detail.successful){ closeDrawer(); }">
+  enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
   <div class="form-row">
     <label for="project">Project</label>
