@@ -78,8 +78,8 @@ type eventRecord struct {
 	ToolResult map[string]any `json:"tool_result,omitempty"`
 	Tokens     int            `json:"tokens,omitempty"`
 	Error      string         `json:"error,omitempty"`
-	// Model and DurationMs are set on model_wait/model_load/model_unload
-	// residency events.
+	// Model and DurationMs are set on model_wait/model_load/model_reuse/
+	// model_unload residency events.
 	Model      string `json:"model,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 }
@@ -640,8 +640,9 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 
 		// Drive inference-server residency for this phase (no-op without an
 		// inference config). The model stays resident across adjudication
-		// retries inside runPhase; release unloads it once the phase's
-		// result.json is persisted and frees the exclusive-mode lock.
+		// retries inside runPhase; release frees the exclusive-mode lock once
+		// the phase's result.json is persisted, keeping the model loaded when
+		// the pipeline will immediately continue.
 		releaseModel, err := e.acquirePhaseModel(ctx, project, issue, phaseName, phaseCfg)
 		if err != nil {
 			e.failIssueInferenceError(ctx, project, issue, phaseName, err)
@@ -681,7 +682,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		if err != nil {
 			// Hard error: result.json may not be persisted. Still release the
 			// model/lock, but don't let an unload failure mask the real error.
-			_ = releaseModel()
+			_ = releaseModel(false)
 			if e.stopRequested(issue.ID) {
 				// User-requested stop: not an error — land on stopped.
 				_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusStopped, phaseName)
@@ -696,11 +697,23 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		}
 
 		// The phase's result.json is durably written at this point. Unload on
-		// ALL outcomes (done, waiting_human, failed) — a phase waiting on a
-		// human must not pin the model. Fail safe on unload failure: residency
-		// is unknown, so return before the next phase starts. The persisted
-		// result lets resume/recovery pick the phase up correctly.
-		if err := releaseModel(); err != nil {
+		// terminal outcomes (waiting_human, failed, stopped, pipeline end) — a
+		// phase waiting on a human must not pin the model. When the pipeline
+		// continues immediately, keep the model resident: the next phase's
+		// acquire reuses it without an unload/reload cycle (a no-op outside
+		// exclusive mode). Fail safe on unload failure: residency is unknown,
+		// so return before the next phase starts. The persisted result lets
+		// resume/recovery pick the phase up correctly.
+		keep := result.Status == "done" && nextPhaseName(phaseName) != ""
+		if keep && phaseName == "plan" {
+			// The effort gate may hold the pipeline for a human right after
+			// release; don't keep the model pinned for that wait.
+			pc, perr := e.typedProjectConfig(project)
+			if perr != nil || EffortRequiresGate(result.Effort, EffortGateMin(pc)) {
+				keep = false
+			}
+		}
+		if err := releaseModel(keep); err != nil {
 			e.failIssueInferenceError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("unload model after %s: %w", phaseName, err)
 		}
@@ -770,15 +783,19 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 }
 
 // acquirePhaseModel drives inference-server residency for one pipeline phase
-// when an inference block is configured: in exclusive mode it takes the
-// server-keyed lock, then ensures the phase's model is loaded. It returns a
-// release func that unloads the model and frees the lock; the release func
+// when an inference block is configured. In exclusive mode it takes the
+// server-keyed lock, then reconciles residency: if exactly the phase's model
+// is already resident it is reused as-is (no unload/reload cycle); if a
+// foreign model is resident it is unloaded first; otherwise the model is
+// loaded. It returns a release func — release(true) keeps the model resident
+// (exclusive mode only) so the next acquirer can reuse it, and just frees the
+// lock; release(false) unloads the model and frees the lock. The release func
 // always releases the lock, including when unload fails. With no inference
 // config both steps are no-ops and the server swaps implicitly per request.
-func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, phaseCfg config.AgentConfig) (func() error, error) {
+func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, phaseCfg config.AgentConfig) (func(keepResident bool) error, error) {
 	inf := e.cfg.Inference
 	if inf.Type == "" || e.controller == nil {
-		return func() error { return nil }, nil
+		return func(bool) error { return nil }, nil
 	}
 	model := phaseCfg.Model.Model
 	eventsPath := storage.EventsPath(project.ID, issue.ID, phaseName)
@@ -803,33 +820,14 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 	}
 
 	locked := false
-	if inf.Mode == "exclusive" {
-		key := inf.BaseURL
-		if !modelLocks.TryLock(key) {
-			record(eventRecord{Type: "model_wait", Model: model})
-			publishActivity(&ModelActivity{Op: ModelOpWait, Model: model, Phase: phaseName})
-			modelLocks.Lock(key)
-			publishActivity(nil)
-		}
-		locked = true
-	}
-
-	publishActivity(&ModelActivity{Op: ModelOpLoad, Model: model, Phase: phaseName})
-	start := time.Now()
-	loadErr := e.controller.EnsureLoaded(ctx, model, modelTimeout(phaseCfg.Model))
-	publishActivity(nil)
-	loadEv := eventRecord{Type: "model_load", Model: model, DurationMs: time.Since(start).Milliseconds()}
-	if loadErr != nil {
-		loadEv.Error = loadErr.Error()
-		record(loadEv)
-		if locked {
+	// release frees the exclusive-mode lock. keepResident (exclusive mode only)
+	// skips the unload so the next acquirer — this issue's next phase or another
+	// issue — can reuse the resident model; acquire reconciles either way.
+	release := func(keepResident bool) error {
+		if keepResident && locked {
 			modelLocks.Unlock(inf.BaseURL)
+			return nil
 		}
-		return nil, loadErr
-	}
-	record(loadEv)
-
-	return func() error {
 		publishActivity(&ModelActivity{Op: ModelOpUnload, Model: model, Phase: phaseName})
 		defer publishActivity(nil)
 		start := time.Now()
@@ -849,7 +847,65 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 			modelLocks.Unlock(inf.BaseURL)
 		}
 		return err
-	}, nil
+	}
+
+	if inf.Mode == "exclusive" {
+		key := inf.BaseURL
+		if !modelLocks.TryLock(key) {
+			record(eventRecord{Type: "model_wait", Model: model})
+			publishActivity(&ModelActivity{Op: ModelOpWait, Model: model, Phase: phaseName})
+			modelLocks.Lock(key)
+			publishActivity(nil)
+		}
+		locked = true
+
+		// Reconcile residency before loading: a previous phase (or issue) may
+		// have kept its model resident. Reusing it skips the unload/reload
+		// cycle entirely; a foreign model must be evicted first so the phase
+		// never runs against the wrong model.
+		running, err := e.controller.RunningModels(ctx)
+		if err != nil {
+			runningErr := fmt.Errorf("check running models: %w", err)
+			record(eventRecord{Type: "model_load", Model: model, Error: runningErr.Error()})
+			modelLocks.Unlock(inf.BaseURL)
+			return nil, runningErr
+		}
+		switch {
+		case len(running) == 1 && running[0] == model:
+			record(eventRecord{Type: "model_reuse", Model: model})
+			return release, nil
+		case len(running) > 0:
+			publishActivity(&ModelActivity{Op: ModelOpUnload, Model: running[0], Phase: phaseName})
+			start := time.Now()
+			unloadErr := e.controller.UnloadAll(ctx)
+			publishActivity(nil)
+			unloadEv := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
+			if unloadErr != nil {
+				unloadEv.Error = unloadErr.Error()
+				record(unloadEv)
+				modelLocks.Unlock(inf.BaseURL)
+				return nil, unloadErr
+			}
+			record(unloadEv)
+		}
+	}
+
+	publishActivity(&ModelActivity{Op: ModelOpLoad, Model: model, Phase: phaseName})
+	start := time.Now()
+	loadErr := e.controller.EnsureLoaded(ctx, model, modelTimeout(phaseCfg.Model))
+	publishActivity(nil)
+	loadEv := eventRecord{Type: "model_load", Model: model, DurationMs: time.Since(start).Milliseconds()}
+	if loadErr != nil {
+		loadEv.Error = loadErr.Error()
+		record(loadEv)
+		if locked {
+			modelLocks.Unlock(inf.BaseURL)
+		}
+		return nil, loadErr
+	}
+	record(loadEv)
+
+	return release, nil
 }
 
 // failIssueInferenceError marks an issue failed after an inference-side error

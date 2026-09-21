@@ -15,13 +15,17 @@ import (
 
 // Controller drives model residency on a swapping inference server: ensure
 // the phase's model is loaded before work, unload after the phase's artifact
-// is persisted. Both operations are idempotent — crash recovery may leave a
-// model loaded.
+// is persisted (unless the next phase can reuse the resident model). All
+// operations are idempotent — crash recovery may leave a model loaded.
 type Controller interface {
 	// EnsureLoaded loads model (or confirms it resident). timeout covers the
 	// whole warmup request: llama-swap holds it while loading, and big-model
 	// loads take minutes, so callers pass the phase flavor's model timeout.
 	EnsureLoaded(ctx context.Context, model string, timeout time.Duration) error
+	// RunningModels returns the names of models currently resident on the
+	// server. Exclusive-mode acquirers use it to reuse a resident model or to
+	// evict a foreign one before loading.
+	RunningModels(ctx context.Context) ([]string, error)
 	// UnloadAll unloads every resident model and waits until nothing is
 	// running. An error means residency is unknown — callers must not start
 	// the next phase against the server.
@@ -158,6 +162,11 @@ func (c *llamaSwapController) postUnload(ctx context.Context) error {
 		return nil
 	}
 	return fmt.Errorf("unload: no supported endpoint (tried /api/models/unload, /unload)")
+}
+
+// RunningModels implements Controller.
+func (c *llamaSwapController) RunningModels(ctx context.Context) ([]string, error) {
+	return c.runningModels(ctx)
 }
 
 // runningModels returns the names of models llama-swap currently has loaded.

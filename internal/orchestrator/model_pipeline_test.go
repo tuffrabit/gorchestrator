@@ -37,11 +37,23 @@ func TestRun_Inference_LoadUnloadOrder(t *testing.T) {
 				t.Fatalf("Run failed: %v", err)
 			}
 
-			// Each phase must warm up, verify, unload, and poll-empty before
-			// the next phase's warmup starts.
-			want := []string{}
-			for i := 0; i < 3; i++ {
-				want = append(want, "chat", "running", "unload", "running")
+			var want []string
+			if mode == "exclusive" {
+				// Research loads (reconcile finds an empty server); plan and
+				// implementation reuse the resident model (reconcile poll only);
+				// the final phase's release unloads and polls empty.
+				want = []string{
+					"running", "chat", "running",
+					"running",
+					"running",
+					"unload", "running",
+				}
+			} else {
+				// Non-exclusive: each phase warms up, verifies, unloads, and
+				// polls empty before the next phase's warmup starts.
+				for i := 0; i < 3; i++ {
+					want = append(want, "chat", "running", "unload", "running")
+				}
 			}
 			got := stub.requestLog()
 			if strings.Join(got, ",") != strings.Join(want, ",") {
@@ -74,16 +86,40 @@ func TestRun_Inference_LoadUnloadOrder(t *testing.T) {
 			}
 			joined := strings.Join(types, ",")
 			loadIdx := strings.Index(joined, "model_load")
-			unloadIdx := strings.LastIndex(joined, "model_unload")
 			turnIdx := strings.Index(joined, "model_turn")
-			if loadIdx < 0 || unloadIdx < 0 || turnIdx < 0 {
-				t.Fatalf("research events = %v, want model_load/model_turn/model_unload", types)
+			if loadIdx < 0 || turnIdx < 0 {
+				t.Fatalf("research events = %v, want model_load/model_turn", types)
 			}
-			if !(loadIdx < turnIdx && turnIdx < unloadIdx) {
+			if loadIdx > turnIdx {
 				t.Fatalf("research events out of order: %v", types)
 			}
 			if strings.Contains(joined, "model_wait") {
 				t.Fatalf("model_wait recorded without contention: %v", types)
+			}
+			if mode == "exclusive" {
+				// The model is kept resident for the next phase: no unload in
+				// research's events, and the following phases record reuse.
+				if strings.Contains(joined, "model_unload") {
+					t.Fatalf("research events = %v, want no model_unload (model kept)", types)
+				}
+				for _, phase := range []string{"plan", "implementation"} {
+					data, err := store.Read(ctx, storage.EventsPath(pid, iid, phase))
+					if err != nil {
+						t.Fatalf("read %s events.jsonl: %v", phase, err)
+					}
+					if !strings.Contains(string(data), `"type":"model_reuse"`) {
+						t.Fatalf("%s events missing model_reuse: %s", phase, data)
+					}
+				}
+			} else {
+				// Non-exclusive unloads after every phase.
+				unloadIdx := strings.LastIndex(joined, "model_unload")
+				if unloadIdx < 0 {
+					t.Fatalf("research events = %v, want model_unload", types)
+				}
+				if turnIdx > unloadIdx {
+					t.Fatalf("research events out of order: %v", types)
+				}
 			}
 		})
 	}
@@ -128,8 +164,9 @@ func TestRun_Inference_UnloadOnWaitingHuman(t *testing.T) {
 		t.Fatalf("issue status = %q, want waiting_human", issue.Status)
 	}
 
-	// Research loaded and unloaded; no further phase touched the server.
-	want := []string{"chat", "running", "unload", "running"}
+	// Research reconciles (empty server), loads, and unloads on the
+	// waiting_human outcome; no further phase touched the server.
+	want := []string{"running", "chat", "running", "unload", "running"}
 	if got := stub.requestLog(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("request log = %v, want %v", got, want)
 	}
@@ -159,6 +196,10 @@ func (c *blockingController) EnsureLoaded(ctx context.Context, model string, tim
 	}
 }
 
+func (c *blockingController) RunningModels(ctx context.Context) ([]string, error) {
+	return nil, nil
+}
+
 func (c *blockingController) UnloadAll(ctx context.Context) error {
 	return nil
 }
@@ -166,6 +207,10 @@ func (c *blockingController) UnloadAll(ctx context.Context) error {
 func (s *spyController) EnsureLoaded(ctx context.Context, model string, timeout time.Duration) error {
 	s.calls++
 	return nil
+}
+
+func (s *spyController) RunningModels(ctx context.Context) ([]string, error) {
+	return nil, nil
 }
 
 func (s *spyController) UnloadAll(ctx context.Context) error {
@@ -208,6 +253,12 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
 
+	// Plan uses a different model than research, so plan's acquire must evict
+	// the resident model — that reconcile unload is what fails here.
+	plannerCfg := cfg.Agents["planner"]
+	plannerCfg.Model.Model = "other-model"
+	cfg.Agents["planner"] = plannerCfg
+
 	stub := newLlamaSwapStub()
 	stub.unloadClearsIn = -1 // /running never empties
 	srv := newStubServer(t, stub)
@@ -225,8 +276,8 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 	eng.controller = ctl
 
 	err := eng.runPipeline(ctx, project, issue, true)
-	if err == nil || !strings.Contains(err.Error(), "unload model after research") {
-		t.Fatalf("runPipeline = %v, want unload-failure error", err)
+	if err == nil || !strings.Contains(err.Error(), "load model for plan") {
+		t.Fatalf("runPipeline = %v, want acquire unload-failure error", err)
 	}
 
 	// The research result is persisted (resume will pick up correctly) and
@@ -250,8 +301,8 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 	if got.Status != sqlite.StatusFailed {
 		t.Fatalf("issue status = %q, want failed", got.Status)
 	}
-	if got.CurrentPhase != "research" {
-		t.Fatalf("issue current_phase = %q, want research", got.CurrentPhase)
+	if got.CurrentPhase != "plan" {
+		t.Fatalf("issue current_phase = %q, want plan", got.CurrentPhase)
 	}
 
 	// The exclusive-mode lock must be released even on unload failure.
@@ -260,11 +311,11 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 	}
 	modelLocks.Unlock(srv.URL)
 
-	// The failure is recorded in the phase's events.jsonl, alongside the
+	// The failure is recorded in the plan phase's events.jsonl, alongside the
 	// inference_error entry from the failure path.
-	eventsData, err := eng.store.Read(ctx, storage.EventsPath(project.ID, issue.ID, "research"))
+	eventsData, err := eng.store.Read(ctx, storage.EventsPath(project.ID, issue.ID, "plan"))
 	if err != nil {
-		t.Fatalf("read research events.jsonl: %v", err)
+		t.Fatalf("read plan events.jsonl: %v", err)
 	}
 	var sawUnloadErr, sawInferenceErr bool
 	scanner := bufio.NewScanner(strings.NewReader(string(eventsData)))
@@ -281,15 +332,82 @@ func TestRun_Inference_UnloadFailureBlocksNextPhase(t *testing.T) {
 		}
 	}
 	if !sawUnloadErr {
-		t.Fatal("research events.jsonl missing model_unload error event")
+		t.Fatal("plan events.jsonl missing model_unload error event")
 	}
 	if !sawInferenceErr {
-		t.Fatal("research events.jsonl missing inference_error event")
+		t.Fatal("plan events.jsonl missing inference_error event")
 	}
 
 	// Exclusive mode: the breaker must trip on the inference-side failure.
 	if tripped, tripIssue := eng.InferenceBreakerTripped(); !tripped || tripIssue != issue.ID {
 		t.Fatalf("breaker = (%v, %d), want tripped on issue %d", tripped, tripIssue, issue.ID)
+	}
+}
+
+func TestRun_Inference_SwitchesModelBetweenPhases(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	// Plan and implementation each use a different model than the resident
+	// one: each acquire must evict the resident model before loading its own.
+	plannerCfg := config.AgentConfig{Adjudicator: "self", MaxAttempts: 1, Loops: 1}
+	plannerCfg.Model.Model = "other-model"
+	cfg.Agents["planner"] = plannerCfg
+	implementerCfg := config.AgentConfig{Adjudicator: "self", MaxAttempts: 1, Loops: 1}
+	implementerCfg.Model.Model = "third-model"
+	cfg.Agents["implementer"] = implementerCfg
+
+	stub := newLlamaSwapStub()
+	srv := newStubServer(t, stub)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: srv.URL,
+		Mode:    "exclusive",
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+	if err := eng.runPipeline(ctx, project, issue, true); err != nil {
+		t.Fatalf("runPipeline: %v", err)
+	}
+
+	// Research loads cold; plan and implementation each evict the previous
+	// model (running → unload → running → chat → running); the final release
+	// unloads.
+	want := []string{
+		"running", "chat", "running",
+		"running", "unload", "running", "chat", "running",
+		"running", "unload", "running", "chat", "running",
+		"unload", "running",
+	}
+	if got := stub.requestLog(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("request log = %v, want %v", got, want)
+	}
+
+	wantWarmups := []string{"dryrun-model", "other-model", "third-model"}
+	if len(stub.warmups) != len(wantWarmups) {
+		t.Fatalf("warmups = %v, want %d", stub.warmups, len(wantWarmups))
+	}
+	for i, w := range stub.warmups {
+		if w["model"] != wantWarmups[i] {
+			t.Fatalf("warmup %d model = %v, want %s", i, w["model"], wantWarmups[i])
+		}
+	}
+
+	// A switched phase records the reconcile unload in its own events.jsonl,
+	// never model_reuse.
+	for _, phase := range []string{"plan", "implementation"} {
+		data, err := eng.store.Read(ctx, storage.EventsPath(project.ID, issue.ID, phase))
+		if err != nil {
+			t.Fatalf("read %s events.jsonl: %v", phase, err)
+		}
+		s := string(data)
+		if !strings.Contains(s, `"type":"model_unload"`) {
+			t.Fatalf("%s events missing reconcile model_unload: %s", phase, s)
+		}
+		if strings.Contains(s, `"type":"model_reuse"`) {
+			t.Fatalf("%s events have model_reuse despite a model switch: %s", phase, s)
+		}
 	}
 }
 

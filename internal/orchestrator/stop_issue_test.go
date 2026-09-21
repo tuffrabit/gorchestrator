@@ -28,6 +28,10 @@ func (c *recordController) EnsureLoaded(ctx context.Context, model string, timeo
 	return nil
 }
 
+func (c *recordController) RunningModels(ctx context.Context) ([]string, error) {
+	return nil, nil
+}
+
 func (c *recordController) UnloadAll(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
