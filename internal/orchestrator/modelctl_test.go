@@ -39,7 +39,18 @@ func (s *llamaSwapStub) handler() http.Handler {
 		s.requests = append(s.requests, "chat")
 		s.warmups = append(s.warmups, body)
 		if m, _ := body["model"].(string); m != "" && !s.noLoadOnWarmup {
-			s.running = []string{m}
+			// A load adds the model alongside anything already resident (a
+			// sideloaded model survives a main-model load).
+			present := false
+			for _, r := range s.running {
+				if r == m {
+					present = true
+					break
+				}
+			}
+			if !present {
+				s.running = append(s.running, m)
+			}
 		}
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -73,6 +84,21 @@ func (s *llamaSwapStub) handler() http.Handler {
 	}
 	mux.HandleFunc("POST /api/models/unload", unload)
 	mux.HandleFunc("POST /unload", unload) // legacy path, used by fallback test
+	// Per-model unload (sideloaded-model keep lists): removes only that model.
+	mux.HandleFunc("POST /api/models/unload/{model}", func(w http.ResponseWriter, r *http.Request) {
+		model := r.PathValue("model")
+		s.mu.Lock()
+		s.requests = append(s.requests, "unload:"+model)
+		kept := s.running[:0]
+		for _, m := range s.running {
+			if m != model {
+				kept = append(kept, m)
+			}
+		}
+		s.running = kept
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
 	return mux
 }
 
@@ -189,6 +215,73 @@ func TestUnloadAll_PollDeadlineExpires(t *testing.T) {
 	err := ctl.UnloadAll(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "still running") {
 		t.Fatalf("UnloadAll = %v, want still-running deadline error", err)
+	}
+}
+
+func TestUnloadAll_KeepsSideloadedModels(t *testing.T) {
+	stub := newLlamaSwapStub()
+	stub.running = []string{"small-sideload", "big-moe"}
+	srv := newStubServer(t, stub)
+	ctl := newLlamaSwapController(srv.URL)
+	ctl.pollInterval = time.Millisecond
+
+	if err := ctl.UnloadAll(context.Background(), "small-sideload"); err != nil {
+		t.Fatalf("UnloadAll: %v", err)
+	}
+
+	// Selective path: list running, per-model unload of the non-kept model,
+	// then a poll confirming only the kept model remains. Never a bare unload.
+	want := []string{"running", "unload:big-moe", "running"}
+	if got := stub.requestLog(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("request log = %v, want %v", got, want)
+	}
+	stub.mu.Lock()
+	running := append([]string(nil), stub.running...)
+	stub.mu.Unlock()
+	if len(running) != 1 || running[0] != "small-sideload" {
+		t.Fatalf("running after selective unload = %v, want [small-sideload]", running)
+	}
+}
+
+func TestUnloadAll_KeepFallsBackToUnloadAllOnOldServer(t *testing.T) {
+	// Old llama-swap without the per-model endpoint: 405 on
+	// /api/models/unload/<model> must fall back to unload-all.
+	var mu sync.Mutex
+	running := []string{"small-sideload", "big-moe"}
+	var allHit bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/models/unload/{model}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	mux.HandleFunc("POST /api/models/unload", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		allHit = true
+		running = nil
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /running", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		models := make([]map[string]string, 0, len(running))
+		for _, m := range running {
+			models = append(models, map[string]string{"model": m})
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"running": models})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	ctl := newLlamaSwapController(srv.URL)
+	ctl.pollInterval = time.Millisecond
+
+	if err := ctl.UnloadAll(context.Background(), "small-sideload"); err != nil {
+		t.Fatalf("UnloadAll: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !allHit {
+		t.Fatal("unload-all fallback was not used after per-model 405")
 	}
 }
 

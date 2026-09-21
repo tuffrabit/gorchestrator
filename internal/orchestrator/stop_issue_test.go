@@ -32,7 +32,7 @@ func (c *recordController) RunningModels(ctx context.Context) ([]string, error) 
 	return nil, nil
 }
 
-func (c *recordController) UnloadAll(ctx context.Context) error {
+func (c *recordController) UnloadAll(ctx context.Context, keep ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.unloads++

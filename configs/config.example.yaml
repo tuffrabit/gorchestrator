@@ -34,6 +34,11 @@ tools:
 #     #                                   # high → always human-gates before implement)
 #     # single_shot_context_bytes: 32768  # repo digest budget pre-stuffed into the prompt
 #     # context_files: [main.go, ...]     # pin exact files instead of the auto digest
+#     # sideload: true                    # model lives outside the inference lifecycle:
+#     #                                   # no lock/load/unload for this phase, and the
+#     #                                   # model is spared from other phases' evictions.
+#     #                                   # For a small always-resident model that shares
+#     #                                   # the server with the swapped main model.
 #     # (token_budget on agents removed — use top-level providers: map)
 #     model:
 #       provider: openai

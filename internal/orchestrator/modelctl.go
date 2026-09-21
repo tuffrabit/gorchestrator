@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,10 +27,11 @@ type Controller interface {
 	// server. Exclusive-mode acquirers use it to reuse a resident model or to
 	// evict a foreign one before loading.
 	RunningModels(ctx context.Context) ([]string, error)
-	// UnloadAll unloads every resident model and waits until nothing is
+	// UnloadAll unloads every resident model except those named in keep
+	// (sideloaded always-resident models) and waits until nothing else is
 	// running. An error means residency is unknown — callers must not start
 	// the next phase against the server.
-	UnloadAll(ctx context.Context) error
+	UnloadAll(ctx context.Context, keep ...string) error
 }
 
 // NewController builds the lifecycle controller for the configured inference
@@ -108,10 +110,32 @@ func (c *llamaSwapController) EnsureLoaded(ctx context.Context, model string, ti
 	return fmt.Errorf("warmup completed but %s is not running (loaded: %s)", model, strings.Join(running, ", "))
 }
 
-// UnloadAll implements Controller. Already-unloaded is success.
-func (c *llamaSwapController) UnloadAll(ctx context.Context) error {
-	if err := c.postUnload(ctx); err != nil {
-		return err
+// UnloadAll implements Controller. Already-unloaded is success. With keep
+// entries, each other resident model is unloaded individually (per-model
+// endpoint) so the kept models stay resident; the post-unload poll then
+// succeeds once only kept models remain.
+func (c *llamaSwapController) UnloadAll(ctx context.Context, keep ...string) error {
+	keepSet := make(map[string]bool, len(keep))
+	for _, k := range keep {
+		keepSet[k] = true
+	}
+	if len(keepSet) == 0 {
+		if err := c.postUnload(ctx); err != nil {
+			return err
+		}
+	} else {
+		running, err := c.runningModels(ctx)
+		if err != nil {
+			return fmt.Errorf("list running before selective unload: %w", err)
+		}
+		for _, m := range running {
+			if keepSet[m] {
+				continue
+			}
+			if err := c.postUnloadModel(ctx, m); err != nil {
+				return err
+			}
+		}
 	}
 
 	deadline := time.Now().Add(c.unloadDeadline)
@@ -120,7 +144,7 @@ func (c *llamaSwapController) UnloadAll(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("poll running after unload: %w", err)
 		}
-		if len(running) == 0 {
+		if onlyKeptRunning(running, keepSet) {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -132,6 +156,42 @@ func (c *llamaSwapController) UnloadAll(ctx context.Context) error {
 		case <-time.After(c.pollInterval):
 		}
 	}
+}
+
+func onlyKeptRunning(running []string, keep map[string]bool) bool {
+	for _, m := range running {
+		if !keep[m] {
+			return false
+		}
+	}
+	return true
+}
+
+// postUnloadModel unloads one model via POST /api/models/unload/<model>.
+// Older builds without the per-model endpoint fall back to unload-all — a
+// keep-listed model is evicted too, but residency afterwards is still known.
+func (c *llamaSwapController) postUnloadModel(ctx context.Context, model string) error {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.base+"/api/models/unload/"+url.PathEscape(model), nil)
+	if err != nil {
+		return fmt.Errorf("create unload request: %w", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("unload %s: %w", model, err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read unload response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return c.postUnload(ctx)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unload %s: status %d: %s", model, resp.StatusCode, cappedText(string(body)))
+	}
+	return nil
 }
 
 // postUnload issues the unload request. Current llama-swap exposes

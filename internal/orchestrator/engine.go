@@ -79,7 +79,7 @@ type eventRecord struct {
 	Tokens     int            `json:"tokens,omitempty"`
 	Error      string         `json:"error,omitempty"`
 	// Model and DurationMs are set on model_wait/model_load/model_reuse/
-	// model_unload residency events.
+	// model_unload/model_sideload residency events.
 	Model      string `json:"model,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 }
@@ -783,15 +783,19 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 }
 
 // acquirePhaseModel drives inference-server residency for one pipeline phase
-// when an inference block is configured. In exclusive mode it takes the
-// server-keyed lock, then reconciles residency: if exactly the phase's model
-// is already resident it is reused as-is (no unload/reload cycle); if a
-// foreign model is resident it is unloaded first; otherwise the model is
-// loaded. It returns a release func — release(true) keeps the model resident
-// (exclusive mode only) so the next acquirer can reuse it, and just frees the
-// lock; release(false) unloads the model and frees the lock. The release func
-// always releases the lock, including when unload fails. With no inference
-// config both steps are no-ops and the server swaps implicitly per request.
+// when an inference block is configured. A phase whose agent config sets
+// sideload exits immediately with a no-op release: the model lives outside the
+// swap lifecycle (no lock, no explicit load — llama-swap serves it on request —
+// and no unload). In exclusive mode it takes the server-keyed lock, then
+// reconciles residency, ignoring sideloaded models: if exactly the phase's
+// model is resident it is reused as-is (no unload/reload cycle); if a foreign
+// non-sideloaded model is resident it is unloaded first; otherwise the model
+// is loaded. It returns a release func — release(true) keeps the model
+// resident (exclusive mode only) so the next acquirer can reuse it, and just
+// frees the lock; release(false) unloads all non-sideloaded models and frees
+// the lock. The release func always releases the lock, including when unload
+// fails. With no inference config both steps are no-ops and the server swaps
+// implicitly per request.
 func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phaseName string, phaseCfg config.AgentConfig) (func(keepResident bool) error, error) {
 	inf := e.cfg.Inference
 	if inf.Type == "" || e.controller == nil {
@@ -802,6 +806,19 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 	record := func(ev eventRecord) {
 		ev.Timestamp = time.Now().UTC().Format(time.RFC3339)
 		recordEvent(ctx, e.store, eventsPath, ev)
+	}
+
+	// Sideloaded models coexist with the swapped main model: this phase takes
+	// no lock and drives no load/unload, and other phases spare the model from
+	// their evictions (the keep list below).
+	if phaseCfg.Sideload != nil && *phaseCfg.Sideload {
+		record(eventRecord{Type: "model_sideload", Model: model})
+		return func(bool) error { return nil }, nil
+	}
+	sideloaded := e.sideloadedModels()
+	keep := make([]string, 0, len(sideloaded))
+	for m := range sideloaded {
+		keep = append(keep, m)
 	}
 	// publishActivity mirrors lifecycle transitions to the dashboard: a nil
 	// act clears the chip, otherwise the card re-renders showing it.
@@ -836,7 +853,7 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 		// unloaded so exclusive mode does not wedge on a resident model.
 		unloadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		err := e.controller.UnloadAll(unloadCtx)
+		err := e.controller.UnloadAll(unloadCtx, keep...)
 		ev := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
 		if err != nil {
 			ev.Error = err.Error()
@@ -862,7 +879,8 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 		// Reconcile residency before loading: a previous phase (or issue) may
 		// have kept its model resident. Reusing it skips the unload/reload
 		// cycle entirely; a foreign model must be evicted first so the phase
-		// never runs against the wrong model.
+		// never runs against the wrong model. Sideloaded models coexist with
+		// any other model, so they are invisible to this decision.
 		running, err := e.controller.RunningModels(ctx)
 		if err != nil {
 			runningErr := fmt.Errorf("check running models: %w", err)
@@ -870,14 +888,20 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 			modelLocks.Unlock(inf.BaseURL)
 			return nil, runningErr
 		}
+		resident := make([]string, 0, len(running))
+		for _, m := range running {
+			if !sideloaded[m] {
+				resident = append(resident, m)
+			}
+		}
 		switch {
-		case len(running) == 1 && running[0] == model:
+		case len(resident) == 1 && resident[0] == model:
 			record(eventRecord{Type: "model_reuse", Model: model})
 			return release, nil
-		case len(running) > 0:
-			publishActivity(&ModelActivity{Op: ModelOpUnload, Model: running[0], Phase: phaseName})
+		case len(resident) > 0:
+			publishActivity(&ModelActivity{Op: ModelOpUnload, Model: resident[0], Phase: phaseName})
 			start := time.Now()
-			unloadErr := e.controller.UnloadAll(ctx)
+			unloadErr := e.controller.UnloadAll(ctx, keep...)
 			publishActivity(nil)
 			unloadEv := eventRecord{Type: "model_unload", DurationMs: time.Since(start).Milliseconds()}
 			if unloadErr != nil {
@@ -906,6 +930,46 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 	record(loadEv)
 
 	return release, nil
+}
+
+// sideloadedModels returns the set of model names configured with
+// sideload: true across global agents and every project's flavors (YAML, plus
+// synced DB rows so an orphan project's resumed issues are still covered).
+// The set is derived per call — config is small and static per process.
+func (e *Engine) sideloadedModels() map[string]bool {
+	out := map[string]bool{}
+	collect := func(agentType string, overlay config.AgentConfig, hasOverlay bool) {
+		cfg := e.cfg.Agent(agentType)
+		if hasOverlay {
+			cfg = config.MergeAgent(cfg, overlay)
+		}
+		if cfg.Sideload != nil && *cfg.Sideload && cfg.Model.Model != "" {
+			out[cfg.Model.Model] = true
+		}
+	}
+	walkProject := func(pc config.ProjectConfig) {
+		for agentType, pac := range pc.Agents {
+			for _, flavor := range pac.Flavors {
+				collect(agentType, flavor, true)
+			}
+		}
+	}
+	for name := range e.cfg.Agents {
+		collect(name, config.AgentConfig{}, false)
+	}
+	for _, pc := range e.cfg.Projects {
+		walkProject(pc)
+	}
+	if projects, err := e.projects.List(); err == nil {
+		for _, p := range projects {
+			pc, perr := e.typedProjectConfig(p)
+			if perr != nil {
+				continue
+			}
+			walkProject(pc)
+		}
+	}
+	return out
 }
 
 // failIssueInferenceError marks an issue failed after an inference-side error

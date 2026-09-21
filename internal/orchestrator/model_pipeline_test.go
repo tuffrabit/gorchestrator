@@ -200,7 +200,7 @@ func (c *blockingController) RunningModels(ctx context.Context) ([]string, error
 	return nil, nil
 }
 
-func (c *blockingController) UnloadAll(ctx context.Context) error {
+func (c *blockingController) UnloadAll(ctx context.Context, keep ...string) error {
 	return nil
 }
 
@@ -213,7 +213,7 @@ func (s *spyController) RunningModels(ctx context.Context) ([]string, error) {
 	return nil, nil
 }
 
-func (s *spyController) UnloadAll(ctx context.Context) error {
+func (s *spyController) UnloadAll(ctx context.Context, keep ...string) error {
 	s.calls++
 	return nil
 }
@@ -697,5 +697,167 @@ func TestRun_NoInferenceBlock_NoControllerCalls(t *testing.T) {
 	}
 	if result.Status != "done" {
 		t.Fatalf("implementation result status = %q, want done", result.Status)
+	}
+}
+
+func TestRun_Inference_SideloadSkipsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	// The researcher runs on an always-resident small model, outside the swap
+	// lifecycle.
+	sideload := true
+	researcherCfg := cfg.Agents["researcher"]
+	researcherCfg.Sideload = &sideload
+	researcherCfg.Model.Model = "small-model"
+	cfg.Agents["researcher"] = researcherCfg
+
+	stub := newLlamaSwapStub()
+	srv := newStubServer(t, stub)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: srv.URL,
+		Mode:    "exclusive",
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+	if err := eng.runPipeline(ctx, project, issue, true); err != nil {
+		t.Fatalf("runPipeline: %v", err)
+	}
+
+	// Research drove zero controller traffic: no lock, no warmup, no unload.
+	// Plan loaded cold; implementation reused; the final release used the
+	// selective unload (keep list always applies once a sideload is configured),
+	// so dryrun-model is evicted per-model rather than via unload-all.
+	want := []string{
+		"running", "chat", "running", // plan: reconcile, warmup, verify
+		"running",                                   // implementation: reconcile finds the model resident
+		"running", "unload:dryrun-model", "running", // implementation release
+	}
+	if got := stub.requestLog(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("request log = %v, want %v", got, want)
+	}
+	for _, w := range stub.warmups {
+		if w["model"] == "small-model" {
+			t.Fatal("sideloaded model received a warmup request")
+		}
+	}
+
+	// Research recorded the sideload bypass and no load/unload/wait events.
+	data, err := eng.store.Read(ctx, storage.EventsPath(project.ID, issue.ID, "research"))
+	if err != nil {
+		t.Fatalf("read research events.jsonl: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"type":"model_sideload"`) {
+		t.Fatalf("research events missing model_sideload: %s", s)
+	}
+	for _, ev := range []string{"model_load", "model_unload", "model_wait"} {
+		if strings.Contains(s, `"type":"`+ev+`"`) {
+			t.Fatalf("research events contain %s despite sideload: %s", ev, s)
+		}
+	}
+
+	// The sideloaded phase never touched the exclusive lock, and the other
+	// phases released it.
+	if !modelLocks.TryLock(srv.URL) {
+		t.Fatal("exclusive lock still held after pipeline")
+	}
+	modelLocks.Unlock(srv.URL)
+}
+
+func TestRun_Inference_SideloadModelProtectedFromUnload(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	sideload := true
+	researcherCfg := cfg.Agents["researcher"]
+	researcherCfg.Sideload = &sideload
+	researcherCfg.Model.Model = "small-model"
+	cfg.Agents["researcher"] = researcherCfg
+
+	stub := newLlamaSwapStub()
+	// The sideloaded small model and a stale foreign model are both resident
+	// when the pipeline starts (e.g. left over from another server user).
+	stub.running = []string{"small-model", "foreign-big"}
+	srv := newStubServer(t, stub)
+	cfg.Inference = config.InferenceConfig{
+		Type:    "llama-swap",
+		BaseURL: srv.URL,
+		Mode:    "exclusive",
+	}
+
+	eng, project, issue := newManualEngine(t, cfg)
+	if err := eng.runPipeline(ctx, project, issue, true); err != nil {
+		t.Fatalf("runPipeline: %v", err)
+	}
+
+	// Plan's reconcile ignores the sideloaded small-model, evicts only
+	// foreign-big via the per-model endpoint, then warms up its own model
+	// alongside. Implementation reuses it. The final release evicts only
+	// dryrun-model — small-model stays resident throughout.
+	want := []string{
+		"running", "running", "unload:foreign-big", "running", "chat", "running", // plan
+		"running",                                   // implementation: reuse
+		"running", "unload:dryrun-model", "running", // final release
+	}
+	got := stub.requestLog()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("request log = %v, want %v", got, want)
+	}
+	for _, entry := range got {
+		if entry == "unload" {
+			t.Fatalf("bare unload-all used despite sideload keep list: %v", got)
+		}
+	}
+
+	stub.mu.Lock()
+	running := append([]string(nil), stub.running...)
+	stub.mu.Unlock()
+	if len(running) != 1 || running[0] != "small-model" {
+		t.Fatalf("running after pipeline = %v, want [small-model]", running)
+	}
+}
+
+func TestSideloadedModels_GlobalAndFlavor(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := testConfig(tmp)
+
+	// Global agent override marks a small model sideloaded.
+	sideload := true
+	researcherCfg := cfg.Agents["researcher"]
+	researcherCfg.Sideload = &sideload
+	researcherCfg.Model.Model = "small-model"
+	cfg.Agents["researcher"] = researcherCfg
+
+	// A project flavor marks another model sideloaded; a third model with the
+	// flag explicitly false must not appear.
+	pc := cfg.Projects["foo"]
+	pc.Agents = map[string]config.ProjectAgentConfig{
+		"planner": {
+			Default: "fast",
+			Flavors: map[string]config.AgentConfig{
+				"fast":   {Sideload: &sideload, Model: config.ModelConfig{Model: "tiny-planner"}},
+				"normal": {Sideload: new(bool), Model: config.ModelConfig{Model: "big-planner"}},
+			},
+		},
+	}
+	cfg.Projects["foo"] = pc
+
+	eng, _, _ := newManualEngine(t, cfg)
+	got := eng.sideloadedModels()
+	if !got["small-model"] {
+		t.Fatal("global sideloaded researcher model missing")
+	}
+	if !got["tiny-planner"] {
+		t.Fatal("flavor sideloaded planner model missing")
+	}
+	if got["big-planner"] {
+		t.Fatal("sideload:false model must not be protected")
+	}
+	if len(got) != 2 {
+		t.Fatalf("sideloadedModels = %v, want exactly 2 entries", got)
 	}
 }

@@ -61,6 +61,12 @@ type AgentConfig struct {
 	// SingleShot bypasses the tool-call loop: one GenerateContent call, the reply
 	// text is the phase output. Pointer for tri-state merge (nil = inherit).
 	SingleShot *bool `yaml:"single_shot" json:"single_shot,omitempty"`
+	// Sideload exempts this agent's model from inference lifecycle control:
+	// the phase skips the exclusive-mode lock, the explicit load, and the
+	// unload, and the model is protected from other phases' evictions. For a
+	// small always-resident model that coexists with the swapped main model.
+	// Pointer for tri-state merge (nil = inherit).
+	Sideload *bool `yaml:"sideload" json:"sideload,omitempty"`
 	// SingleShotContextBytes caps the repo digest pre-stuffed into a single-shot
 	// prompt; 0 = no digest unless ContextFiles is set (then a 64 KiB default).
 	SingleShotContextBytes int `yaml:"single_shot_context_bytes" json:"single_shot_context_bytes,omitempty"`
@@ -797,6 +803,10 @@ func MergeAgent(base, overlay AgentConfig) AgentConfig {
 	if overlay.SingleShot != nil {
 		s := *overlay.SingleShot
 		out.SingleShot = &s
+	}
+	if overlay.Sideload != nil {
+		s := *overlay.Sideload
+		out.Sideload = &s
 	}
 	if overlay.SingleShotContextBytes > 0 {
 		out.SingleShotContextBytes = overlay.SingleShotContextBytes

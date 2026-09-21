@@ -38,6 +38,27 @@ func TestMergeAgentSingleShotTriState(t *testing.T) {
 	}
 }
 
+func TestMergeAgentSideloadTriState(t *testing.T) {
+	// nil overlay inherits base.
+	base := AgentConfig{Sideload: boolPtr(true)}
+	out := MergeAgent(base, AgentConfig{})
+	if out.Sideload == nil || !*out.Sideload {
+		t.Fatalf("nil overlay should inherit true, got %v", out.Sideload)
+	}
+
+	// Explicit false overrides a true base (tri-state).
+	out = MergeAgent(base, AgentConfig{Sideload: boolPtr(false)})
+	if out.Sideload == nil || *out.Sideload {
+		t.Fatalf("false overlay should override true base, got %v", out.Sideload)
+	}
+
+	// Untouched by default: both nil.
+	out = MergeAgent(AgentConfig{}, AgentConfig{})
+	if out.Sideload != nil {
+		t.Fatalf("nil + nil should stay nil, got %v", *out.Sideload)
+	}
+}
+
 func TestMergeAgentSingleShotContextBytes(t *testing.T) {
 	base := AgentConfig{SingleShotContextBytes: 32768}
 

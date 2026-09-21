@@ -34,6 +34,10 @@ Design + implementation scoping document. Updated 2026-09-17; supersedes the
   `max_concurrent_issues: 1`; placeholders `<LLAMA_SWAP_HOST>:<PORT>`,
   `<FAST_SMALL_MODEL>`, `<BIG_MOE_MODEL>`, `<MID_CODER_MODEL>` to fill in;
   verified to parse via a substituted load test).
+- **Landed 2026-09-21**: modification 5 (`sideload` agent config flag — a
+  small always-resident model opts out of the lock/load/unload lifecycle and
+  is protected from other phases' evictions via keep-listed selective
+  unload).
 - **Not built**: nothing remains in code. Next: live e2e against the real
   server (fill in the example-config placeholders first).
 
@@ -297,6 +301,45 @@ agents:
 ```
 
 Comments carry the token/time math from the measured production numbers above.
+
+### 5. Sideloaded always-resident model — LANDED 2026-09-21
+
+**Requirement**: the server has enough headroom for one *small* model to stay
+loaded alongside the single swapped main model (e.g. a fast researcher or a
+cheap utility flavor). That model must live entirely outside the load/unload
+lifecycle modification 1 built.
+
+**Shape**:
+
+- **Config**: `sideload: true` on any agent config layer (global
+  `agents.<type>` or a project flavor; `*bool` tri-state merge like
+  `single_shot`, so a flavor can override a global `sideload: true` with
+  `false`).
+- **Acquire** (`acquirePhaseModel`, `engine.go`): a sideloaded phase returns
+  immediately with a no-op release — no exclusive-mode lock, no warmup load
+  (llama-swap serves the model on request), no unload. Records a
+  `model_sideload` event.
+- **Protection**: `Engine.sideloadedModels()` collects every sideloaded model
+  name (global agents + all project flavors, YAML and synced DB rows).
+  Exclusive-mode reconcile ignores sideloaded residents for the reuse/evict
+  decision, and every unload passes them as a keep list:
+  `Controller.UnloadAll(ctx, keep ...string)` unloads non-kept models
+  individually via `POST /api/models/unload/<model>` (falling back to
+  unload-all on 404/405 from older llama-swap builds) and polls until only
+  kept models remain.
+- llama-swap itself must be configured so the small model can coexist with
+  the swapped main model (its own group / no exclusivity); the orchestrator
+  only refrains from evicting it.
+
+**Tests**: merge tri-state (`TestMergeAgentSideloadTriState`), selective
+unload keeps the sideloaded model + old-server fallback
+(`TestUnloadAll_KeepsSideloadedModels`,
+`TestUnloadAll_KeepFallsBackToUnloadAllOnOldServer`), pipeline: sideloaded
+phase drives zero controller traffic
+(`TestRun_Inference_SideloadSkipsLifecycle`), foreign resident evicted
+without touching the sideloaded model
+(`TestRun_Inference_SideloadModelProtectedFromUnload`), and model-name
+collection (`TestSideloadedModels_GlobalAndFlavor`).
 
 ## Suggested order of work
 
