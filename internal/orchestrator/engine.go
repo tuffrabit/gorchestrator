@@ -1233,8 +1233,10 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 	var registry []tool.Tool
 	var err error
 	switch phase {
-	case "research", "plan":
+	case "research":
 		registry, err = tools.NewResearcherRegistry(bt)
+	case "plan":
+		registry, err = tools.NewPlannerRegistry(bt)
 	case "implementation":
 		registry, err = tools.NewImplementerRegistry(bt)
 	}

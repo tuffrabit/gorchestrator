@@ -38,7 +38,7 @@ type BoundTools struct {
 	OutputWritten *bool
 }
 
-// NewResearcherRegistry creates the core toolset for the Researcher and Planner agents.
+// NewResearcherRegistry creates the core toolset for the Researcher agent.
 func NewResearcherRegistry(bt *BoundTools) ([]tool.Tool, error) {
 	readFile, err := newReadFileTool(bt)
 	if err != nil {
@@ -57,6 +57,15 @@ func NewResearcherRegistry(bt *BoundTools) ([]tool.Tool, error) {
 		return nil, fmt.Errorf("write_output tool: %w", err)
 	}
 	return []tool.Tool{readFile, listDir, grep, writeOutput}, nil
+}
+
+// NewPlannerRegistry creates the core toolset for the Planner agent.
+func NewPlannerRegistry(bt *BoundTools) ([]tool.Tool, error) {
+	writeOutput, err := newWriteOutputTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("write_output tool: %w", err)
+	}
+	return []tool.Tool{writeOutput}, nil
 }
 
 // NewImplementerRegistry creates the core toolset for the Implementer agent.
@@ -81,11 +90,11 @@ func NewImplementerRegistry(bt *BoundTools) ([]tool.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("update_file tool: %w", err)
 	}
-	runTest, err := newRunTestTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("run_test tool: %w", err)
-	}
-	return []tool.Tool{readFile, listDir, grep, writeFile, updateFile, runTest}, nil
+	//runTest, err := newRunTestTool(bt)
+	//if err != nil {
+	//	return nil, fmt.Errorf("run_test tool: %w", err)
+	//}
+	return []tool.Tool{readFile, listDir, grep, writeFile, updateFile}, nil
 }
 
 // FilterByNames keeps only tools whose Name() is in allow. Empty allow returns all.
