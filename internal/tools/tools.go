@@ -61,11 +61,23 @@ func NewResearcherRegistry(bt *BoundTools) ([]tool.Tool, error) {
 
 // NewPlannerRegistry creates the core toolset for the Planner agent.
 func NewPlannerRegistry(bt *BoundTools) ([]tool.Tool, error) {
+	readFile, err := newReadFileTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("read_file tool: %w", err)
+	}
+	listDir, err := newListDirectoryTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("list_directory tool: %w", err)
+	}
+	grep, err := newGrepTool(bt)
+	if err != nil {
+		return nil, fmt.Errorf("grep_search tool: %w", err)
+	}
 	writeOutput, err := newWriteOutputTool(bt)
 	if err != nil {
 		return nil, fmt.Errorf("write_output tool: %w", err)
 	}
-	return []tool.Tool{writeOutput}, nil
+	return []tool.Tool{readFile, listDir, grep, writeOutput}, nil
 }
 
 // NewImplementerRegistry creates the core toolset for the Implementer agent.
