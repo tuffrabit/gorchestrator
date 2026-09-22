@@ -8,7 +8,7 @@
 - ~~agents should be configurable per project — planned: flavors in `phase_4_project_refactor.md` / spec §8.2~~
 - users should be scoped to project — deferred (spec §17 Q17)
 - users should be included via email invite — deferred (spec §17 Q17)
-- agent should be selectable via new issue if there are multiple choices — planned: `phase_4_project_refactor.md`
+- agent should be selectable via new issue if there are multiple choices
 - ~~ui issue. issue cards should be full width.~~
 - ui issue. dry run checkbox miss-alignment on new issue drawer.
 - app start needs to look for projects in db that are no longer in config and disable them, which means we need to implement a project is_active flag or something
@@ -18,4 +18,4 @@
 - ~~output and result tabs empty~~
 - "build" system that embeds binary version
 - git mode: `EnsureCache` should detect empty/unborn source repos (no commits, no HEAD ref) and fail with a clear message at clone time — today it cascades into "worktree add: invalid reference" on first run and "git fetch: couldn't find remote ref HEAD" on retry
-- TestDaemon_WorkersProcessQueue failed twice mid-session (SQLITE_BUSY / 15s timeout). I bisected with git stash — the baseline fails the same way under -count=3 without my changes, and both versions pass the full suite on repeat runs. It's a pre-existing flake in the daemon test, not something my diff introduced — but it's real, and worth a look at some point.
+- ~~TestDaemon_WorkersProcessQueue failed twice mid-session (SQLITE_BUSY / 15s timeout). I bisected with git stash — the baseline fails the same way under -count=3 without my changes, and both versions pass the full suite on repeat runs. It's a pre-existing flake in the daemon test, not something my diff introduced — but it's real, and worth a look at some point.~~
