@@ -1,0 +1,5 @@
+{{define "partials/chat_options.html"}}
+{{range .Options}}
+<option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+{{end}}
+{{end}}

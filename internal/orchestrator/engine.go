@@ -97,12 +97,15 @@ type Engine struct {
 	sessions   *sqlite.SessionRepo
 	audit      *sqlite.AuditRepo
 	notifs     *sqlite.NotificationRepo
+	chatRepo   *sqlite.ChatRepo
 	bus        *EventBus
 	notifier   *notify.Dispatcher
 	escalator  *notify.Escalator
 	mcp        *gorchmcp.Manager
 	controller Controller
 	breaker    *inferenceBreaker
+	// chatSvc runs dashboard chat conversations (web UI chat drawer).
+	chatSvc *ChatService
 	// modelActMu guards modelActivity: per-issue in-flight inference
 	// lifecycle work (wait/load/unload), surfaced on the dashboard.
 	modelActMu    sync.Mutex
@@ -143,10 +146,12 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		sessions:  sqlite.NewSessionRepo(db),
 		audit:     sqlite.NewAuditRepo(db),
 		notifs:    sqlite.NewNotificationRepo(db),
+		chatRepo:  sqlite.NewChatRepo(db),
 		bus:       NewEventBus(),
 		breaker:   &inferenceBreaker{},
 		runRegs:   map[int64]*runReg{},
 	}
+	e.chatSvc = newChatService(e)
 	if cfg.Inference.Type != "" {
 		e.controller = NewController(cfg.Inference)
 	}

@@ -191,6 +191,35 @@ ALTER TABLE issues ADD COLUMN budget_overrides_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE issues ADD COLUMN depends_on_json TEXT NOT NULL DEFAULT '[]';
 `,
 	},
+	{
+		version: 12,
+		name:    "chat_threads",
+		sql: `
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    agent_type TEXT NOT NULL,
+    flavor TEXT NOT NULL DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (user_id, project_id, agent_type, flavor),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'done',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (thread_id) REFERENCES chat_threads(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id);
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

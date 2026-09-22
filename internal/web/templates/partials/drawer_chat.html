@@ -1,0 +1,51 @@
+{{define "partials/drawer_chat.html"}}
+<div class="chat-drawer">
+  {{if not .Projects}}
+  <div class="empty">
+    <p>No projects configured.</p>
+    <p class="card-meta">Add a project to the config to start chatting with an agent identity.</p>
+  </div>
+  {{else}}
+  <div class="chat-controls" id="chat-controls">
+    <div class="form-row chat-control">
+      <label for="chat-project">Project</label>
+      <select id="chat-project" name="project"
+        hx-get="/partials/chat/thread"
+        hx-target="#chat-thread"
+        hx-swap="innerHTML"
+        hx-trigger="change"
+        hx-include="this">
+        {{range .Projects}}
+        <option value="{{.Name}}" {{if .Selected}}selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+    </div>
+    <div class="form-row chat-control">
+      <label for="chat-agent">Identity</label>
+      <select id="chat-agent" name="identity"
+        hx-get="/partials/chat/thread"
+        hx-target="#chat-thread"
+        hx-swap="innerHTML"
+        hx-trigger="change"
+        hx-include="#chat-controls">
+        {{range .IdentityOptions}}
+        <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+    </div>
+  </div>
+  {{/* Refreshes the identity options whenever the project select changes
+       (and once on load to self-heal); fetches just the <option> list into
+       the identity select. */}}
+  <div id="chat-options-loader" aria-hidden="true" hidden
+    hx-get="/partials/chat/options"
+    hx-target="#chat-agent"
+    hx-swap="innerHTML"
+    hx-trigger="load, change from:#chat-project"
+    hx-include="#chat-project"></div>
+  <div id="chat-thread" class="chat-thread">
+    {{if .Thread}}{{template "partials/chat_thread.html" .Thread}}{{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

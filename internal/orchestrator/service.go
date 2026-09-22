@@ -507,6 +507,16 @@ func (e *Engine) Issues() *sqlite.IssueRepo {
 	return e.issues
 }
 
+// ChatRepo returns the chat thread/message repository (dashboard chat drawer).
+func (e *Engine) ChatRepo() *sqlite.ChatRepo {
+	return e.chatRepo
+}
+
+// ChatService returns the dashboard chat execution service (web UI chat).
+func (e *Engine) ChatService() *ChatService {
+	return e.chatSvc
+}
+
 // ClaimIssue returns the next queued issue for a daemon worker, or (nil, nil)
 // when the queue is empty or the exclusive-mode inference breaker is tripped.
 // While tripped, workers behave as if the queue is empty until a human

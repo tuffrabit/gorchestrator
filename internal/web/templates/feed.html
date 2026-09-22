@@ -72,6 +72,7 @@
       <option value="stopped" {{if eq .FilterStatus "stopped"}}selected{{end}}>stopped</option>
     </select>
     <a class="chip {{if eq .FilterStatus "waiting_human"}}active{{end}}" href="/?status=needs_you">Needs you</a>
+    <button type="button" class="chip" hx-get="/partials/chat" hx-target="#drawer-body" hx-swap="innerHTML" onclick="openDrawer('Chat')">Chat</button>
   </form>
 
   <main id="issue-feed" class="feed">

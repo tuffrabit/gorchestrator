@@ -21,6 +21,11 @@ const (
 	// exclusive-mode lock, loading a model, or unloading — so the dashboard
 	// can show why a long phase hasn't started/finished yet.
 	EventModelActivity = "model_activity"
+	// EventChatMessage fires when a chat thread changes: a message pair is
+	// persisted, a turn advances to a new stage, or a turn finishes
+	// (done/error). The dashboard chat drawer refetches the thread on this
+	// event.
+	EventChatMessage = "chat_message"
 )
 
 // Event is a daemon bus message for SSE and internal subscribers.

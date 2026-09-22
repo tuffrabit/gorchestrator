@@ -1,0 +1,64 @@
+{{define "partials/chat_thread.html"}}
+<div id="chat-thread-inner" class="chat-thread-inner"
+  data-chat-project="{{.Project}}"
+  data-chat-agent="{{.Agent}}"
+  data-chat-flavor="{{.Flavor}}"
+  {{if .ThreadID}}data-chat-thread-id="{{.ThreadID}}"{{end}}>
+  <div class="chat-messages">
+    {{if .Error}}
+    <div class="chat-notice chat-notice-error">{{.Error}}</div>
+    {{end}}
+    {{if .Messages}}
+      {{range .Messages}}
+        {{if eq .Role "tool"}}
+        <details class="chat-msg chat-msg-tool">
+          <summary>tool: {{.ToolName}}</summary>
+          <pre>{{.Content}}</pre>
+        </details>
+        {{else if eq .Role "user"}}
+        <div class="chat-msg chat-msg-user">
+          <div class="chat-bubble">{{.Content}}</div>
+        </div>
+        {{else if .Pending}}
+        <div class="chat-msg chat-msg-assistant chat-msg-pending">
+          <div class="chat-bubble">
+            <span class="chat-stage">{{if .Content}}{{.Content}}{{else}}Thinking…{{end}}</span>
+            <span class="chat-typing" aria-hidden="true"><i></i><i></i><i></i></span>
+          </div>
+        </div>
+        {{else if .Error}}
+        <div class="chat-msg chat-msg-assistant chat-msg-error">
+          <div class="chat-bubble">{{.Content}}</div>
+        </div>
+        {{else}}
+        <div class="chat-msg chat-msg-assistant">
+          <div class="chat-bubble md-body">{{.ContentHTML}}</div>
+        </div>
+        {{end}}
+      {{end}}
+    {{else if not .Error}}
+    <div class="chat-empty">
+      <p>No messages yet.</p>
+      <p class="card-meta">Ask {{.Agent}}{{if .Flavor}}:{{.Flavor}}{{end}} anything about {{.Project}}.</p>
+    </div>
+    {{end}}
+  </div>
+  {{if .CanWrite}}
+  <form class="chat-composer" hx-post="/partials/chat/send" hx-target="#chat-thread" hx-swap="innerHTML">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <input type="hidden" name="project" value="{{.Project}}">
+    <input type="hidden" name="agent" value="{{.Agent}}">
+    <input type="hidden" name="flavor" value="{{.Flavor}}">
+    <textarea name="message" class="chat-draft" rows="2" maxlength="8000"
+      placeholder="Message {{.Agent}}{{if .Flavor}}:{{.Flavor}}{{end}}…"></textarea>
+    <button class="btn btn-primary" type="submit">Send</button>
+  </form>
+  {{end}}
+  <script>
+    (function () {
+      var root = document.getElementById('chat-thread-inner');
+      if (root && typeof chatInitThread === 'function') chatInitThread(root);
+    })();
+  </script>
+</div>
+{{end}}

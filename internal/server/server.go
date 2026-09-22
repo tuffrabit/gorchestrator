@@ -81,6 +81,10 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /partials/submit/flavors", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitFlavors)))
 	s.mux.Handle("POST /partials/issues/{id}/decisions", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialDecide)))
 	s.mux.Handle("POST /partials/submit", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitPost)))
+	s.mux.Handle("GET /partials/chat", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialChat)))
+	s.mux.Handle("GET /partials/chat/options", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialChatOptions)))
+	s.mux.Handle("GET /partials/chat/thread", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialChatThread)))
+	s.mux.Handle("POST /partials/chat/send", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialChatSend)))
 
 	// Static assets
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(staticFS())))

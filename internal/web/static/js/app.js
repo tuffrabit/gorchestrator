@@ -442,6 +442,116 @@ function refreshIssueCard(issueId) {
   }, 50);
 }
 
+// --- Chat drawer (SSE refresh, drafts, auto-scroll) ------------------------
+
+var chatRefreshTimer = null;
+
+function chatThreadRoot() {
+  return document.getElementById('chat-thread-inner');
+}
+
+function chatDrawerOpen() {
+  var drawer = document.getElementById('drawer');
+  return !!(drawer && drawer.classList.contains('open'));
+}
+
+function chatDraftKey(project, agent, flavor) {
+  return 'chat-draft:' + (project || '') + ':' + (agent || '') + ':' + (flavor || '');
+}
+
+// Debounced re-render of the visible chat thread. The thread partial always
+// reflects the current (project, agent, flavor) selection carried on the
+// thread root's data attributes, so any chat_message event just refreshes
+// whatever selection is visible — no per-thread matching needed.
+function refreshChatThread() {
+  if (!chatDrawerOpen()) return;
+  if (chatRefreshTimer) clearTimeout(chatRefreshTimer);
+  chatRefreshTimer = setTimeout(function () {
+    chatRefreshTimer = null;
+    var root = chatThreadRoot();
+    if (!root || !chatDrawerOpen() || !window.htmx) return;
+    var url = '/partials/chat/thread?project=' + encodeURIComponent(root.dataset.chatProject || '') +
+      '&agent=' + encodeURIComponent(root.dataset.chatAgent || '') +
+      '&flavor=' + encodeURIComponent(root.dataset.chatFlavor || '');
+    htmx.ajax('GET', url, { target: '#chat-thread', swap: 'innerHTML' });
+  }, 150);
+}
+
+function chatScrollThread(root) {
+  var box = root.querySelector('.chat-messages');
+  if (!box) return;
+  // Keep the user's place when they scrolled up to read history.
+  var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+// Called by the inline script in the chat thread partial after every swap
+// (and on the initial drawer render): restores a stored draft unless this
+// swap is the echo of a just-sent message, then auto-scrolls.
+function chatInitThread(root) {
+  if (!root) return;
+  var ta = root.querySelector('textarea.chat-draft');
+  if (ta) {
+    var key = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent, root.dataset.chatFlavor);
+    if (window._chatLastSentKey === key) {
+      ta.value = '';
+    } else {
+      var val = '';
+      try { val = localStorage.getItem(key) || ''; } catch (e) { /* storage unavailable */ }
+      ta.value = val;
+    }
+  }
+  chatScrollThread(root);
+}
+
+// Persist composer drafts per (project, agent, flavor) as the user types.
+document.addEventListener('input', function (e) {
+  var ta = e.target;
+  if (!ta || !ta.classList || !ta.classList.contains('chat-draft')) return;
+  var root = ta.closest('#chat-thread-inner');
+  if (!root) return;
+  var key = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent, root.dataset.chatFlavor);
+  try {
+    if (ta.value) localStorage.setItem(key, ta.value);
+    else localStorage.removeItem(key);
+  } catch (err) { /* storage unavailable */ }
+});
+
+// Send lifecycle: remember the draft key so the post-send swap doesn't
+// restore the just-sent text into the fresh composer. The stored draft is
+// cleared only on success; on failure the textarea keeps its text and the
+// draft is re-persisted.
+document.addEventListener('htmx:beforeRequest', function (e) {
+  var elt = e.detail && e.detail.elt;
+  if (!elt || !elt.getAttribute) return;
+  var post = elt.getAttribute('hx-post') || elt.getAttribute('data-hx-post') || '';
+  if (post !== '/partials/chat/send') return;
+  var root = chatThreadRoot();
+  if (!root) return;
+  window._chatLastSentKey = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent, root.dataset.chatFlavor);
+  var form = elt.closest ? elt.closest('form') : null;
+  var ta = form ? form.querySelector('textarea.chat-draft') : null;
+  window._chatLastSentBackup = ta ? ta.value : '';
+});
+
+document.addEventListener('htmx:afterRequest', function (e) {
+  if (window._chatLastSentKey == null) return;
+  var elt = e.detail && e.detail.elt;
+  var post = elt && elt.getAttribute ? (elt.getAttribute('hx-post') || '') : '';
+  if (post !== '/partials/chat/send') return;
+  var ok = e.detail.successful !== undefined
+    ? e.detail.successful
+    : (e.detail.xhr && e.detail.xhr.status >= 200 && e.detail.xhr.status < 300);
+  var key = window._chatLastSentKey;
+  var backup = window._chatLastSentBackup;
+  window._chatLastSentKey = null;
+  window._chatLastSentBackup = null;
+  try {
+    if (ok) localStorage.removeItem(key);
+    else if (backup) localStorage.setItem(key, backup);
+  } catch (err) { /* storage unavailable */ }
+});
+
 document.addEventListener('DOMContentLoaded', function () {
   var expandId = document.body && document.body.dataset.expandId;
   var drawer = document.body && document.body.dataset.drawer;
@@ -481,6 +591,14 @@ document.addEventListener('DOMContentLoaded', function () {
           closeDrawer();
         }
       } catch (err) { /* ignore */ }
+    });
+    // Chat turns publish on every stage change and on completion; refresh
+    // the chat drawer when it is open (no-op otherwise).
+    es.addEventListener('chat_message', function (ev) {
+      try {
+        JSON.parse(ev.data);
+        refreshChatThread();
+      } catch (err) { /* ignore malformed */ }
     });
   } catch (e) { /* SSE unavailable */ }
 });
