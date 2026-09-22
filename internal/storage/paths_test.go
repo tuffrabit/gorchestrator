@@ -25,6 +25,17 @@ func TestValidateRelativePath(t *testing.T) {
 	}
 }
 
+func TestChatSourcePath(t *testing.T) {
+	if got := ChatSourcePath(7); got != "projects/7/chat/source" {
+		t.Fatalf("ChatSourcePath(7) = %q, want projects/7/chat/source", got)
+	}
+	// The project-level chat worktree must never collide with per-issue
+	// source or workspace paths.
+	if SourcePath(7, 3) == ChatSourcePath(7) || WorkspacePath(7, 3) == ChatSourcePath(7) {
+		t.Fatal("ChatSourcePath collides with issue paths")
+	}
+}
+
 func TestJoinContained(t *testing.T) {
 	key, err := JoinContained("projects/1/issues/2", "research/result.json")
 	if err != nil {

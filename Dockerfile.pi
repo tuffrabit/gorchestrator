@@ -1,0 +1,24 @@
+FROM node:24-bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep wget \
+  && rm -rf /var/lib/apt/lists/*
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+RUN npm install -g @colbymchenry/codegraph
+
+WORKDIR /workspace
+
+RUN codegraph init -i
+RUN pi install npm:@vndv/pi-codegraph@0.1.10
+RUN pi list
+
+ARG GOLANG_VERSION=1.26.3
+RUN wget -O go.tgz https://go.dev/dl/go${GOLANG_VERSION}.linux-amd64.tar.gz && \
+    tar -C /usr/local -xzf go.tgz && \
+    rm go.tgz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+COPY docker-pi-start.sh /docker-pi-start.sh
+RUN chmod +x /docker-pi-start.sh
+#ENTRYPOINT ["bash"]
+ENTRYPOINT ["/docker-pi-start.sh"]

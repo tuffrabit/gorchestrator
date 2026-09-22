@@ -1800,6 +1800,11 @@ func (e *Engine) prepareGitSource(ctx context.Context, projectID, issueID int64,
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	// Serialize against chat turns (and sibling issues) mutating the same
+	// bare cache; a concurrent `worktree prune` can race `worktree add`.
+	lock := gitWorkspaceLocks.lock(projectID)
+	lock.Lock()
+	defer lock.Unlock()
 	mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
 	if err := mgr.EnsureCache(ctx, projectID, cfg); err != nil {
 		return err
@@ -1817,14 +1822,20 @@ func (e *Engine) prepareImplementerWorkspace(ctx context.Context, project *sqlit
 	wsKey := storage.WorkspacePath(project.ID, issue.ID)
 	if gitCfg.Enabled() {
 		mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
-		if err := mgr.EnsureCache(ctx, project.ID, gitCfg); err != nil {
-			return err
-		}
 		branch := gorchgit.BranchName(issue.ID, run.ID)
 		abs := storage.Abs(e.cfg.StorageRoot, wsKey)
-		if err := mgr.CreateImplementerWorktree(ctx, project.ID, abs, branch, gitCfg); err != nil {
+		// Lock only the git mutations so the DB write runs unlocked.
+		lock := gitWorkspaceLocks.lock(project.ID)
+		lock.Lock()
+		if err := mgr.EnsureCache(ctx, project.ID, gitCfg); err != nil {
+			lock.Unlock()
 			return err
 		}
+		if err := mgr.CreateImplementerWorktree(ctx, project.ID, abs, branch, gitCfg); err != nil {
+			lock.Unlock()
+			return err
+		}
+		lock.Unlock()
 		return e.runs.SetWorkspace(run.ID, wsKey, branch)
 	}
 	sourceSnapshotPath := storage.SourcePath(project.ID, issue.ID)
@@ -1909,6 +1920,61 @@ func (e *Engine) typedProjectConfig(project *sqlite.Project) (config.ProjectConf
 		return pc, fmt.Errorf("parse project config: %w", err)
 	}
 	return pc, nil
+}
+
+// chatSourceTTL bounds how stale a chat source worktree may be before a
+// chat turn re-fetches and re-checks it out. A chat conversation must not
+// `git fetch` on every model turn, but a chat agent reading a days-old tree
+// is its own bug: never reuse a stale worktree silently.
+const chatSourceTTL = 15 * time.Minute
+
+// chatSourceRoot returns an absolute host directory the chat drawer may read
+// for this project, materializing a project-level read-only git worktree
+// when the project is git-mode. The returned refresh flag reports whether
+// the worktree was (re)created, for logging and tests.
+//
+//	source_path set  -> that host directory (unchanged behaviour)
+//	git.repo_url set -> EnsureCache + CreateSourceWorktree at
+//	                    storage.Abs(root, storage.ChatSourcePath(projectID))
+//	neither          -> "", false, nil (caller must surface a clear chat error)
+//
+// The worktree is refreshed when it is missing or its mtime is older than
+// chatSourceTTL; otherwise the existing checkout is reused as-is. The
+// per-project git workspace lock serializes the fetch/worktree mutation
+// against pipeline phases on the same bare cache.
+func (e *Engine) chatSourceRoot(ctx context.Context, project *sqlite.Project, pc config.ProjectConfig) (abs string, refreshed bool, err error) {
+	if pc.SourcePath != "" {
+		return pc.SourcePath, false, nil
+	}
+	gitCfg, err := e.projectGitConfig(project)
+	if err != nil {
+		return "", false, err
+	}
+	if !gitCfg.Enabled() {
+		return "", false, nil
+	}
+	lock := gitWorkspaceLocks.lock(project.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	abs = storage.Abs(e.cfg.StorageRoot, storage.ChatSourcePath(project.ID))
+	if st, statErr := os.Stat(abs); statErr == nil && st.IsDir() && time.Since(st.ModTime()) < chatSourceTTL {
+		return abs, false, nil
+	}
+	mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
+	if err := mgr.EnsureCache(ctx, project.ID, gitCfg); err != nil {
+		return "", false, err
+	}
+	if err := mgr.CreateSourceWorktree(ctx, project.ID, abs, gitCfg); err != nil {
+		// Unborn/empty source repos cascade into `worktree add: invalid
+		// reference`; surface that as a readable chat error rather than a raw
+		// git error.
+		if strings.Contains(err.Error(), "invalid reference") {
+			return "", false, fmt.Errorf("project source repo has no commits; chat cannot read it")
+		}
+		return "", false, err
+	}
+	return abs, true, nil
 }
 
 // projectSourcePath extracts the source path from project config.

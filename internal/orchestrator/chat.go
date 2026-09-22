@@ -37,11 +37,14 @@ const (
 
 // ChatService runs dashboard chat conversations against agent identities.
 // Each SendMessage persists a user row plus a pending assistant placeholder,
-// then processes the turn asynchronously: the assistant row's content is
-// updated with stage text as the turn progresses, tool calls/responses land
-// as tool rows, and the row is finally marked done or error. Turns for one
-// thread are serialized and every turn reseeds the ADK session from the DB,
-// so processing is stateless and a reopened drawer always renders truth.
+// then processes the turn asynchronously: the placeholder's content is
+// updated with stage text as the turn progresses and tool calls/responses
+// land as tool rows. When the turn finishes with tool rows, the placeholder
+// is replaced by a fresh assistant row so the final reply (or error) sorts
+// after the tool rows of that turn; tool-less turns update it in place.
+// Turns for one thread are serialized and every turn
+// reseeds the ADK session from the DB, so processing is stateless and a
+// reopened drawer always renders truth.
 type ChatService struct {
 	eng *Engine
 	mu  sync.Mutex
@@ -183,20 +186,42 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		s.publish(thread.ID, thread.ProjectID)
 	}
 	finished := false
+	var toolRows int
+	// finalize lands the turn's final assistant row. When the turn produced
+	// tool rows, a fresh assistant row is inserted rather than updating the
+	// pending one in place, so the reply sorts after the tool calls/
+	// responses of this turn (the pending row was created up front so stage
+	// updates have somewhere to live). Without tool rows the pending row is
+	// updated in place, keeping the plain user/reply interleaving stable even
+	// when a later message is sent while this turn is still running.
+	finalize := func(text, status string) {
+		if toolRows == 0 {
+			if err := eng.chatRepo.SetMessageResult(assistantMsg.ID, text, status); err != nil {
+				log.Printf("chat thread %d: save assistant reply: %v", thread.ID, err)
+			}
+			return
+		}
+		if _, err := eng.chatRepo.AddMessage(thread.ID, "assistant", text, "", status); err != nil {
+			log.Printf("chat thread %d: insert final message: %v", thread.ID, err)
+			_ = eng.chatRepo.SetMessageResult(assistantMsg.ID, text, status)
+		} else if err := eng.chatRepo.DeleteMessage(assistantMsg.ID); err != nil {
+			log.Printf("chat thread %d: delete pending message: %v", thread.ID, err)
+		}
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("chat thread %d: turn panic: %v", thread.ID, r)
 		}
 		if !finished {
 			// Safety net: a turn must never exit with the row still pending.
-			_ = eng.chatRepo.SetMessageResult(assistantMsg.ID, "Error: turn failed unexpectedly", "error")
+			finalize("Error: turn failed unexpectedly", "error")
 			_ = eng.chatRepo.TouchThread(thread.ID)
 			s.publish(thread.ID, thread.ProjectID)
 		}
 	}()
 	fail := func(cause error) {
 		finished = true
-		_ = eng.chatRepo.SetMessageResult(assistantMsg.ID, "Error: "+cause.Error(), "error")
+		finalize("Error: "+cause.Error(), "error")
 		_ = eng.chatRepo.TouchThread(thread.ID)
 		s.publish(thread.ID, thread.ProjectID)
 	}
@@ -249,12 +274,20 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		return
 	}
 
-	// Tools: read-only host tools rooted at the project source tree, filtered
-	// by the agent allowlist, plus any MCP server tools. No SourcePath means
-	// no builtin tools at all.
+	// Tools: read-only host tools rooted at a real, project-level source
+	// tree (snapshot directory for source_path projects, a per-project
+	// read-only git worktree for git-mode projects), filtered by the agent
+	// allowlist, plus any MCP server tools. chatSourceRoot materializes the
+	// worktree first — NewHostReadOnlyRegistry requires an absolute, existing
+	// root — and returns "" when the project has no source at all.
 	var registry []tool.Tool
-	if pc.SourcePath != "" {
-		hostTools, err := tools.NewHostReadOnlyRegistry(pc.SourcePath, eng.cfg.Tools.ReadFile.MaxBytes, eng.cfg.Tools.ReadFile.MaxLines)
+	root, refreshed, err := eng.chatSourceRoot(ctx, project, pc)
+	if err != nil {
+		fail(fmt.Errorf("prepare chat source: %w", err))
+		return
+	}
+	if root != "" {
+		hostTools, err := tools.NewHostReadOnlyRegistry(root, eng.cfg.Tools.ReadFile.MaxBytes, eng.cfg.Tools.ReadFile.MaxLines)
 		if err != nil {
 			fail(fmt.Errorf("build host tools: %w", err))
 			return
@@ -269,6 +302,15 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		}
 		registry = append(registry, mcpTools...)
 	}
+
+	// No silent tool-less turns: a chat agent told it has tools but given no
+	// declarations imitates tool calls in prose. A missing source or an
+	// allowlist that filters everything out is a config error — fail loudly.
+	if len(registry) == 0 {
+		fail(fmt.Errorf("no source tree or tools available for project %q (set projects.%s.source_path or git.repo_url)", project.Name, project.Name))
+		return
+	}
+	log.Printf("chat thread %d: %d tools exposed (root=%s refreshed=%v)", thread.ID, len(registry), root, refreshed)
 
 	agentInst, err := agents.NewChat(thread.AgentType, cfg.SystemPrompt).Build(llmModel, registry)
 	if err != nil {
@@ -329,9 +371,15 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 			ev.Author = "user"
 			ev.Content = genai.NewContentFromText(m.Content, genai.RoleUser)
 		case m.Role == "assistant" && m.Status == "done":
+			content := stripFabricatedCalls(m.Content)
+			if content == "" {
+				// The stored reply contained only imitated tool-call markup;
+				// reseeding it would few-shot prime this turn to fake calls.
+				continue
+			}
 			ev = session.NewEvent(ctx, "seed")
 			ev.Author = author
-			ev.Content = genai.NewContentFromText(m.Content, genai.RoleModel)
+			ev.Content = genai.NewContentFromText(content, genai.RoleModel)
 		default:
 			continue
 		}
@@ -360,6 +408,7 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 				}
 				if p.FunctionCall != nil {
 					s.addToolMessage(thread.ID, p.FunctionCall.Name, p.FunctionCall.Args)
+					toolRows++
 				}
 			}
 		} else if ev.Content.Role == genai.RoleUser {
@@ -368,6 +417,7 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 					continue
 				}
 				s.addToolMessage(thread.ID, p.FunctionResponse.Name, p.FunctionResponse.Response)
+				toolRows++
 			}
 		}
 	}
@@ -376,9 +426,7 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 	if finalText == "" {
 		finalText = "(no response)"
 	}
-	if err := eng.chatRepo.SetMessageResult(assistantMsg.ID, finalText, "done"); err != nil {
-		log.Printf("chat thread %d: save assistant reply: %v", thread.ID, err)
-	}
+	finalize(finalText, "done")
 	_ = eng.chatRepo.TouchThread(thread.ID)
 	finished = true
 	s.publish(thread.ID, thread.ProjectID)
@@ -494,6 +542,65 @@ func (s *ChatService) threadLock(threadID int64) *sync.Mutex {
 		s.threadLocks[threadID] = l
 	}
 	return l
+}
+
+// fabricatedCallPrefixes open an imitated tool-call block (closing tags such
+// as </tool_code> and <tool_response> close one).
+var fabricatedCallPrefixes = []string{
+	"<tool_code>",
+	"antml:invoke",
+	"<tool_call>",
+	"<function=",
+	"<parameter>",
+	"#list_directory(",
+	"#read_file(",
+	"#grep_search(",
+}
+
+// fabricatedCallClosers close an imitated tool-call block.
+var fabricatedCallClosers = []string{
+	"</tool_code>",
+	"antml:invoke>",
+	"<tool_call>",
+	"</function>",
+	"</parameter>",
+}
+
+// stripFabricatedCalls removes imitated tool-call markup from a stored
+// assistant reply before it is reseeded into a chat session. A line is
+// dropped when it carries an imitated-call marker (opening tag, closing
+// tag, or inline marker); leading blank lines around the drop are trimmed
+// away. It returns "" when nothing useful remains, in which case the
+// caller skips the row.
+func stripFabricatedCalls(s string) string {
+	if !containsFabricatedCall(s) {
+		return s
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if containsFabricatedCall(strings.TrimSpace(line)) {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// containsFabricatedCall reports whether s carries any imitated tool-call
+// markup (opening prefix, closing tag, or inline marker).
+func containsFabricatedCall(s string) bool {
+	for _, p := range fabricatedCallPrefixes {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	for _, c := range fabricatedCallClosers {
+		if strings.Contains(s, c) {
+			return true
+		}
+	}
+	return false
 }
 
 // chatSession returns the runner session, creating it when absent. A fresh

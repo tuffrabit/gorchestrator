@@ -6,6 +6,7 @@
 - ~~download implementer output~~ (workspace.zip when implementation done)
 - ~~project should be configurable not as issue input — planned: `phase_4_project_refactor.md` / spec §6.0~~
 - ~~agents should be configurable per project — planned: flavors in `phase_4_project_refactor.md` / spec §8.2~~
+- ~~chat drawer bug: chat turns get NO tools for git-mode projects (tools are gated on `source_path`), so the model prints fake tool calls as chat text — see `issue-chat-drawer-missing-tools.md`~~ (fixed: `chatSourceRoot` + per-project read-only worktree at `projects/<id>/chat/source` with 15m TTL, per-project git workspace lock, loud fail on zero tools, honest no-tools instruction, fabricated-call strip on history reseed; follow-ups — chat model flavor, SingleShot, MCP visibility, worktree cleanup on project removal — are in the issue doc §7)
 - users should be scoped to project — deferred (spec §17 Q17)
 - users should be included via email invite — deferred (spec §17 Q17)
 - agent should be selectable via new issue if there are multiple choices
@@ -17,5 +18,5 @@
 - ~~per agent/provider token limit~~
 - ~~output and result tabs empty~~
 - "build" system that embeds binary version
-- git mode: `EnsureCache` should detect empty/unborn source repos (no commits, no HEAD ref) and fail with a clear message at clone time — today it cascades into "worktree add: invalid reference" on first run and "git fetch: couldn't find remote ref HEAD" on retry
+- git mode: `EnsureCache` should detect empty/unborn source repos (no commits, no HEAD ref) and fail with a clear message at clone time — today it cascades into "worktree add: invalid reference" on first run and "git fetch: couldn't find remote ref HEAD" on retry. (Chat turns now hit the same path; `chatSourceRoot` maps the "invalid reference" failure to a readable chat error but the clone-time case is still open.)
 - ~~TestDaemon_WorkersProcessQueue failed twice mid-session (SQLITE_BUSY / 15s timeout). I bisected with git stash — the baseline fails the same way under -count=3 without my changes, and both versions pass the full suite on repeat runs. It's a pre-existing flake in the daemon test, not something my diff introduced — but it's real, and worth a look at some point.~~

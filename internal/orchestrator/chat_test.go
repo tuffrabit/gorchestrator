@@ -2,7 +2,11 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,16 +16,27 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
+	gorchgit "github.com/tuffrabit/gorchestrator/internal/git"
 	"github.com/tuffrabit/gorchestrator/internal/llm"
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
+	"github.com/tuffrabit/gorchestrator/internal/storage"
 )
 
 // fakeChatModel is a model.LLM that replies with canned text and captures the
-// contents of every request so tests can assert history seeding.
+// contents of every request so tests can assert history seeding. When
+// callTurns is greater than zero, that many turns first answer with a
+// list_directory FunctionCall part (exercising the ADK function-call loop)
+// before falling back to the canned text. The call is consumed when the
+// response is actually yielded (not when GenerateContent is invoked), because
+// ADK defers iterator evaluation and may re-wrap req in a second call for
+// the same turn.
 type fakeChatModel struct {
-	mu       sync.Mutex
-	text     string
-	requests [][]capturedContent
+	mu           sync.Mutex
+	text         string
+	requests     [][]capturedContent
+	declarations [][]string
+	callTurns    int
+	callDone     bool
 }
 
 type capturedContent struct {
@@ -46,10 +61,47 @@ func (f *fakeChatModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRe
 		}
 		contents = append(contents, capturedContent{role: string(c.Role), text: sb.String()})
 	}
+	var decls []string
+	if req.Config != nil {
+		for _, tc := range req.Config.Tools {
+			if tc == nil {
+				continue
+			}
+			for _, d := range tc.FunctionDeclarations {
+				decls = append(decls, d.Name)
+			}
+		}
+	}
 	f.requests = append(f.requests, contents)
+	f.declarations = append(f.declarations, decls)
 	f.mu.Unlock()
 
 	return func(yield func(*adkmodel.LLMResponse, error) bool) {
+		f.mu.Lock()
+		call := f.callTurns > 0 && !f.callDone
+		if call {
+			f.callDone = true
+		} else {
+			// A final text answer ends the turn: the next turn may call again.
+			f.callDone = false
+		}
+		f.mu.Unlock()
+		if call {
+			yield(&adkmodel.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_list_directory",
+							Name: "list_directory",
+							Args: map[string]any{"path": "."},
+						},
+					}},
+				},
+				TurnComplete: true,
+			}, nil)
+			return
+		}
 		yield(&adkmodel.LLMResponse{
 			Content:      genai.NewContentFromText(f.text, genai.RoleModel),
 			TurnComplete: true,
@@ -62,6 +114,14 @@ func (f *fakeChatModel) capturedRequests() [][]capturedContent {
 	defer f.mu.Unlock()
 	out := make([][]capturedContent, len(f.requests))
 	copy(out, f.requests)
+	return out
+}
+
+func (f *fakeChatModel) capturedDeclarations() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, len(f.declarations))
+	copy(out, f.declarations)
 	return out
 }
 
@@ -103,9 +163,25 @@ func (f *fakeChatController) counts() (ensureLoaded, runningModels, unloadAll in
 // chatTestEngine builds an engine with the fake chat model installed and a
 // user + the fixture "foo" project ready for thread creation.
 func chatTestEngine(t *testing.T, mutate func(*config.Config)) (*Engine, *sqlite.User, *sqlite.Project, *fakeChatModel) {
+	return chatTestEngineFor(t, "foo", mutate)
+}
+
+// chatTestEngineFor is chatTestEngine for an arbitrary fixture project.
+func chatTestEngineFor(t *testing.T, projectName string, mutate func(*config.Config)) (*Engine, *sqlite.User, *sqlite.Project, *fakeChatModel) {
 	t.Helper()
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
+	// Give the fixture project a real, existing snapshot source tree so
+	// chat turns have tools. Tests that need a source-less project clear
+	// SourcePath in their mutate (see TestChat_NoSourceFailsLoudly).
+	src := t.TempDir()
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir chat source: %v", err)
+	}
+	if pc := cfg.Projects[projectName]; pc.SourcePath == "" {
+		pc.SourcePath = src
+		cfg.Projects[projectName] = pc
+	}
 	if mutate != nil {
 		mutate(cfg)
 	}
@@ -124,11 +200,51 @@ func chatTestEngine(t *testing.T, mutate func(*config.Config)) (*Engine, *sqlite
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	project, err := eng.projects.GetByName("foo")
+	project, err := eng.projects.GetByName(projectName)
 	if err != nil || project == nil {
-		t.Fatalf("get project foo: %v", err)
+		t.Fatalf("get project %s: %v", projectName, err)
 	}
 	return eng, user, project, fake
+}
+
+// assertChatToolTurn checks the message layout of a turn that made one
+// list_directory call: user, tool call, tool response, assistant.
+func assertChatToolTurn(t *testing.T, msgs []*sqlite.ChatMessage) {
+	t.Helper()
+	if len(msgs) != 4 {
+		t.Fatalf("messages = %+v, want 4 rows (user, tool, tool, assistant)", msgs)
+	}
+	if msgs[0].Role != "user" || msgs[0].Status != "done" {
+		t.Fatalf("row 0 = %+v, want done user message", msgs[0])
+	}
+	if msgs[1].Role != "tool" || msgs[1].ToolName != "list_directory" || msgs[1].Status != "done" {
+		t.Fatalf("row 1 = %+v, want done list_directory tool call", msgs[1])
+	}
+	if msgs[2].Role != "tool" || msgs[2].ToolName != "list_directory" || !strings.Contains(msgs[2].Content, "hello.go") {
+		t.Fatalf("row 2 = %+v, want tool response listing hello.go", msgs[2])
+	}
+	if msgs[3].Role != "assistant" || msgs[3].Status != "done" || msgs[3].Content != "chat reply" {
+		t.Fatalf("row 3 = %+v, want done assistant reply", msgs[3])
+	}
+}
+
+// assertHostToolDeclarations asserts the first model request carried the
+// host read-only tool declarations.
+func assertHostToolDeclarations(t *testing.T, fake *fakeChatModel) {
+	t.Helper()
+	decls := fake.capturedDeclarations()
+	if len(decls) == 0 || len(decls[0]) == 0 {
+		t.Fatalf("first model request carried no tool declarations: %v", decls)
+	}
+	seen := map[string]bool{}
+	for _, n := range decls[0] {
+		seen[n] = true
+	}
+	for _, want := range []string{"read_file", "list_directory", "grep_search"} {
+		if !seen[want] {
+			t.Fatalf("declarations %v missing %q", decls[0], want)
+		}
+	}
 }
 
 // waitForChatMessages polls until the thread has exactly want messages and no
@@ -395,4 +511,222 @@ func TestChat_SideloadSkipsController(t *testing.T) {
 		t.Fatal("exclusive model lock held after sideloaded chat turn")
 	}
 	modelLocks.Unlock(baseURL)
+}
+
+func TestChat_GitProjectGetsRealTools(t *testing.T) {
+	remote := initLocalBareRemote(t)
+	eng, user, project, fake := chatTestEngineFor(t, "gitproj", func(cfg *config.Config) {
+		pc := cfg.Projects["gitproj"]
+		pc.SourcePath = "" // exercise the git-mode path, not the snapshot root
+		pc.Git = &config.ProjectGitConfig{
+			RepoURL:    remote,
+			BaseBranch: "main",
+		}
+		cfg.Projects["gitproj"] = pc
+	})
+	fake.callTurns = 1
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what files are here"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	assertChatToolTurn(t, msgs)
+
+	// The chat LLM request carried the host tool declarations — this is the
+	// bug under test: a tool-less request makes the model imitate calls.
+	assertHostToolDeclarations(t, fake)
+
+	// The project-level chat worktree was materialized detached at
+	// projects/<id>/chat/source.
+	abs := storage.Abs(eng.cfg.StorageRoot, storage.ChatSourcePath(project.ID))
+	if _, err := os.Stat(filepath.Join(abs, "hello.go")); err != nil {
+		t.Fatalf("chat worktree missing hello.go: %v", err)
+	}
+	out, err := exec.Command("git", "-C", abs, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "HEAD" {
+		t.Fatalf("chat worktree not detached: %q err=%v", strings.TrimSpace(string(out)), err)
+	}
+}
+
+func TestChat_SnapshotModeUnchanged(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.go"), []byte("package hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, user, project, fake := chatTestEngine(t, func(cfg *config.Config) {
+		pc := cfg.Projects["foo"]
+		pc.SourcePath = src
+		cfg.Projects["foo"] = pc
+	})
+	fake.callTurns = 1
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what files are here"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	assertChatToolTurn(t, msgs)
+	assertHostToolDeclarations(t, fake)
+}
+
+func TestChat_NoSourceFailsLoudly(t *testing.T) {
+	// "acme" is a fixture project with neither source_path nor git.
+	eng, user, project, _ := chatTestEngineFor(t, "acme", func(cfg *config.Config) {
+		pc := cfg.Projects["acme"]
+		pc.SourcePath = ""
+		cfg.Projects["acme"] = pc
+	})
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "hello agent"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	// No silent tool-less turn: the assistant row is a readable error naming
+	// the project and the two ways to give it a source tree.
+	msgs := waitForChatMessages(t, eng, thread.ID, 2)
+	if msgs[1].Role != "assistant" || msgs[1].Status != "error" {
+		t.Fatalf("assistant row = %+v, want error status", msgs[1])
+	}
+	want := fmt.Sprintf("no source tree or tools available for project %q (set projects.%s.source_path or git.repo_url)", "acme", "acme")
+	if !strings.Contains(msgs[1].Content, want) {
+		t.Fatalf("assistant content = %q, want it to contain %q", msgs[1].Content, want)
+	}
+}
+
+func TestChat_GitTwoTurnsReuseWorktree(t *testing.T) {
+	remote := initLocalBareRemote(t)
+	eng, user, project, fake := chatTestEngineFor(t, "gitproj", func(cfg *config.Config) {
+		pc := cfg.Projects["gitproj"]
+		pc.SourcePath = "" // exercise the git-mode path, not the snapshot root
+		pc.Git = &config.ProjectGitConfig{
+			RepoURL:    remote,
+			BaseBranch: "main",
+		}
+		cfg.Projects["gitproj"] = pc
+	})
+	fake.callTurns = 2
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "first question"); err != nil {
+		t.Fatalf("first SendMessage: %v", err)
+	}
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	assertChatToolTurn(t, msgs)
+
+	abs := storage.Abs(eng.cfg.StorageRoot, storage.ChatSourcePath(project.ID))
+	st1, err := os.Stat(abs)
+	if err != nil {
+		t.Fatalf("stat chat worktree: %v", err)
+	}
+
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "second question"); err != nil {
+		t.Fatalf("second SendMessage: %v", err)
+	}
+	msgs = waitForChatMessages(t, eng, thread.ID, 8)
+	assertChatToolTurn(t, msgs[4:])
+
+	// Fresh (within the TTL) worktree is reused, not re-created: the
+	// directory mtime is unchanged and the tree is still intact.
+	st2, err := os.Stat(abs)
+	if err != nil {
+		t.Fatalf("stat chat worktree after second turn: %v", err)
+	}
+	if !st1.ModTime().Equal(st2.ModTime()) {
+		t.Fatalf("worktree recreated on second turn (mtime %s -> %s), want reuse", st1.ModTime(), st2.ModTime())
+	}
+	if _, err := os.Stat(filepath.Join(abs, "hello.go")); err != nil {
+		t.Fatalf("chat worktree missing hello.go after second turn: %v", err)
+	}
+}
+
+func TestChat_GitConcurrentWithPipelineSourcePrep(t *testing.T) {
+	remote := initLocalBareRemote(t)
+	eng, user, project, _ := chatTestEngineFor(t, "gitproj", func(cfg *config.Config) {
+		pc := cfg.Projects["gitproj"]
+		pc.SourcePath = "" // exercise the git-mode path, not the snapshot root
+		pc.Git = &config.ProjectGitConfig{
+			RepoURL:    remote,
+			BaseBranch: "main",
+		}
+		cfg.Projects["gitproj"] = pc
+	})
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// A chat turn and a pipeline source prep race against the same bare
+	// cache; the per-project git workspace lock must keep both worktrees
+	// intact.
+	var wg sync.WaitGroup
+	var prepErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		gitCfg := gorchgit.Config{RepoURL: remote, BaseBranch: "main"}
+		prepErr = eng.prepareGitSource(ctx, project.ID, 1, gitCfg)
+	}()
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "hello agent"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	wg.Wait()
+	if prepErr != nil {
+		t.Fatalf("prepareGitSource raced against chat turn: %v", prepErr)
+	}
+	msgs := waitForChatMessages(t, eng, thread.ID, 2)
+	if msgs[1].Role != "assistant" || msgs[1].Status != "done" {
+		t.Fatalf("assistant row = %+v, want done", msgs[1])
+	}
+
+	// Both worktrees survived the race.
+	srcKey := storage.SourcePath(project.ID, 1)
+	if ok, _ := eng.store.Exists(ctx, srcKey+"/hello.go"); !ok {
+		t.Fatalf("issue source worktree missing hello.go after race")
+	}
+	chatAbs := storage.Abs(eng.cfg.StorageRoot, storage.ChatSourcePath(project.ID))
+	if _, err := os.Stat(filepath.Join(chatAbs, "hello.go")); err != nil {
+		t.Fatalf("chat worktree missing hello.go after race: %v", err)
+	}
+	cache := filepath.Join(eng.cfg.StorageRoot, "repos", fmt.Sprintf("%d.git", project.ID))
+	out, err := exec.Command("git", "-C", cache, "worktree", "list").Output()
+	if err != nil {
+		t.Fatalf("git worktree list: %v", err)
+	}
+	for _, p := range []string{srcKey, storage.ChatSourcePath(project.ID)} {
+		if !strings.Contains(string(out), p) {
+			t.Fatalf("worktree list %q missing %q", string(out), p)
+		}
+	}
+}
+
+func TestStripFabricatedCalls(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"plain answer", "plain answer"},
+		{"The tree has main.go.", "The tree has main.go."},
+		{"Let me look.\n<tool_code>\n#list_directory(path='.')\n</tool_code>\nDone.", "Let me look.\nDone."},
+		{"<tool_code>\n#read_file(path='a.go')\n</tool_code>", ""},
+		{"before\n<parameter>path</parameter>\nafter", "before\nafter"},
+	}
+	for _, tc := range cases {
+		if got := stripFabricatedCalls(tc.in); got != tc.want {
+			t.Errorf("stripFabricatedCalls(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
 }

@@ -110,6 +110,12 @@ func (r *ChatRepo) AddMessage(threadID int64, role, content, toolName, status st
 	return id, nil
 }
 
+// DeleteMessage removes a message by id.
+func (r *ChatRepo) DeleteMessage(id int64) error {
+	_, err := r.db.Exec(`DELETE FROM chat_messages WHERE id = ?`, id)
+	return err
+}
+
 // SetMessageResult updates a message's content and status.
 func (r *ChatRepo) SetMessageResult(id int64, content, status string) error {
 	_, err := r.db.Exec(`

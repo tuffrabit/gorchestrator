@@ -79,6 +79,14 @@ func WorkspacePath(projectID, issueID int64) string {
 	return path.Join(PhaseDir(projectID, issueID, "implementation"), "workspace")
 }
 
+// ChatSourcePath returns the relative path to the project-level read-only
+// source worktree used by dashboard chat turns (git-mode projects). It is
+// deliberately NOT under issues/ so it never collides with per-issue source
+// worktrees.
+func ChatSourcePath(projectID int64) string {
+	return path.Join("projects", fmt.Sprintf("%d", projectID), "chat", "source")
+}
+
 // RepoCachePath returns the relative path to the project's bare git clone cache.
 func RepoCachePath(projectID int64) string {
 	return path.Join("repos", fmt.Sprintf("%d.git", projectID))
