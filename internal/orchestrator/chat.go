@@ -35,6 +35,11 @@ const (
 	chatTurnTimeout = 30 * time.Minute
 )
 
+// ErrChatThreadBusy reports that a turn is currently running for this thread;
+// the caller should surface a retry rather than acting underneath the
+// in-flight turn.
+var ErrChatThreadBusy = fmt.Errorf("chat thread has a turn in progress")
+
 // ChatService runs dashboard chat conversations against agent identities.
 // Each SendMessage persists a user row plus a pending assistant placeholder,
 // then processes the turn asynchronously: the placeholder's content is
@@ -96,6 +101,43 @@ func (s *ChatService) SendMessage(ctx context.Context, threadID int64, text stri
 	// that spawned it.
 	go s.processDetached(threadID)
 	return nil
+}
+
+// ClearThread empties one thread's persisted conversation (and therefore the
+// model context for the next turn) without deleting the thread itself.
+// Retention of other threads is untouched. It is safe against the processing
+// loop for two reasons: TryLock on the per-thread lock means no goroutine for
+// this thread is inside its write phase (finalize/addToolMessage), and the
+// id <= maxID watermark means a message pair a concurrent SendMessage inserts
+// after the snapshot survives and is processed normally (the HTTP handler must
+// not block behind a turn that can hold the lock for up to chatTurnTimeout).
+// It publishes EventChatMessage so other open drawers re-render.
+func (s *ChatService) ClearThread(ctx context.Context, threadID int64) (int, error) {
+	thread, err := s.eng.chatRepo.GetThread(threadID)
+	if err != nil {
+		return 0, fmt.Errorf("get chat thread: %w", err)
+	}
+	if thread == nil {
+		return 0, fmt.Errorf("chat thread %d not found", threadID)
+	}
+
+	lock := s.threadLock(threadID)
+	if !lock.TryLock() {
+		return 0, ErrChatThreadBusy
+	}
+	defer lock.Unlock()
+
+	maxID, err := s.eng.chatRepo.MaxMessageID(threadID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.eng.chatRepo.ClearMessagesUpTo(threadID, maxID)
+	if err != nil {
+		return 0, err
+	}
+	_ = s.eng.chatRepo.TouchThread(threadID)
+	s.publish(threadID, thread.ProjectID)
+	return n, nil
 }
 
 // processDetached runs the per-thread processing loop with its own timeout

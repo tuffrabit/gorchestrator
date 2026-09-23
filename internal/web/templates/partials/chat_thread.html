@@ -4,6 +4,18 @@
   data-chat-agent="{{.Agent}}"
   data-chat-flavor="{{.Flavor}}"
   {{if .ThreadID}}data-chat-thread-id="{{.ThreadID}}"{{end}}>
+  {{if and .CanWrite .ThreadID}}
+  <div class="chat-actions">
+    <form hx-post="/partials/chat/clear" hx-target="#chat-thread" hx-swap="innerHTML"
+          hx-confirm="Clear this conversation with {{.Agent}}{{if .Flavor}}:{{.Flavor}}{{end}} for {{.Project}}? Previous chats with other identities are kept.">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="project" value="{{.Project}}">
+      <input type="hidden" name="agent" value="{{.Agent}}">
+      <input type="hidden" name="flavor" value="{{.Flavor}}">
+      <button class="btn btn-danger" type="submit">Clear chat</button>
+    </form>
+  </div>
+  {{end}}
   <div class="chat-messages">
     {{if .Error}}
     <div class="chat-notice chat-notice-error">{{.Error}}</div>

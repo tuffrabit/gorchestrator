@@ -3,9 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/tuffrabit/gorchestrator/internal/auth"
@@ -213,6 +215,94 @@ func (s *Server) handlePartialChatSend(w http.ResponseWriter, r *http.Request) {
 
 	data := s.chatThreadData(r, rp, agentType, flavor, u)
 	if err := render(w, "partials/chat_thread.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handlePartialChatClear clears ONE chat thread (the one for the currently
+// selected project + identity) so the user can start a fresh line of
+// conversation. Retention is untouched for every other identity/thread. It
+// re-renders the thread partial — the existing empty state — and, like
+// handlePartialChatSend, sets no HX-Trigger so the drawer stays open. The
+// thread id is always derived from the authenticated user's row + the form
+// selection, never from a client-supplied id, so no Viewer can wipe someone
+// else's thread by guessing ids.
+func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) {
+	if err := parseRequestForm(r); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	project := strings.TrimSpace(r.FormValue("project"))
+	agentType, flavor := chatSelectionFromQuery(r.FormValue("agent"), r.FormValue("flavor"), r.FormValue("identity"))
+
+	rp, err := s.chatProject(r.Context(), project)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	if agentType == "" && flavor == "" {
+		// Same default-identity fallback as the send/thread handlers so the
+		// clear targets the thread the drawer is actually showing.
+		agentType, flavor = s.defaultChatIdentity(project)
+	}
+	if !validChatAgentType(agentType) {
+		http.Error(w, fmt.Sprintf("unknown agent type %q", agentType), http.StatusUnprocessableEntity)
+		return
+	}
+	if err := s.validateChatFlavor(project, agentType, flavor); err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	// create=false read path: a user with no row owns no threads → nothing
+	// to clear; render the empty state the drawer would show anyway.
+	uid, err := s.chatUserID(u, false)
+	if err != nil {
+		http.Error(w, "could not resolve user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var thread *sqlite.ChatThread
+	if uid != 0 {
+		thread, err = s.eng.ChatRepo().FindThread(uid, rp.Project.ID, agentType, flavor)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if thread == nil {
+		// Nothing to clear: the empty-state partial is the success shape.
+		if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, agentType, flavor, u)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	n, err := s.eng.ChatService().ClearThread(r.Context(), thread.ID)
+	if err != nil {
+		if errors.Is(err, orchestrator.ErrChatThreadBusy) {
+			// A turn is in flight: re-render the UNCHANGED thread with a notice
+			// (chatThreadData's Error slot renders as a notice banner) so the
+			// composer and drawer survive — a plain http.Error body would be
+			// swapped into #chat-thread and blank the composer.
+			data := s.chatThreadData(r, rp, agentType, flavor, u)
+			data["Error"] = "A reply is still being generated. Try again in a moment."
+			if err := render(w, "partials/chat_thread.html", data); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var auditUID *int64
+	if u != nil {
+		auditUID = &u.ID
+	}
+	_ = s.eng.Audit().Record(auditUID, "clear_chat", "chat_thread", strconv.FormatInt(thread.ID, 10), map[string]any{"messages_removed": n})
+
+	if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, agentType, flavor, u)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

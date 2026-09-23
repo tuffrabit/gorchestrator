@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
@@ -305,6 +307,243 @@ func TestPartialChatSend_WithFlavor(t *testing.T) {
 	}
 	if thread.Flavor != "cheap" {
 		t.Fatalf("thread flavor = %q", thread.Flavor)
+	}
+}
+
+// waitForChatTurnDone polls until the thread has exactly want messages and no
+// assistant row is still pending, so tests can observe a completed turn
+// before exercising the clear.
+func waitForChatTurnDone(t *testing.T, eng *orchestrator.Engine, threadID int64, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		msgs, err := eng.ChatRepo().ListMessages(threadID)
+		if err != nil {
+			t.Fatalf("list messages: %v", err)
+		}
+		if len(msgs) == want {
+			pending := false
+			for _, m := range msgs {
+				if m.Role == "assistant" && m.Status == "pending" {
+					pending = true
+				}
+			}
+			if !pending {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d completed messages; have %v", want, msgs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPartialChatClear_EmptiesThreadAndKeepsDrawer(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	form.Set("message", "hello agent")
+	rec := chatPostForm(t, h, "/partials/chat/send", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	user, err := eng.Users().GetByEmail("disabled@localhost")
+	if err != nil || user == nil {
+		t.Fatalf("expected synthetic user row: user=%v err=%v", user, err)
+	}
+	projectID := chatProjectID(t, eng, "acme")
+	thread, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "")
+	if err != nil || thread == nil {
+		t.Fatalf("expected thread: thread=%v err=%v", thread, err)
+	}
+	waitForChatTurnDone(t, eng, thread.ID, 2)
+
+	clear := url.Values{}
+	clear.Set("project", "acme")
+	clear.Set("agent", "researcher")
+	rec = chatPostForm(t, h, "/partials/chat/clear", clear)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "No messages yet.") {
+		t.Fatalf("cleared thread not empty: %.600s", body)
+	}
+	// The composer must survive the swap: no blanked drawer.
+	if !strings.Contains(body, `name="message"`) {
+		t.Fatalf("composer missing after clear: %.600s", body)
+	}
+	// HX-Trigger must stay empty so the drawer stays open.
+	if got := rec.Header().Get("HX-Trigger"); got != "" {
+		t.Fatalf("HX-Trigger = %q, want empty", got)
+	}
+
+	// The delete is durable: a follow-up read also shows the empty state, and
+	// the thread row itself still exists.
+	req := httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "No messages yet.") {
+		t.Fatalf("thread reread status=%d body=%.600s", rec.Code, rec.Body.String())
+	}
+	if got, err := eng.ChatRepo().GetThread(thread.ID); err != nil || got == nil {
+		t.Fatalf("thread row missing after clear: %+v err=%v", got, err)
+	}
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil || len(msgs) != 0 {
+		t.Fatalf("messages after clear = %v err=%v, want 0", msgs, err)
+	}
+}
+
+func TestPartialChatClear_OnlyClearsSelectedIdentity(t *testing.T) {
+	eng, srv := chatTestServer(t, func(cfg *config.Config) {
+		cfg.Projects["acme"] = config.ProjectConfig{
+			Agents: map[string]config.ProjectAgentConfig{
+				"researcher": {
+					Flavors: map[string]config.AgentConfig{
+						"thorough": {},
+						"cheap":    {},
+					},
+				},
+			},
+		}
+	})
+	h := srv.Handler()
+
+	for _, flavor := range []string{"", "cheap"} {
+		form := url.Values{}
+		form.Set("project", "acme")
+		form.Set("agent", "researcher")
+		form.Set("flavor", flavor)
+		form.Set("message", "question about the "+flavor+" flavor")
+		rec := chatPostForm(t, h, "/partials/chat/send", form)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("send flavor=%q status = %d body=%s", flavor, rec.Code, rec.Body.String())
+		}
+	}
+	user, err := eng.Users().GetByEmail("disabled@localhost")
+	if err != nil || user == nil {
+		t.Fatalf("expected synthetic user row: user=%v err=%v", user, err)
+	}
+	projectID := chatProjectID(t, eng, "acme")
+	base, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "")
+	if err != nil || base == nil {
+		t.Fatalf("expected base thread: %+v err=%v", base, err)
+	}
+	cheap, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "cheap")
+	if err != nil || cheap == nil {
+		t.Fatalf("expected cheap thread: %+v err=%v", cheap, err)
+	}
+	waitForChatTurnDone(t, eng, base.ID, 2)
+	waitForChatTurnDone(t, eng, cheap.ID, 2)
+
+	clear := url.Values{}
+	clear.Set("project", "acme")
+	clear.Set("agent", "researcher")
+	clear.Set("flavor", "cheap")
+	rec := chatPostForm(t, h, "/partials/chat/clear", clear)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "No messages yet.") {
+		t.Fatalf("cheap thread not cleared: %.600s", rec.Body.String())
+	}
+
+	// The other identity's thread is untouched: retention is per identity.
+	req := httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "question about the  flavor") {
+		t.Fatalf("base thread status=%d body=%.600s, want its message retained", rec.Code, rec.Body.String())
+	}
+	msgs, err := eng.ChatRepo().ListMessages(base.ID)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("base thread messages = %v err=%v, want 2", msgs, err)
+	}
+}
+
+func TestPartialChatClear_UnknownProjectOrFlavor(t *testing.T) {
+	_, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	for _, form := range []url.Values{
+		{"project": {"nope"}, "agent": {"researcher"}},
+		{"project": {""}, "agent": {"researcher"}},
+		{"project": {"acme"}, "agent": {"writer"}},
+		{"project": {"acme"}, "agent": {"researcher"}, "flavor": {"nope"}},
+	} {
+		rec := chatPostForm(t, h, "/partials/chat/clear", form)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("form %v status = %d body=%s, want 422", form, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestPartialChatClear_NoThread(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	// No message was ever sent: nothing to clear, and the response is the
+	// empty-state partial (200), not a 404.
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	rec := chatPostForm(t, h, "/partials/chat/clear", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 empty state", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "No messages yet.") {
+		t.Fatalf("missing empty state: %.600s", rec.Body.String())
+	}
+	// The clear must not have created a user row or a thread.
+	if u, err := eng.Users().GetByEmail("disabled@localhost"); err != nil || u != nil {
+		t.Fatalf("clear must not create user row: user=%v err=%v", u, err)
+	}
+}
+
+func TestPartialChatClear_DoesNotAcceptClientThreadID(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	// A second, unrelated user owns a thread with messages.
+	other, err := eng.Users().Create("other@example.com", "Other", sqlite.RoleMember, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID := chatProjectID(t, eng, "acme")
+	otherThread, err := eng.ChatRepo().GetOrCreateThread(other.ID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ChatRepo().AddMessage(otherThread.ID, "user", "sensitive chat", "", "done"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The authenticated (synthetic) user POSTs the other user's thread id:
+	// it must be ignored — ownership comes from the session, not the form.
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	form.Set("thread_id", strconv.FormatInt(otherThread.ID, 10))
+	rec := chatPostForm(t, h, "/partials/chat/clear", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	msgs, err := eng.ChatRepo().ListMessages(otherThread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "sensitive chat" {
+		t.Fatalf("other user's thread was cleared: %v", msgs)
+	}
+	// No user row was created for the synthetic user either.
+	if u, err := eng.Users().GetByEmail("disabled@localhost"); err != nil || u != nil {
+		t.Fatalf("clear must not create user row: user=%v err=%v", u, err)
 	}
 }
 

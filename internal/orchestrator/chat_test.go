@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -711,6 +712,124 @@ func TestChat_GitConcurrentWithPipelineSourcePrep(t *testing.T) {
 		if !strings.Contains(string(out), p) {
 			t.Fatalf("worktree list %q missing %q", string(out), p)
 		}
+	}
+}
+
+func TestChat_ClearThreadResetsHistory(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "first question"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitForChatMessages(t, eng, thread.ID, 2)
+
+	n, err := eng.ChatService().ClearThread(ctx, thread.ID)
+	if err != nil {
+		t.Fatalf("ClearThread: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("rows cleared = %d, want 2", n)
+	}
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages after clear = %d, want 0", len(msgs))
+	}
+	// The thread row itself survives: the same identity still maps to the
+	// same thread id (and ADK session id).
+	got, err := eng.ChatRepo().GetThread(thread.ID)
+	if err != nil || got == nil {
+		t.Fatalf("thread row missing after clear: %+v err=%v", got, err)
+	}
+
+	// The next turn must run with no prior conversation history.
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "second question"); err != nil {
+		t.Fatalf("second SendMessage: %v", err)
+	}
+	waitForChatMessages(t, eng, thread.ID, 2)
+	reqs := fake.capturedRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("model requests = %d, want 2", len(reqs))
+	}
+	last := reqs[1]
+	if len(last) != 1 || last[0].role != "user" || last[0].text != "second question" {
+		t.Fatalf("post-clear turn contents = %+v, want only the new user message (no seeded history)", last)
+	}
+}
+
+func TestChat_ClearThreadBusy(t *testing.T) {
+	eng, user, project, _ := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "hello"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitForChatMessages(t, eng, thread.ID, 2)
+
+	// Holding the per-thread lock stands in for an in-flight turn: the clear
+	// must refuse instead of deleting underneath the write phase.
+	lock := eng.chatSvc.threadLock(thread.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	if _, err := eng.ChatService().ClearThread(ctx, thread.ID); !errors.Is(err, ErrChatThreadBusy) {
+		t.Fatalf("ClearThread = %v, want ErrChatThreadBusy", err)
+	}
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages after refused clear = %d, want 2", len(msgs))
+	}
+}
+
+func TestChat_ClearThreadConcurrentSendSurvives(t *testing.T) {
+	eng, user, project, _ := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+
+	// Simulate a turn in flight: with the per-thread lock held, a
+	// concurrent SendMessage still persists its pair synchronously (its
+	// processing goroutine blocks on the lock) and the clear is refused, so
+	// nothing is silently dropped.
+	lock := eng.chatSvc.threadLock(thread.ID)
+	lock.Lock()
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "queued question"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if _, err := eng.ChatService().ClearThread(ctx, thread.ID); !errors.Is(err, ErrChatThreadBusy) {
+		t.Fatalf("ClearThread = %v, want ErrChatThreadBusy", err)
+	}
+	lock.Unlock()
+
+	// The queued turn completes after the lock is released: no lost message,
+	// and a reply was produced.
+	msgs := waitForChatMessages(t, eng, thread.ID, 2)
+	if msgs[0].Role != "user" || msgs[0].Content != "queued question" {
+		t.Fatalf("user row = %+v, want queued question", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Status != "done" {
+		t.Fatalf("assistant row = %+v, want done reply", msgs[1])
+	}
+}
+
+func TestChat_ClearThreadMissingThread(t *testing.T) {
+	eng, _, _, _ := chatTestEngine(t, nil)
+	if _, err := eng.ChatService().ClearThread(context.Background(), 999999); err == nil {
+		t.Fatal("ClearThread to missing thread = nil, want error")
 	}
 }
 

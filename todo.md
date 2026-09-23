@@ -6,6 +6,7 @@
 - ~~download implementer output~~ (workspace.zip when implementation done)
 - ~~project should be configurable not as issue input — planned: `phase_4_project_refactor.md` / spec §6.0~~
 - ~~agents should be configurable per project — planned: flavors in `phase_4_project_refactor.md` / spec §8.2~~
+- ~~chat drawer has no way to clear a conversation~~ (fixed: per-thread "Clear chat" action — `ChatRepo.ClearMessagesUpTo` watermark delete + `ChatService.ClearThread` guarded by the per-thread lock (`ErrChatThreadBusy`) + `POST /partials/chat/clear` with ownership derived from the session user, confirm dialog, SSE re-render of other drawers; retention of other identities untouched — see `issue-chat-drawer-no-clear.md`)
 - ~~chat drawer bug: chat turns get NO tools for git-mode projects (tools are gated on `source_path`), so the model prints fake tool calls as chat text — see `issue-chat-drawer-missing-tools.md`~~ (fixed: `chatSourceRoot` + per-project read-only worktree at `projects/<id>/chat/source` with 15m TTL, per-project git workspace lock, loud fail on zero tools, honest no-tools instruction, fabricated-call strip on history reseed; follow-ups — chat model flavor, SingleShot, MCP visibility, worktree cleanup on project removal — are in the issue doc §7)
 - users should be scoped to project — deferred (spec §17 Q17)
 - users should be included via email invite — deferred (spec §17 Q17)

@@ -572,6 +572,13 @@ button, input, select, textarea {
   min-width: 0;
   margin-bottom: 0;
 }
+.chat-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+}
+.chat-actions form { display: flex; align-items: center; gap: 0.5rem; margin: 0; }
 .chat-thread {
   flex: 1;
   min-height: 12rem;

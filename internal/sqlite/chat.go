@@ -116,6 +116,35 @@ func (r *ChatRepo) DeleteMessage(id int64) error {
 	return err
 }
 
+// ClearMessagesUpTo removes the thread's messages with id <= upToID and
+// returns the number of rows deleted. upToID is a snapshot watermark taken
+// by the caller so a message pair inserted concurrently with the clear
+// (SendMessage persists synchronously) is preserved instead of being
+// silently swallowed: the queued turn still finds its pending placeholder.
+func (r *ChatRepo) ClearMessagesUpTo(threadID, upToID int64) (int, error) {
+	res, err := r.db.Exec(`DELETE FROM chat_messages WHERE thread_id = ? AND id <= ?`, threadID, upToID)
+	if err != nil {
+		return 0, fmt.Errorf("clear chat messages: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("clear chat messages rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
+// MaxMessageID returns the highest message id in the thread (0 when empty).
+func (r *ChatRepo) MaxMessageID(threadID int64) (int64, error) {
+	var id sql.NullInt64
+	if err := r.db.QueryRow(`SELECT MAX(id) FROM chat_messages WHERE thread_id = ?`, threadID).Scan(&id); err != nil {
+		return 0, fmt.Errorf("max chat message id: %w", err)
+	}
+	if !id.Valid {
+		return 0, nil
+	}
+	return id.Int64, nil
+}
+
 // SetMessageResult updates a message's content and status.
 func (r *ChatRepo) SetMessageResult(id int64, content, status string) error {
 	_, err := r.db.Exec(`

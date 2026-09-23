@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -111,6 +112,135 @@ func TestChatRepo_AddMessageListMessagesOrdering(t *testing.T) {
 		if m.Content != want[i] {
 			t.Fatalf("message %d content = %q, want %q", i, m.Content, want[i])
 		}
+	}
+}
+
+func TestChatRepo_ClearMessagesUpTo(t *testing.T) {
+	chat, userID, projectID := chatTestRepo(t)
+	thread, err := chat.GetOrCreateThread(userID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		id, err := chat.AddMessage(thread.ID, "user", fmt.Sprintf("m%d", i), "", "done")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+
+	n, err := chat.ClearMessagesUpTo(thread.ID, ids[4])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Fatalf("rows deleted = %d, want 5", n)
+	}
+	msgs, err := chat.ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages after clear = %d, want 0", len(msgs))
+	}
+	// The thread row itself must survive: only its messages are removed.
+	got, err := chat.GetThread(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.ID != thread.ID {
+		t.Fatalf("thread row = %+v, want it still present", got)
+	}
+}
+
+func TestChatRepo_ClearMessagesWatermarkPreservesNewer(t *testing.T) {
+	chat, userID, projectID := chatTestRepo(t)
+	thread, err := chat.GetOrCreateThread(userID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		id, err := chat.AddMessage(thread.ID, "user", fmt.Sprintf("m%d", i), "", "done")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+
+	n, err := chat.ClearMessagesUpTo(thread.ID, ids[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("rows deleted = %d, want 3", n)
+	}
+	msgs, err := chat.ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("messages after watermark clear = %d, want 2", len(msgs))
+	}
+	if msgs[0].ID != ids[3] || msgs[1].ID != ids[4] {
+		t.Fatalf("survivors = [%d %d], want [%d %d]", msgs[0].ID, msgs[1].ID, ids[3], ids[4])
+	}
+}
+
+func TestChatRepo_ClearMessagesScopedToThread(t *testing.T) {
+	chat, userID, projectID := chatTestRepo(t)
+	a, err := chat.GetOrCreateThread(userID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := chat.GetOrCreateThread(userID, projectID, "researcher", "cheap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := chat.AddMessage(a.ID, "user", "a", "", "done"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := chat.AddMessage(b.ID, "user", "b", "", "done"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	maxA, err := chat.MaxMessageID(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := chat.ClearMessagesUpTo(a.ID, maxA); err != nil {
+		t.Fatal(err)
+	}
+	if msgs, err := chat.ListMessages(a.ID); err != nil || len(msgs) != 0 {
+		t.Fatalf("thread A messages after clear = %v err=%v, want 0", msgs, err)
+	}
+	msgs, err := chat.ListMessages(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("thread B messages = %d, want 3 (untouched)", len(msgs))
+	}
+
+	if maxB, err := chat.MaxMessageID(b.ID); err != nil || maxB == 0 {
+		t.Fatalf("MaxMessageID(B) = %d err=%v, want > 0", maxB, err)
+	}
+}
+
+func TestChatRepo_MaxMessageIDEmpty(t *testing.T) {
+	chat, userID, projectID := chatTestRepo(t)
+	thread, err := chat.GetOrCreateThread(userID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := chat.MaxMessageID(thread.ID)
+	if err != nil || id != 0 {
+		t.Fatalf("MaxMessageID(empty) = %d err=%v, want 0 nil", id, err)
 	}
 }
 
