@@ -6,7 +6,7 @@ docker run --rm -it \
   -v pi-agent-home:/root/.pi/agent \
   pi-sandbox
 
-docker run --rm -it -v "$PWD:/workspace" -v ~/.pi/agent:/root/.pi/agent pi-sandbox
+docker run --user 1000 --rm -it -v "$PWD:/workspace" -v ~/.pi/agent:/root/.pi/agent pi-sandbox
 
 The -v "$PWD:/workspace" mounts your current directory into the container at /workspace such that reads and writes in /workspace inside Docker directly affect your host files, like in the Gondolin example.
 
