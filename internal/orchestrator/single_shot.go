@@ -13,18 +13,16 @@ import (
 	"github.com/tuffrabit/gorchestrator/internal/llm"
 )
 
-// runSingleShot executes a phase as a single no-tools GenerateContent call and
-// treats the reply text as the phase output. It mirrors runAgentLoop's return
-// contract (output, done, rationale, effort, tokens, err) so runPhase's
+// runSingleShot executes a single-shot step as one no-tools GenerateContent
+// call and treats the reply text as the step output. It mirrors runAgentLoop's
+// return contract (output, done, rationale, tokens, err) so runPhase's
 // attempt/adjudication machinery applies unchanged. done is always true: there
-// is no finish_task, and with the human-gate default the boundary pauses for a
-// human decision regardless (under an explicit `self` opt-in it passes; for
-// the planner the missing effort tag defaults to high, forcing the human gate
-// before implementation).
-func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, attempt, loop int) ([]byte, bool, string, string, int, error) {
-	instruction := resolveSingleShotPrompt(phase, cfg)
+// is no finish_task, and under the human-gate default the boundary pauses for
+// a human decision regardless.
+func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, attempt, loop int) ([]byte, bool, string, int, error) {
+	instruction := cfg.SystemPrompt
 	if instruction == "" {
-		return nil, false, "", "", 0, fmt.Errorf("single-shot is not supported for phase %q", phase)
+		return nil, false, "", 0, fmt.Errorf("agent %q has no system_prompt (required)", cfg.ID)
 	}
 	req := &adkmodel.LLMRequest{
 		Contents: []*genai.Content{userContent},
@@ -45,9 +43,9 @@ func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, phase
 				Error:     err.Error(),
 			})
 			if llm.IsBudgetExceeded(err) {
-				return nil, false, "", "", tokens, err
+				return nil, false, "", tokens, err
 			}
-			return nil, false, "", "", 0, fmt.Errorf("loop %d: %w", loop, err)
+			return nil, false, "", 0, fmt.Errorf("loop %d: %w", loop, err)
 		}
 		if resp == nil {
 			continue
@@ -69,10 +67,10 @@ func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, phase
 
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, false, "", "", tokens, fmt.Errorf("loop %d produced empty output", loop)
+		return nil, false, "", tokens, fmt.Errorf("loop %d produced empty output", loop)
 	}
 	if err := e.store.Write(ctx, outputPath, []byte(text)); err != nil {
-		return nil, false, "", "", tokens, fmt.Errorf("write single-shot output: %w", err)
+		return nil, false, "", tokens, fmt.Errorf("write single-shot output: %w", err)
 	}
 
 	// Same event shapes as runAgentLoop so budget rehydration
@@ -95,29 +93,5 @@ func (e *Engine) runSingleShot(ctx context.Context, llmModel adkmodel.LLM, phase
 		Content:   cappedText(text),
 	})
 
-	return []byte(text), true, "", "", tokens, nil
-}
-
-// resolveSingleShotPrompt picks the system instruction for a single-shot phase.
-// The merged cfg.SystemPrompt always contains the built-in tool-loop default
-// (defaultAgentConfig), so compare against it: an exact match means "no user
-// override"; a default+"\n\n"+suffix prefix means only system_prompt_append was
-// set (MergeAgent bakes appends with exactly "\n\n"); anything else is a full
-// user override honored as-is. Returns "" for phases without a single-shot
-// default (implementation).
-func resolveSingleShotPrompt(phase string, cfg config.AgentConfig) string {
-	agentType := phaseAgentType(phase)
-	base := config.DefaultSingleShotPrompt(agentType)
-	if base == "" {
-		return ""
-	}
-	def := config.DefaultSystemPrompt(agentType)
-	switch {
-	case cfg.SystemPrompt == "" || cfg.SystemPrompt == def:
-		return base
-	case def != "" && strings.HasPrefix(cfg.SystemPrompt, def+"\n\n"):
-		return base + strings.TrimPrefix(cfg.SystemPrompt, def)
-	default:
-		return cfg.SystemPrompt
-	}
+	return []byte(text), true, "", tokens, nil
 }

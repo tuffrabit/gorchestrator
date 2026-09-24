@@ -72,13 +72,23 @@ func (c *Config) Validate() error {
 }
 
 // BranchName returns the standard implementer branch for a run.
+// Kept for reading legacy per-run worktree rows; new issues use
+// IssueBranchName (one branch per issue, the workspace is issue-level).
 func BranchName(issueID, runID int64) string {
 	return fmt.Sprintf("ai-implementer/%d-%d", issueID, runID)
 }
 
-// CommitMessage builds the structured single-commit message for a run.
-func CommitMessage(title string, issueID, runID int64) string {
-	return fmt.Sprintf("ai-implementer: %s\n\nIssue: #%d\nRun: %d\nAgent: implementer\n", title, issueID, runID)
+// IssueBranchName returns the single per-issue branch for the issue-level
+// mutable workspace.
+func IssueBranchName(issueID int64) string {
+	return fmt.Sprintf("ai-implementer/%d", issueID)
+}
+
+// CommitMessage builds the structured commit message for an accepted step of
+// an issue. ref is the step key (e.g. "step-2") or a run id rendered as a
+// string for legacy issues.
+func CommitMessage(title string, issueID int64, ref string) string {
+	return fmt.Sprintf("ai-implementer: %s\n\nIssue: #%d\nStep: %s\n", title, issueID, ref)
 }
 
 // Manager runs git operations against a storage root (host filesystem).

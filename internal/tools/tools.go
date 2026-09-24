@@ -7,6 +7,7 @@ package tools
 
 import (
 	"fmt"
+	"strings"
 
 	"google.golang.org/adk/v2/tool"
 
@@ -19,16 +20,17 @@ type BoundTools struct {
 	RootPath  string
 	Allowlist []string
 	// BasePath is the default directory for short relative tool paths (empty,
-	// ".", "source", …). Typically the issue directory for research/plan, or
-	// the implementer workspace for implementation. Full storage keys under
+	// ".", "source", …). Typically the issue directory for read-only steps, or
+	// the issue workspace for steps that edit files. Full storage keys under
 	// Allowlist still work.
-	BasePath      string
-	OutputPath    string
+	BasePath   string
+	OutputPath string
+	// WorkspacePath is the issue workspace (any editing agent).
 	WorkspacePath string
-	// WorkspaceHostPath is the absolute host path of the implementer workspace
-	// (for container bind-mounts). Empty when not an implementer run.
+	// WorkspaceHostPath is the absolute host path of the issue workspace
+	// (for container bind-mounts). Empty when not set.
 	WorkspaceHostPath string
-	// Test holds project test config for run_test (implementer only).
+	// Test holds project test config for run_test.
 	Test             *TestConfig
 	ReadFileMaxBytes int
 	ReadFileMaxLines int
@@ -38,8 +40,10 @@ type BoundTools struct {
 	OutputWritten *bool
 }
 
-// NewResearcherRegistry creates the core toolset for the Researcher agent.
-func NewResearcherRegistry(bt *BoundTools) ([]tool.Tool, error) {
+// NewCoreRegistry returns every core tool: read_file, list_directory,
+// grep_search, write_output, write_file, update_file, and run_test when
+// bt.Test is set with a non-empty Command. Callers narrow with FilterByNames.
+func NewCoreRegistry(bt *BoundTools) ([]tool.Tool, error) {
 	readFile, err := newReadFileTool(bt)
 	if err != nil {
 		return nil, fmt.Errorf("read_file tool: %w", err)
@@ -55,44 +59,6 @@ func NewResearcherRegistry(bt *BoundTools) ([]tool.Tool, error) {
 	writeOutput, err := newWriteOutputTool(bt)
 	if err != nil {
 		return nil, fmt.Errorf("write_output tool: %w", err)
-	}
-	return []tool.Tool{readFile, listDir, grep, writeOutput}, nil
-}
-
-// NewPlannerRegistry creates the core toolset for the Planner agent.
-func NewPlannerRegistry(bt *BoundTools) ([]tool.Tool, error) {
-	readFile, err := newReadFileTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("read_file tool: %w", err)
-	}
-	listDir, err := newListDirectoryTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("list_directory tool: %w", err)
-	}
-	grep, err := newGrepTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("grep_search tool: %w", err)
-	}
-	writeOutput, err := newWriteOutputTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("write_output tool: %w", err)
-	}
-	return []tool.Tool{readFile, listDir, grep, writeOutput}, nil
-}
-
-// NewImplementerRegistry creates the core toolset for the Implementer agent.
-func NewImplementerRegistry(bt *BoundTools) ([]tool.Tool, error) {
-	readFile, err := newReadFileTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("read_file tool: %w", err)
-	}
-	listDir, err := newListDirectoryTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("list_directory tool: %w", err)
-	}
-	grep, err := newGrepTool(bt)
-	if err != nil {
-		return nil, fmt.Errorf("grep_search tool: %w", err)
 	}
 	writeFile, err := newWriteFileTool(bt)
 	if err != nil {
@@ -102,11 +68,15 @@ func NewImplementerRegistry(bt *BoundTools) ([]tool.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("update_file tool: %w", err)
 	}
-	//runTest, err := newRunTestTool(bt)
-	//if err != nil {
-	//	return nil, fmt.Errorf("run_test tool: %w", err)
-	//}
-	return []tool.Tool{readFile, listDir, grep, writeFile, updateFile}, nil
+	out := []tool.Tool{readFile, listDir, grep, writeOutput, writeFile, updateFile}
+	if bt.Test != nil && strings.TrimSpace(bt.Test.Command) != "" {
+		runTest, err := newRunTestTool(bt)
+		if err != nil {
+			return nil, fmt.Errorf("run_test tool: %w", err)
+		}
+		out = append(out, runTest)
+	}
+	return out, nil
 }
 
 // FilterByNames keeps only tools whose Name() is in allow. Empty allow returns all.

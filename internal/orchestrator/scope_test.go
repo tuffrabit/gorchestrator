@@ -81,11 +81,11 @@ func TestSubmitIssue_ScopeHold_Description(t *testing.T) {
 	if issue.Status != sqlite.StatusWaitingHuman {
 		t.Fatalf("status = %q, want waiting_human", issue.Status)
 	}
-	if issue.CurrentPhase != "research" {
-		t.Fatalf("phase = %q, want research", issue.CurrentPhase)
+	if issue.CurrentPhase != "step-1" {
+		t.Fatalf("phase = %q, want step-1", issue.CurrentPhase)
 	}
 
-	res, err := readResult(ctx, eng.store, storage.ResultPath(issue.ProjectID, issue.ID, "research"))
+	res, err := readResult(ctx, eng.store, storage.ResultPath(issue.ProjectID, issue.ID, "step-1"))
 	if err != nil {
 		t.Fatalf("read result: %v", err)
 	}
@@ -97,9 +97,9 @@ func TestSubmitIssue_ScopeHold_Description(t *testing.T) {
 	}
 
 	// No agent run yet: no events.jsonl / attempts.
-	eventsPath := storage.EventsPath(issue.ProjectID, issue.ID, "research")
+	eventsPath := storage.EventsPath(issue.ProjectID, issue.ID, "step-1")
 	if exists, _ := eng.store.Exists(ctx, eventsPath); exists {
-		t.Fatal("events.jsonl must not exist before research runs")
+		t.Fatal("events.jsonl must not exist before step-1 runs")
 	}
 
 	view, err := eng.GetIssue(ctx, issue.ID)
@@ -167,7 +167,7 @@ func TestSubmitIssue_CleanStillQueued(t *testing.T) {
 	}
 }
 
-func TestDecide_ScopeHoldPass_StartsResearch(t *testing.T) {
+func TestDecide_ScopeHoldPass_StartsStep1(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	eng, err := NewEngine(testConfig(tmp))
@@ -205,16 +205,16 @@ func TestDecide_ScopeHoldPass_StartsResearch(t *testing.T) {
 		t.Fatalf("status after pass = %q, want queued", issue.Status)
 	}
 
-	// result.json for research must be gone so pipeline does not skip research.
-	exists, err := eng.store.Exists(ctx, storage.ResultPath(issue.ProjectID, issue.ID, "research"))
+	// result.json for step-1 must be gone so pipeline does not skip step-1.
+	exists, err := eng.store.Exists(ctx, storage.ResultPath(issue.ProjectID, issue.ID, "step-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if exists {
-		t.Fatal("research result.json should be removed after scope pass")
+		t.Fatal("step-1 result.json should be removed after scope pass")
 	}
 
-	// Process should run research (dry-run) and advance.
+	// Process should run step-1 (dry-run) and advance.
 	if err := eng.ProcessIssue(ctx, issue.ID); err != nil {
 		t.Fatalf("ProcessIssue: %v", err)
 	}
@@ -223,12 +223,16 @@ func TestDecide_ScopeHoldPass_StartsResearch(t *testing.T) {
 		// Full dry-run pipeline usually completes to done.
 		t.Logf("status after process = %s (acceptable if mid-pipeline)", issue.Status)
 	}
-	// Research must have a terminal or in-progress result now.
-	phase, status, err := eng.CurrentPhaseState(issue.ProjectID, issue.ID)
+	// Step-1 must have a terminal or in-progress result now.
+	steps, err := eng.StepsForIssue(issue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if phase == "research" && status == "waiting_human" {
+	phase, status, err := eng.CurrentStepState(issue.ProjectID, issue.ID, steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase == "step-1" && status == "waiting_human" {
 		t.Fatal("still held after pass+process")
 	}
 }

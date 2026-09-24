@@ -62,11 +62,12 @@ func TestRunSingleShot(t *testing.T) {
 	ctx := context.Background()
 	e, store := newDigestEngine(t)
 
-	outputPath := storage.AttemptOutputPath(1, 2, "plan", 1)
-	eventsPath := storage.EventsPath(1, 2, "plan")
+	outputPath := storage.AttemptOutputPath(1, 2, "step-2", 1)
+	eventsPath := storage.EventsPath(1, 2, "step-2")
 	stub := &stubLLM{text: "  THE PLAN  ", total: 42}
+	cfg := config.AgentConfig{ID: "planner", SystemPrompt: "You are a planner."}
 
-	out, done, rationale, effort, tokens, err := e.runSingleShot(ctx, stub, "plan", config.AgentConfig{},
+	out, done, rationale, tokens, err := e.runSingleShot(ctx, stub, cfg,
 		genai.NewContentFromText("issue input", genai.RoleUser), outputPath, eventsPath, 1, 1)
 	if err != nil {
 		t.Fatalf("runSingleShot: %v", err)
@@ -77,16 +78,16 @@ func TestRunSingleShot(t *testing.T) {
 	if string(out) != "THE PLAN" {
 		t.Fatalf("output = %q, want trimmed %q", out, "THE PLAN")
 	}
-	if rationale != "" || effort != "" {
-		t.Fatalf("rationale/effort should be empty, got %q/%q", rationale, effort)
+	if rationale != "" {
+		t.Fatalf("rationale should be empty, got %q", rationale)
 	}
 	if tokens != 42 {
 		t.Fatalf("tokens = %d, want 42", tokens)
 	}
 
-	// The request carries no tools and the single-shot default instruction.
-	if got := systemInstructionText(stub.gotReq); got != config.DefaultSingleShotPrompt("planner") {
-		t.Fatalf("system instruction = %q", got)
+	// The request carries no tools and the agent's configured system prompt.
+	if got := systemInstructionText(stub.gotReq); got != cfg.SystemPrompt {
+		t.Fatalf("system instruction = %q, want %q", got, cfg.SystemPrompt)
 	}
 
 	// Output lands at the same path the tool-loop path uses.
@@ -109,9 +110,10 @@ func TestRunSingleShotEmptyOutput(t *testing.T) {
 	ctx := context.Background()
 	e, store := newDigestEngine(t)
 
-	outputPath := storage.AttemptOutputPath(1, 2, "research", 1)
-	_, _, _, _, _, err := e.runSingleShot(ctx, &stubLLM{text: "  "}, "research", config.AgentConfig{},
-		genai.NewContentFromText("input", genai.RoleUser), outputPath, storage.EventsPath(1, 2, "research"), 1, 1)
+	outputPath := storage.AttemptOutputPath(1, 2, "step-1", 1)
+	cfg := config.AgentConfig{ID: "researcher", SystemPrompt: "You are a researcher."}
+	_, _, _, _, err := e.runSingleShot(ctx, &stubLLM{text: "  "}, cfg,
+		genai.NewContentFromText("input", genai.RoleUser), outputPath, storage.EventsPath(1, 2, "step-1"), 1, 1)
 	if err == nil || !strings.Contains(err.Error(), "empty output") {
 		t.Fatalf("want empty-output error, got %v", err)
 	}
@@ -124,55 +126,17 @@ func TestRunSingleShotBudgetExceeded(t *testing.T) {
 	ctx := context.Background()
 	e, _ := newDigestEngine(t)
 
-	_, _, _, _, _, err := e.runSingleShot(ctx, &stubLLM{err: llm.ErrBudgetExceeded}, "research", config.AgentConfig{},
-		genai.NewContentFromText("input", genai.RoleUser), storage.AttemptOutputPath(1, 2, "research", 1), storage.EventsPath(1, 2, "research"), 1, 1)
+	cfg := config.AgentConfig{ID: "researcher", SystemPrompt: "You are a researcher."}
+	_, _, _, _, err := e.runSingleShot(ctx, &stubLLM{err: llm.ErrBudgetExceeded}, cfg,
+		genai.NewContentFromText("input", genai.RoleUser), storage.AttemptOutputPath(1, 2, "step-1", 1), storage.EventsPath(1, 2, "step-1"), 1, 1)
 	if !llm.IsBudgetExceeded(err) {
 		t.Fatalf("budget error must pass through unwrapped, got %v", err)
 	}
 }
 
-func TestRunSingleShotUnsupportedPhase(t *testing.T) {
-	ctx := context.Background()
-	e, _ := newDigestEngine(t)
-
-	_, _, _, _, _, err := e.runSingleShot(ctx, &stubLLM{text: "x"}, "implementation", config.AgentConfig{},
-		genai.NewContentFromText("input", genai.RoleUser), storage.AttemptOutputPath(1, 2, "implementation", 1), storage.EventsPath(1, 2, "implementation"), 1, 1)
-	if err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("want unsupported-phase error, got %v", err)
-	}
-}
-
-func TestResolveSingleShotPrompt(t *testing.T) {
-	def := config.DefaultSystemPrompt("planner")
-	base := config.DefaultSingleShotPrompt("planner")
-
-	// No user override (merged config still holds the built-in default).
-	if got := resolveSingleShotPrompt("plan", config.AgentConfig{SystemPrompt: def}); got != base {
-		t.Fatal("default prompt should resolve to the single-shot default")
-	}
-	// Only system_prompt_append was set (MergeAgent bakes it with "\n\n").
-	got := resolveSingleShotPrompt("plan", config.AgentConfig{SystemPrompt: def + "\n\nEXTRA"})
-	if got != base+"\n\nEXTRA" {
-		t.Fatalf("append-only override = %q", got)
-	}
-	// Full user override honored as-is.
-	if got := resolveSingleShotPrompt("plan", config.AgentConfig{SystemPrompt: "custom"}); got != "custom" {
-		t.Fatalf("full override = %q", got)
-	}
-	// Empty (unmerged config, e.g. direct unit calls) also gets the default.
-	if got := resolveSingleShotPrompt("research", config.AgentConfig{}); got != config.DefaultSingleShotPrompt("researcher") {
-		t.Fatal("empty prompt should resolve to the single-shot default")
-	}
-	// No single-shot default for implementation.
-	if got := resolveSingleShotPrompt("implementation", config.AgentConfig{}); got != "" {
-		t.Fatalf("implementation should have no single-shot prompt, got %q", got)
-	}
-}
-
 // TestRunSingleShotDryRun exercises the full pipeline with single-shot
-// research+plan against the dryrun provider: both phases complete in one
-// no-tools call, and the planner's missing effort tag defaults to high, holding
-// the pipeline at the human gate before implementation.
+// researcher+planner against the dryrun provider: both steps complete in one
+// no-tools call and the implementer step runs normally to completion.
 func TestRunSingleShotDryRun(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
@@ -214,31 +178,31 @@ func TestRunSingleShotDryRun(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	// Research and plan outputs come from the dryrun single-shot text path.
-	for _, phase := range []string{"research", "plan"} {
-		data, err := store.Read(ctx, storage.AttemptOutputPath(projectID, issueID, phase, 1))
+	// Step-1 and step-2 outputs come from the dryrun single-shot text path.
+	for _, key := range []string{"step-1", "step-2"} {
+		data, err := store.Read(ctx, storage.AttemptOutputPath(projectID, issueID, key, 1))
 		if err != nil {
-			t.Fatalf("read %s output: %v", phase, err)
+			t.Fatalf("read %s output: %v", key, err)
 		}
 		if !strings.Contains(string(data), "Dry-run single-shot output") {
-			t.Fatalf("%s output not from single-shot path: %q", phase, data)
+			t.Fatalf("%s output not from single-shot path: %q", key, data)
 		}
 	}
 
-	// Plan effort defaults to high → human gate before implementation.
-	res, err := readResult(ctx, store, storage.ResultPath(projectID, issueID, "implementation"))
+	// The implementer step ran normally and the whole flow completed.
+	res, err := readResult(ctx, store, storage.ResultPath(projectID, issueID, "step-3"))
 	if err != nil {
-		t.Fatalf("read implementation result: %v", err)
+		t.Fatalf("read step-3 result: %v", err)
 	}
-	if res.Status != "waiting_human" {
-		t.Fatalf("implementation status = %q, want waiting_human (effort gate)", res.Status)
+	if res.Status != "done" {
+		t.Fatalf("step-3 status = %q, want done", res.Status)
 	}
 
 	issue, err := sqlite.NewIssueRepo(db).Get(issueID)
 	if err != nil || issue == nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if issue.Status != "waiting_human" {
-		t.Fatalf("issue status = %q, want waiting_human", issue.Status)
+	if issue.Status != "done" {
+		t.Fatalf("issue status = %q, want done", issue.Status)
 	}
 }

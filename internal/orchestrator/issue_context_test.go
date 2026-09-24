@@ -62,7 +62,7 @@ func TestPersistIssueContext_DescriptionAndAttachments(t *testing.T) {
 	}
 
 	// Agent input includes description + paths
-	input, err := eng.buildBaseInput(ctx, issue.ProjectID, issue.ID, "research", issue.Title, got.Description)
+	input, err := eng.buildBaseInput(ctx, issue.ProjectID, issue.ID, "step-1", "", issue.Title, got.Description)
 	if err != nil {
 		t.Fatalf("buildBaseInput: %v", err)
 	}

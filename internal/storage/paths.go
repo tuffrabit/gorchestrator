@@ -74,8 +74,17 @@ func SourcePath(projectID, issueID int64) string {
 	return path.Join(IssueDir(projectID, issueID), "source")
 }
 
-// WorkspacePath returns the relative path to the implementer's workspace for an issue.
+// WorkspacePath returns the relative path to the issue-level mutable
+// workspace, shared by every step whose agent has editing tools.
 func WorkspacePath(projectID, issueID int64) string {
+	return path.Join(IssueDir(projectID, issueID), "workspace")
+}
+
+// LegacyWorkspacePath returns the relative path to the workspace of issues
+// created before the flow change, which kept it under the implementation
+// phase dir. Legacy issues are never rewritten on disk; readers fall back
+// here when WorkspacePath does not exist.
+func LegacyWorkspacePath(projectID, issueID int64) string {
 	return path.Join(PhaseDir(projectID, issueID, "implementation"), "workspace")
 }
 

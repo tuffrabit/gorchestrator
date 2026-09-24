@@ -29,15 +29,16 @@ func TestMapPhaseResultToIssueStatus(t *testing.T) {
 	}
 }
 
-func TestNextPhaseName(t *testing.T) {
-	if nextPhaseName("research") != "plan" {
-		t.Fatal("research → plan")
+func TestNextStepKey(t *testing.T) {
+	steps := sqlite.LegacyPipeline()
+	if got := nextStepKey(steps, "research"); got != "plan" {
+		t.Fatalf("research → %q, want plan", got)
 	}
-	if nextPhaseName("plan") != "implementation" {
-		t.Fatal("plan → implementation")
+	if got := nextStepKey(steps, "plan"); got != "implementation" {
+		t.Fatalf("plan → %q, want implementation", got)
 	}
-	if nextPhaseName("implementation") != "" {
-		t.Fatal("implementation has no next")
+	if got := nextStepKey(steps, "implementation"); got != "" {
+		t.Fatalf("implementation has no next, got %q", got)
 	}
 }
 
@@ -55,21 +56,21 @@ func TestBuildPhaseSteps_TransitionResearchToPlan(t *testing.T) {
 	if err != nil || project == nil {
 		t.Fatalf("get project: %v", err)
 	}
-	issue, err := eng.issues.CreateQueued(project.ID, "phase strip", false)
+	issue, err := eng.issues.CreateQueued(project.ID, "phase strip", "step-1", defaultTestFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Research completed; issue advanced to plan (as runPipeline does on phase start).
-	researchResult := PhaseResult{Status: "done", Attempt: 1}
-	if err := writeResult(ctx, eng.store, storage.ResultPath(project.ID, issue.ID, "research"), researchResult); err != nil {
+	// Step-1 completed; issue advanced to step-2 (as runPipeline does on step start).
+	step1Result := PhaseResult{Status: "done", Attempt: 1}
+	if err := writeResult(ctx, eng.store, storage.ResultPath(project.ID, issue.ID, "step-1"), step1Result); err != nil {
 		t.Fatal(err)
 	}
-	planResult := PhaseResult{Status: "in_progress", Attempt: 1}
-	if err := writeResult(ctx, eng.store, storage.ResultPath(project.ID, issue.ID, "plan"), planResult); err != nil {
+	step2Result := PhaseResult{Status: "in_progress", Attempt: 1}
+	if err := writeResult(ctx, eng.store, storage.ResultPath(project.ID, issue.ID, "step-2"), step2Result); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.issues.UpdateStatus(issue.ID, sqlite.StatusInProgress, "plan"); err != nil {
+	if err := eng.issues.UpdateStatus(issue.ID, sqlite.StatusInProgress, "step-2"); err != nil {
 		t.Fatal(err)
 	}
 	issue, _ = eng.issues.Get(issue.ID)
@@ -78,14 +79,14 @@ func TestBuildPhaseSteps_TransitionResearchToPlan(t *testing.T) {
 	if len(steps) != 3 {
 		t.Fatalf("steps = %d", len(steps))
 	}
-	if steps[0].State != "done" || steps[0].Name != "research" {
-		t.Fatalf("research step = %+v, want done", steps[0])
+	if steps[0].State != "done" || steps[0].Name != "step-1" {
+		t.Fatalf("step-1 = %+v, want done", steps[0])
 	}
-	if steps[1].State != "current" || steps[1].Name != "plan" || steps[1].Agent != "planner" {
-		t.Fatalf("plan step = %+v, want current planner", steps[1])
+	if steps[1].State != "current" || steps[1].Name != "step-2" || steps[1].Agent != "planner" {
+		t.Fatalf("step-2 = %+v, want current planner", steps[1])
 	}
 	if steps[2].State != "pending" {
-		t.Fatalf("implementation step = %+v, want pending", steps[2])
+		t.Fatalf("step-3 = %+v, want pending", steps[2])
 	}
 
 	view, err := eng.issueView(ctx, issue)
@@ -95,11 +96,11 @@ func TestBuildPhaseSteps_TransitionResearchToPlan(t *testing.T) {
 	if view.Issue.Status != sqlite.StatusInProgress {
 		t.Fatalf("issue status = %q, want in_progress (not done)", view.Issue.Status)
 	}
-	if view.Issue.CurrentPhase != "plan" {
-		t.Fatalf("current phase = %q, want plan", view.Issue.CurrentPhase)
+	if view.Issue.CurrentPhase != "step-2" {
+		t.Fatalf("current phase = %q, want step-2", view.Issue.CurrentPhase)
 	}
 	if view.Phases[1].State != "current" {
-		t.Fatalf("view plan state = %q", view.Phases[1].State)
+		t.Fatalf("view step-2 state = %q", view.Phases[1].State)
 	}
 
 	// Ensure we didn't write junk next to the test DB path accidentally.
@@ -120,16 +121,16 @@ func TestBuildPhaseSteps_IssueDone(t *testing.T) {
 	if err != nil || project == nil {
 		t.Fatalf("get project: %v", err)
 	}
-	issue, err := eng.issues.CreateQueued(project.ID, "all done", false)
+	issue, err := eng.issues.CreateQueued(project.ID, "all done", "step-1", defaultTestFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phase := range []string{"research", "plan", "implementation"} {
-		if err := writeResult(ctx, eng.store, storage.ResultPath(project.ID, issue.ID, phase), PhaseResult{Status: "done"}); err != nil {
+	for _, key := range []string{"step-1", "step-2", "step-3"} {
+		if err := writeResult(ctx, eng.store, storage.ResultPath(project.ID, issue.ID, key), PhaseResult{Status: "done"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_ = eng.issues.UpdateStatus(issue.ID, sqlite.StatusDone, "implementation")
+	_ = eng.issues.UpdateStatus(issue.ID, sqlite.StatusDone, "step-3")
 	issue, _ = eng.issues.Get(issue.ID)
 
 	steps := eng.buildPhaseSteps(ctx, project.ID, issue)

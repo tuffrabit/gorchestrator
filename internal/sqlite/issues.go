@@ -30,6 +30,7 @@ type Issue struct {
 	Source              string // manual | webhook | github | jira | ...
 	ExternalID          string
 	AgentFlavorsJSON    string // frozen cast: {"researcher":"cheap",...}
+	PipelineJSON        string // frozen agent flow: ["researcher","coder"]; empty/[] = legacy issue
 	BudgetOverridesJSON string // provider → absolute session ceiling: {"openai":200000}
 	DependsOnJSON       string // issue IDs that must be done first: [12,14]
 	CreatedAt           string
@@ -55,31 +56,38 @@ func NewIssueRepo(db *sql.DB) *IssueRepo {
 }
 
 // Create inserts an issue as in_progress (CLI path) and returns it.
-func (r *IssueRepo) Create(projectID int64, title string) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "", "{}", "[]")
+// currentPhase is the first phase/step key ("step-1" for flow issues,
+// "research" for legacy-shaped test helpers); pipelineJSON is the frozen
+// agent flow ("[]" for legacy-shaped rows); the column defaults are never
+// relied on.
+func (r *IssueRepo) Create(projectID int64, title, currentPhase, pipelineJSON string) (*Issue, error) {
+	return r.CreateWithStatus(projectID, title, StatusInProgress, currentPhase, pipelineJSON, "{}", "[]", false, "manual", "")
 }
 
 // CreateQueued inserts an issue with status queued for the daemon worker pool.
-func (r *IssueRepo) CreateQueued(projectID int64, title string, dryRun bool) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, "manual", "", "{}", "[]")
+func (r *IssueRepo) CreateQueued(projectID int64, title, currentPhase, pipelineJSON string, dryRun bool) (*Issue, error) {
+	return r.CreateWithStatus(projectID, title, StatusQueued, currentPhase, pipelineJSON, "{}", "[]", dryRun, "manual", "")
 }
 
-// CreateQueuedFrom creates a queued issue with provenance (webhook/github/jira)
-// and an optional dependency list (JSON array of issue IDs, "" = none).
-func (r *IssueRepo) CreateQueuedFrom(projectID int64, title string, dryRun bool, source, externalID, agentFlavorsJSON, dependsOnJSON string) (*Issue, error) {
+// CreateQueuedFrom creates a queued issue with provenance (webhook/github/jira),
+// the frozen agent flow, and an optional dependency list (JSON array of issue
+// IDs, "" = none). agentFlavorsJSON is kept for legacy-shaped rows; pass "{}"
+// for flow issues.
+func (r *IssueRepo) CreateQueuedFrom(projectID int64, title, currentPhase, pipelineJSON, agentFlavorsJSON, dependsOnJSON string, dryRun bool, source, externalID string) (*Issue, error) {
 	if source == "" {
 		source = "manual"
 	}
-	return r.CreateWithStatus(projectID, title, StatusQueued, dryRun, source, externalID, agentFlavorsJSON, dependsOnJSON)
-}
-
-// CreateWithCast inserts an in_progress issue with a frozen agent cast (CLI Run path).
-func (r *IssueRepo) CreateWithCast(projectID int64, title, agentFlavorsJSON, dependsOnJSON string) (*Issue, error) {
-	return r.CreateWithStatus(projectID, title, StatusInProgress, false, "manual", "", agentFlavorsJSON, dependsOnJSON)
+	return r.CreateWithStatus(projectID, title, StatusQueued, currentPhase, pipelineJSON, agentFlavorsJSON, dependsOnJSON, dryRun, source, externalID)
 }
 
 // CreateWithStatus inserts an issue with the given status and dry-run flag.
-func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryRun bool, source, externalID, agentFlavorsJSON, dependsOnJSON string) (*Issue, error) {
+func (r *IssueRepo) CreateWithStatus(projectID int64, title, status, currentPhase, pipelineJSON, agentFlavorsJSON, dependsOnJSON string, dryRun bool, source, externalID string) (*Issue, error) {
+	if currentPhase == "" {
+		currentPhase = "research"
+	}
+	if pipelineJSON == "" {
+		pipelineJSON = "[]"
+	}
 	dry := 0
 	if dryRun {
 		dry = 1
@@ -94,8 +102,8 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 		dependsOnJSON = "[]"
 	}
 	res, err := r.db.Exec(
-		`INSERT INTO issues (project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, depends_on_json) VALUES (?, ?, '', ?, 'research', ?, ?, ?, ?, ?)`,
-		projectID, title, status, dry, source, externalID, agentFlavorsJSON, dependsOnJSON,
+		`INSERT INTO issues (project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, pipeline_json, depends_on_json) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, title, status, currentPhase, dry, source, externalID, agentFlavorsJSON, pipelineJSON, dependsOnJSON,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert issue: %w", err)
@@ -108,7 +116,7 @@ func (r *IssueRepo) CreateWithStatus(projectID int64, title, status string, dryR
 }
 
 // issueColumns is the canonical SELECT list for an issue row.
-const issueColumns = `id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, budget_overrides_json, depends_on_json, created_at, updated_at`
+const issueColumns = `id, project_id, title, description, status, current_phase, dry_run, source, external_id, agent_flavors_json, pipeline_json, budget_overrides_json, depends_on_json, created_at, updated_at`
 
 // Get fetches an issue by id.
 func (r *IssueRepo) Get(id int64) (*Issue, error) {
@@ -397,7 +405,7 @@ func (r *IssueRepo) Delete(id int64) error {
 func scanIssue(row *sql.Row) (*Issue, error) {
 	i := &Issue{}
 	var dry int
-	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.DependsOnJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+	if err := row.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.PipelineJSON, &i.BudgetOverridesJSON, &i.DependsOnJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -413,7 +421,7 @@ func scanIssues(rows *sql.Rows) ([]*Issue, error) {
 	for rows.Next() {
 		i := &Issue{}
 		var dry int
-		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.BudgetOverridesJSON, &i.DependsOnJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.ProjectID, &i.Title, &i.Description, &i.Status, &i.CurrentPhase, &dry, &i.Source, &i.ExternalID, &i.AgentFlavorsJSON, &i.PipelineJSON, &i.BudgetOverridesJSON, &i.DependsOnJSON, &i.CreatedAt, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		i.DryRun = dry != 0
@@ -426,6 +434,9 @@ func scanIssues(rows *sql.Rows) ([]*Issue, error) {
 func (i *Issue) normalizeJSON() {
 	if i.AgentFlavorsJSON == "" {
 		i.AgentFlavorsJSON = "{}"
+	}
+	if i.PipelineJSON == "" {
+		i.PipelineJSON = "[]"
 	}
 	if i.BudgetOverridesJSON == "" {
 		i.BudgetOverridesJSON = "{}"

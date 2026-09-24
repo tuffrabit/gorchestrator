@@ -62,12 +62,13 @@ func TestGitWorkspace_PipelineDryRun(t *testing.T) {
 			ReadFile: config.ReadFileConfig{MaxBytes: 65536, MaxLines: 2000},
 		},
 		Agents: map[string]config.AgentConfig{
-			"researcher":  {Adjudicator: "null", MaxAttempts: 1, Loops: 1},
-			"planner":     {Adjudicator: "null", MaxAttempts: 1, Loops: 1},
-			"implementer": {Adjudicator: "null", MaxAttempts: 1, Loops: 1},
+			"researcher":  {SystemPrompt: "Research the issue.", Adjudicator: "null", MaxAttempts: 1, Loops: 1},
+			"planner":     {SystemPrompt: "Plan the work.", Adjudicator: "null", MaxAttempts: 1, Loops: 1},
+			"implementer": {SystemPrompt: "Implement the plan.", Adjudicator: "null", MaxAttempts: 1, Loops: 1},
 		},
 		Projects: map[string]config.ProjectConfig{
 			"gitproj": {
+				DefaultFlow: []string{"researcher", "planner", "implementer"},
 				Git: &config.ProjectGitConfig{
 					RepoURL:    remote,
 					BaseBranch: "main",

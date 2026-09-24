@@ -73,6 +73,23 @@ func TestMergeAgentSingleShotContextBytes(t *testing.T) {
 	}
 }
 
+func TestMergeAgentSystemPromptNeverInvented(t *testing.T) {
+	// Neither base (generic defaults) nor an overlay without a prompt may
+	// produce one: validation guarantees the user wrote it.
+	out := MergeAgent(AgentConfig{SystemPrompt: "base"}, AgentConfig{})
+	if out.SystemPrompt != "base" {
+		t.Fatalf("empty overlay should inherit, got %q", out.SystemPrompt)
+	}
+	out = MergeAgent(AgentConfig{}, AgentConfig{SystemPrompt: "overlay"})
+	if out.SystemPrompt != "overlay" {
+		t.Fatalf("overlay should override, got %q", out.SystemPrompt)
+	}
+	out = MergeAgent(AgentConfig{}, AgentConfig{})
+	if out.SystemPrompt != "" {
+		t.Fatalf("merge must not invent a prompt, got %q", out.SystemPrompt)
+	}
+}
+
 func TestMergeAgentContextFiles(t *testing.T) {
 	base := AgentConfig{ContextFiles: []string{"a.go", "b.go"}}
 
@@ -95,6 +112,24 @@ func TestMergeAgentContextFiles(t *testing.T) {
 	}
 }
 
+func TestHasEditingTool(t *testing.T) {
+	// Empty allowlist = full core list = has editing tools.
+	if !(AgentConfig{}).HasEditingTool() {
+		t.Fatal("empty Tools should mean the full core list (has editing tools)")
+	}
+	if (AgentConfig{Tools: []string{"read_file", "list_directory", "grep_search", "write_output"}}).HasEditingTool() {
+		t.Fatal("read-only allowlist should not have editing tools")
+	}
+	for _, tool := range []string{"write_file", "update_file", "run_test"} {
+		if !(AgentConfig{Tools: []string{tool}}).HasEditingTool() {
+			t.Fatalf("%s should count as an editing tool", tool)
+		}
+	}
+	if (AgentConfig{Tools: []string{"read_file", "write_file"}}).HasEditingTool() != true {
+		t.Fatal("mixed list with write_file should have editing tools")
+	}
+}
+
 func loadFromString(t *testing.T, yaml string) (*Config, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -104,19 +139,183 @@ func loadFromString(t *testing.T, yaml string) (*Config, error) {
 	return LoadFrom(path)
 }
 
-func TestLoadRejectsBadFlavorTimeout(t *testing.T) {
+func TestLoadRejectsProjectAgentBlock(t *testing.T) {
 	_, err := loadFromString(t, `
 projects:
   proj:
+    source_path: /tmp/proj
     agents:
       researcher:
         flavors:
-          slow:
-            model:
-              timeout: 6hours
+          slow: {}
 `)
-	if err == nil || !strings.Contains(err.Error(), "projects.proj.agents.researcher.flavors.slow") {
-		t.Fatalf("want flavor-path timeout error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "projects.proj.agents was removed") {
+		t.Fatalf("want friendly projects.proj.agents error, got %v", err)
+	}
+}
+
+func TestLoadRejectsMissingSystemPrompt(t *testing.T) {
+	_, err := loadFromString(t, `
+agents:
+  coder:
+    model:
+      provider: openai
+      model: o3-mini
+`)
+	if err == nil || !strings.Contains(err.Error(), "agents.coder: system_prompt is required") {
+		t.Fatalf("want system_prompt required error, got %v", err)
+	}
+}
+
+func TestLoadRejectsSystemPromptAppend(t *testing.T) {
+	_, err := loadFromString(t, `
+agents:
+  coder:
+    system_prompt: "You are a coder."
+    system_prompt_append: "extra"
+`)
+	if err == nil || !strings.Contains(err.Error(), "system_prompt_append") {
+		t.Fatalf("want system_prompt_append rejected, got %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownTool(t *testing.T) {
+	_, err := loadFromString(t, `
+agents:
+  coder:
+    system_prompt: "You are a coder."
+    tools: [read_file, run_shell]
+`)
+	if err == nil || !strings.Contains(err.Error(), `agents.coder: unknown tool "run_shell"`) {
+		t.Fatalf("want unknown tool error, got %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownMCPServer(t *testing.T) {
+	_, err := loadFromString(t, `
+agents:
+  coder:
+    system_prompt: "You are a coder."
+    mcp_servers: [nope]
+`)
+	if err == nil || !strings.Contains(err.Error(), `agents.coder: unknown mcp server "nope"`) {
+		t.Fatalf("want unknown mcp server error, got %v", err)
+	}
+
+	// "any" and every configured server are both legal.
+	cfg, err := loadFromString(t, `
+mcp_servers:
+  - name: internal-api
+    command: ["./bin/srv"]
+agents:
+  coder:
+    system_prompt: "You are a coder."
+    mcp_servers: ["*"]
+  other:
+    system_prompt: "You are other."
+    mcp_servers: [internal-api]
+`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.Agents["coder"].MCPServers; len(got) != 1 || got[0] != "*" {
+		t.Fatalf("mcp_servers = %v", got)
+	}
+}
+
+func TestLoadRejectsInvalidAgentID(t *testing.T) {
+	cases := map[string]string{
+		"uppercase":    "agents:\n  Coder:\n    system_prompt: x\n",
+		"leading dash": "agents:\n  -coder:\n    system_prompt: x\n",
+		"too long":     "agents:\n  " + strings.Repeat("a", 33) + ":\n    system_prompt: x\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadFromString(t, body); err == nil || !strings.Contains(err.Error(), "invalid agent id") {
+				t.Fatalf("want invalid agent id error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsArbitraryAgentIDs(t *testing.T) {
+	// A one-agent config loads.
+	cfg, err := loadFromString(t, `
+agents:
+  coder:
+    system_prompt: "You are an implementer."
+`)
+	if err != nil {
+		t.Fatalf("load one-agent: %v", err)
+	}
+	if ids := cfg.AgentIDs(); len(ids) != 1 || ids[0] != "coder" {
+		t.Fatalf("AgentIDs = %v", ids)
+	}
+
+	// A two-agent config with arbitrary slugs loads; ids sort for UI/API.
+	cfg, err = loadFromString(t, `
+agents:
+  review_1:
+    system_prompt: "You are a reviewer."
+    tools: [read_file, write_output]
+  scout:
+    system_prompt: "You are a scout."
+    single_shot: true
+`)
+	if err != nil {
+		t.Fatalf("load two-agent: %v", err)
+	}
+	if ids := cfg.AgentIDs(); len(ids) != 2 || ids[0] != "review_1" || ids[1] != "scout" {
+		t.Fatalf("AgentIDs = %v, want [review_1 scout]", ids)
+	}
+	scout, ok := cfg.Agent("scout")
+	if !ok || scout.SystemPrompt != "You are a scout." {
+		t.Fatalf("scout not merged: ok=%v %+v", ok, scout)
+	}
+	if scout.SingleShot == nil || !*scout.SingleShot {
+		t.Fatalf("single_shot not loaded: %+v", scout)
+	}
+	if !scout.HasEditingTool() {
+		t.Fatalf("scout has no tools: should default to the full core list")
+	}
+	if _, ok := cfg.Agent("planner"); ok {
+		t.Fatalf("planner must not exist without an agents: entry")
+	}
+	if _, err := cfg.AgentMust("planner"); err == nil || !strings.Contains(err.Error(), `agent "planner" is not configured`) {
+		t.Fatalf("AgentMust(planner) = %v, want not-configured error", err)
+	}
+}
+
+func TestLoadDefaultFlowValidation(t *testing.T) {
+	ok := "projects:\n  proj:\n    source_path: /tmp/proj\n    default_flow: [scout, coder]\n"
+
+	if _, err := loadFromString(t, "agents:\n  scout:\n    system_prompt: x\n  coder:\n    system_prompt: y\n"+ok); err != nil {
+		t.Fatalf("valid default_flow: %v", err)
+	}
+	cfg, _ := loadFromString(t, "agents:\n  scout:\n    system_prompt: x\n  coder:\n    system_prompt: y\n"+ok)
+	if got := cfg.Projects["proj"].DefaultFlow; len(got) != 2 || got[0] != "scout" || got[1] != "coder" {
+		t.Fatalf("DefaultFlow = %v", got)
+	}
+
+	// Unknown agent id in default_flow.
+	_, err := loadFromString(t, "agents:\n  scout:\n    system_prompt: x\n"+"projects:\n  proj:\n    default_flow: [scout, ghost]\n")
+	if err == nil || !strings.Contains(err.Error(), "projects.proj.default_flow: agent \"ghost\" is not configured") {
+		t.Fatalf("want unknown default_flow agent error, got %v", err)
+	}
+
+	// Empty list.
+	_, err = loadFromString(t, "agents:\n  scout:\n    system_prompt: x\n"+"projects:\n  proj:\n    default_flow: []\n")
+	if err == nil || !strings.Contains(err.Error(), "default_flow: list must not be empty") {
+		t.Fatalf("want empty default_flow error, got %v", err)
+	}
+
+	// Too many agents (9).
+	_, err = loadFromString(t,
+		"agents:\n"+
+			"  a1:\n    system_prompt: x\n  a2:\n    system_prompt: x\n  a3:\n    system_prompt: x\n  a4:\n    system_prompt: x\n  a5:\n    system_prompt: x\n  a6:\n    system_prompt: x\n  a7:\n    system_prompt: x\n  a8:\n    system_prompt: x\n  a9:\n    system_prompt: x\n"+
+			"projects:\n  proj:\n    default_flow: [a1, a2, a3, a4, a5, a6, a7, a8, a9]\n")
+	if err == nil || !strings.Contains(err.Error(), "default_flow: too many agents (max 8)") {
+		t.Fatalf("want too-many default_flow error, got %v", err)
 	}
 }
 
@@ -124,83 +323,64 @@ func TestLoadRejectsBadGlobalAgentTimeout(t *testing.T) {
 	_, err := loadFromString(t, `
 agents:
   planner:
+    system_prompt: "You are a planner."
     model:
       timeout: ten-minutes
 `)
-	if err == nil || !strings.Contains(err.Error(), "agents.planner") {
+	if err == nil || !strings.Contains(err.Error(), "agents.planner") || !strings.Contains(err.Error(), "model.timeout") {
 		t.Fatalf("want agents.planner timeout error, got %v", err)
 	}
 }
 
 func TestLoadRejectsNegativeSingleShotContextBytes(t *testing.T) {
 	_, err := loadFromString(t, `
-projects:
-  proj:
-    agents:
-      planner:
-        flavors:
-          slow:
-            single_shot_context_bytes: -1
+agents:
+  scout:
+    system_prompt: "You are a scout."
+    single_shot: true
+    single_shot_context_bytes: -1
 `)
 	if err == nil || !strings.Contains(err.Error(), "single_shot_context_bytes") {
 		t.Fatalf("want single_shot_context_bytes error, got %v", err)
 	}
 }
 
-func TestLoadAcceptsSingleShotFlavor(t *testing.T) {
+func TestLoadAcceptsSingleShotAgent(t *testing.T) {
+	// single_shot is legal for ANY agent now (no implementer ban).
 	cfg, err := loadFromString(t, `
-projects:
-  proj:
-    agents:
-      researcher:
-        default: slow
-        flavors:
-          slow:
-            single_shot: true
-            single_shot_context_bytes: 32768
-            context_files: [main.go, internal/x.go]
-            model:
-              provider: openai
-              model: deepseek-v4-flash
-              base_url: http://127.0.0.1:8080/v1
-              timeout: 24h
+agents:
+  implementer:
+    system_prompt: "You are an implementer."
+    single_shot: true
+    single_shot_context_bytes: 32768
+    context_files: [main.go, internal/x.go]
+    model:
+      provider: openai
+      model: deepseek-v4-flash
+      base_url: http://127.0.0.1:8080/v1
+      timeout: 24h
 `)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	fl := cfg.Projects["proj"].Agents["researcher"].Flavors["slow"]
-	if fl.SingleShot == nil || !*fl.SingleShot {
-		t.Fatalf("single_shot not loaded: %+v", fl)
+	ac := cfg.Agents["implementer"]
+	if ac.SingleShot == nil || !*ac.SingleShot {
+		t.Fatalf("single_shot not loaded: %+v", ac)
 	}
-	if fl.SingleShotContextBytes != 32768 {
-		t.Fatalf("single_shot_context_bytes = %d", fl.SingleShotContextBytes)
+	if ac.SingleShotContextBytes != 32768 {
+		t.Fatalf("single_shot_context_bytes = %d", ac.SingleShotContextBytes)
 	}
-	if len(fl.ContextFiles) != 2 || fl.ContextFiles[0] != "main.go" {
-		t.Fatalf("context_files = %v", fl.ContextFiles)
+	if len(ac.ContextFiles) != 2 || ac.ContextFiles[0] != "main.go" {
+		t.Fatalf("context_files = %v", ac.ContextFiles)
 	}
-	if fl.Model.Timeout != "24h" {
-		t.Fatalf("timeout = %q", fl.Model.Timeout)
-	}
-}
-
-func TestLoadRejectsImplementerSingleShot(t *testing.T) {
-	_, err := loadFromString(t, `
-projects:
-  proj:
-    agents:
-      implementer:
-        flavors:
-          bad:
-            single_shot: true
-`)
-	if err == nil || !strings.Contains(err.Error(), "single_shot is not supported for the implementer") {
-		t.Fatalf("want implementer single_shot error, got %v", err)
+	if ac.Model.Timeout != "24h" {
+		t.Fatalf("timeout = %q", ac.Model.Timeout)
 	}
 }
 
 func TestLoadAcceptsKnownAdjudicators(t *testing.T) {
 	for _, name := range []string{"null", "self", "human"} {
-		cfg, err := loadFromString(t, "agents:\n  planner:\n    adjudicator: \""+name+"\"\n")
+		cfg, err := loadFromString(t, "agents:\n  planner:\n    system_prompt: x\n    adjudicator: \""+name+"\"\n")
 		if err != nil {
 			t.Fatalf("adjudicator %q: load: %v", name, err)
 		}
@@ -208,13 +388,20 @@ func TestLoadAcceptsKnownAdjudicators(t *testing.T) {
 			t.Fatalf("adjudicator = %q, want %q", cfg.Agents["planner"].Adjudicator, name)
 		}
 	}
-	// Unset inherits the built-in default, which is the human gate.
-	cfg, err := loadFromString(t, "")
+	// Unset inherits the generic default, which is the human gate.
+	cfg, err := loadFromString(t, "agents:\n  coder:\n    system_prompt: x\n")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := cfg.Agent("planner").Adjudicator; got != "human" {
-		t.Fatalf("default adjudicator = %q, want human", got)
+	merged, ok := cfg.Agent("coder")
+	if !ok || merged.Adjudicator != "human" {
+		t.Fatalf("default adjudicator = %+v ok=%v, want human", merged, ok)
+	}
+	if merged.MaxAttempts != 3 || merged.Loops != 1 || merged.Rubric == "" {
+		t.Fatalf("generic defaults not merged: %+v", merged)
+	}
+	if merged.Model.Provider != "openai" || merged.Model.Model != "gpt-4o-mini" {
+		t.Fatalf("default_model not inherited: %+v", merged.Model)
 	}
 }
 
@@ -222,49 +409,11 @@ func TestLoadRejectsUnknownAdjudicator(t *testing.T) {
 	_, err := loadFromString(t, `
 agents:
   researcher:
+    system_prompt: "You are a researcher."
     adjudicator: selff
 `)
 	if err == nil || !strings.Contains(err.Error(), `agents.researcher: unknown adjudicator "selff"`) {
 		t.Fatalf("want agents.researcher adjudicator error, got %v", err)
-	}
-
-	_, err = loadFromString(t, `
-projects:
-  proj:
-    agents:
-      planner:
-        flavors:
-          fast:
-            adjudicator: selff
-`)
-	if err == nil || !strings.Contains(err.Error(), `projects.proj.agents.planner.flavors.fast: unknown adjudicator "selff"`) {
-		t.Fatalf("want flavor-path adjudicator error, got %v", err)
-	}
-}
-
-func TestDefaultPromptAccessors(t *testing.T) {
-	for _, agentType := range []string{"researcher", "planner", "implementer"} {
-		if DefaultSystemPrompt(agentType) == "" {
-			t.Fatalf("DefaultSystemPrompt(%q) is empty", agentType)
-		}
-	}
-	if DefaultSystemPrompt("nope") != "" {
-		t.Fatal("unknown agent type should have no default prompt")
-	}
-	if DefaultSingleShotPrompt("researcher") == "" || DefaultSingleShotPrompt("planner") == "" {
-		t.Fatal("researcher and planner need single-shot defaults")
-	}
-	if DefaultSingleShotPrompt("implementer") != "" {
-		t.Fatal("implementer must not have a single-shot default")
-	}
-	// Single-shot prompts must not reference tools that don't exist there.
-	for _, agentType := range []string{"researcher", "planner"} {
-		p := DefaultSingleShotPrompt(agentType)
-		for _, toolName := range []string{"write_output", "read_file", "finish_task", "grep_search"} {
-			if strings.Contains(p, toolName) {
-				t.Fatalf("single-shot %s prompt references tool %q", agentType, toolName)
-			}
-		}
 	}
 }
 
@@ -356,7 +505,9 @@ func TestLoadFromRejectsUnknownKeys(t *testing.T) {
 	cases := map[string]string{
 		"top-level": "stoage_root: /tmp/x\n",
 		"nested under project (mis-indented project)": "projects:\n  bunny:\n    source_path: /tmp/bunny\n    gorchestrator:\n      source_path: /tmp/other\n",
-		"agent field (stale token_budget)":            "agents:\n  researcher:\n    token_budget: 1000\n",
+		"agent field (stale token_budget)":            "agents:\n  researcher:\n    system_prompt: x\n    token_budget: 1000\n",
+		"agent field (removed system_prompt_append)":  "agents:\n  researcher:\n    system_prompt: x\n    system_prompt_append: y\n",
+		"project field (removed guardrails)":          "projects:\n  bunny:\n    guardrails:\n      effort_gate_min: high\n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -370,11 +521,28 @@ func TestLoadFromRejectsUnknownKeys(t *testing.T) {
 }
 
 func TestLoadFromValidConfigStillLoads(t *testing.T) {
-	cfg, err := LoadFrom(writeConfig(t, "projects:\n  bunny:\n    git:\n      repo_url: /tmp/bunny\n      base_branch: main\n"))
+	cfg, err := LoadFrom(writeConfig(t, `
+agents:
+  researcher:
+    system_prompt: "You are a Researcher agent."
+    tools: [read_file, list_directory, grep_search, write_output]
+  coder:
+    system_prompt: "You are an implementer."
+projects:
+  bunny:
+    source_path: /tmp/bunny
+    default_flow: [researcher, coder]
+    git:
+      repo_url: /tmp/bunny
+      base_branch: main
+`))
 	if err != nil {
 		t.Fatalf("valid config should load: %v", err)
 	}
 	if cfg.Projects["bunny"].Git == nil || cfg.Projects["bunny"].Git.RepoURL != "/tmp/bunny" {
 		t.Fatalf("project not parsed: %+v", cfg.Projects["bunny"])
+	}
+	if got := cfg.Projects["bunny"].DefaultFlow; len(got) != 2 || got[0] != "researcher" || got[1] != "coder" {
+		t.Fatalf("default_flow = %v", got)
 	}
 }

@@ -35,7 +35,6 @@ import (
 	"github.com/tuffrabit/gorchestrator/internal/sqlite"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 	"github.com/tuffrabit/gorchestrator/internal/tools"
-	"github.com/tuffrabit/gorchestrator/internal/trigger"
 )
 
 // PhaseResult is the orchestrator-written status envelope for a phase.
@@ -47,15 +46,17 @@ type PhaseResult struct {
 	TokensUsed    int    `json:"tokens_used"`
 	DurationMs    int64  `json:"duration_ms"`
 	DoneRationale string `json:"done_rationale"`
-	// Effort is planner finish_task effort (low|medium|high); empty for other phases.
-	Effort       string `json:"effort,omitempty"`
-	LatestOutput string `json:"latest_output"`
-	Timestamp    string `json:"timestamp"`
+	LatestOutput  string `json:"latest_output"`
+	Timestamp     string `json:"timestamp"`
 }
 
 // PhaseTask is the orchestrator-written instructions/config file for a phase.
 type PhaseTask struct {
+	// AgentType keeps the historical task.json key; it now holds the step's
+	// agent id (a user-chosen id under agents:).
 	AgentType         string            `json:"agent_type"`
+	StepKey           string            `json:"step_key"`
+	Flow              []string          `json:"flow"`
 	SystemPrompt      string            `json:"system_prompt"`
 	Model             map[string]string `json:"model"`
 	Adjudicator       string            `json:"adjudicator"`
@@ -236,8 +237,9 @@ func (e *Engine) RegisteredProjectNames() []string {
 	return names
 }
 
-// ListRegisteredProjects returns synced project rows for names present in YAML,
-// each paired with its flavor catalog for the submit UI.
+// ListRegisteredProjects returns synced project rows for names present in
+// YAML, each paired with the configured agent ids and the project's
+// default_flow for the submit UI.
 func (e *Engine) ListRegisteredProjects(ctx context.Context) ([]RegisteredProject, error) {
 	_ = ctx
 	names := e.RegisteredProjectNames()
@@ -252,17 +254,19 @@ func (e *Engine) ListRegisteredProjects(ctx context.Context) ([]RegisteredProjec
 		}
 		pc := e.cfg.Projects[name]
 		out = append(out, RegisteredProject{
-			Project: p,
-			Agents:  pc.FlavorCatalog(),
+			Project:         p,
+			AvailableAgents: e.cfg.AgentIDs(),
+			DefaultFlow:     pc.DefaultFlow,
 		})
 	}
 	return out, nil
 }
 
-// RegisteredProject is a YAML-registered project with its flavor catalog.
+// RegisteredProject is a YAML-registered project with the submit-UI agent data.
 type RegisteredProject struct {
-	Project *sqlite.Project
-	Agents  map[string]config.AgentFlavorInfo
+	Project         *sqlite.Project
+	AvailableAgents []string
+	DefaultFlow     []string
 }
 
 func openStorage(cfg *config.Config) (storage.Port, error) {
@@ -377,11 +381,10 @@ type RunOptions struct {
 	Source string
 	// ExternalID is an optional id from the external system.
 	ExternalID string
-	// TrustExternal skips the forced human implementer gate for external sources.
-	TrustExternal bool
-	// AgentFlavors is an optional cast: map agent type → flavor name.
-	// Missing keys are filled from the project's default when flavors exist.
-	AgentFlavors map[string]string
+	// Flow is the ordered list of agent ids for this issue. When empty it is
+	// resolved from projects.<name>.default_flow; a submit with neither is
+	// rejected (resolveFlow).
+	Flow []string
 	// DependsOn lists issue IDs that must reach done before this issue is
 	// claimable by daemon workers. Every ID must reference an existing issue.
 	DependsOn []int64
@@ -394,7 +397,11 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 		return err
 	}
 
-	castJSON, err := e.resolveAndMarshalCast(project.Name, opts.AgentFlavors)
+	flow, err := e.resolveFlow(project.Name, opts.Flow)
+	if err != nil {
+		return err
+	}
+	pipelineJSON, err := marshalFlowJSON(flow)
 	if err != nil {
 		return err
 	}
@@ -404,7 +411,7 @@ func (e *Engine) Run(ctx context.Context, opts RunOptions) error {
 		return err
 	}
 
-	issue, err := e.issues.CreateWithCast(project.ID, opts.IssueTitle, castJSON, dependsOnJSON)
+	issue, err := e.issues.CreateWithStatus(project.ID, opts.IssueTitle, sqlite.StatusInProgress, "step-1", pipelineJSON, "{}", dependsOnJSON, false, "manual", "")
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)
 	}
@@ -459,7 +466,11 @@ func (e *Engine) Resume(ctx context.Context, opts ResumeOptions) error {
 		return fmt.Errorf("issue %d not found in project %q", opts.IssueID, opts.ProjectName)
 	}
 
-	phase, status, err := e.currentPhaseState(project.ID, issue.ID)
+	steps, err := e.stepsForIssue(issue)
+	if err != nil {
+		return err
+	}
+	phase, status, err := e.currentStepState(project.ID, issue.ID, steps)
 	if err != nil {
 		return err
 	}
@@ -504,55 +515,6 @@ func (e *Engine) Resume(ctx context.Context, opts ResumeOptions) error {
 	return e.runPipeline(ctx, project, issue, issue.DryRun)
 }
 
-// agentConfigForIssue returns agent config with project flavor cast and
-// untrusted-input defaults applied.
-func (e *Engine) agentConfigForIssue(project *sqlite.Project, issue *sqlite.Issue, phaseName string) (config.AgentConfig, error) {
-	agentType := phaseAgentType(phaseName)
-	phaseCfg := e.cfg.Agent(agentType)
-
-	pc, err := e.typedProjectConfig(project)
-	if err != nil {
-		return phaseCfg, err
-	}
-	cast := parseIssueCast(issue.AgentFlavorsJSON)
-	flavorName := cast[agentType]
-	overlay, ok, err := pc.FlavorOverlay(agentType, flavorName)
-	if err != nil {
-		return phaseCfg, err
-	}
-	if ok {
-		phaseCfg = config.MergeAgent(phaseCfg, overlay)
-	}
-
-	// Untrusted external issues default to human gate before implementation.
-	if phaseName == "implementation" && trigger.IsExternal(issue.Source) {
-		trust := e.cfg.Triggers.TrustExternal || pc.TrustExternal
-		if !trust {
-			phaseCfg.Adjudicator = "human"
-		}
-	}
-	return phaseCfg, nil
-}
-
-func (e *Engine) resolveAndMarshalCast(projectName string, requested map[string]string) (string, error) {
-	pc, ok := e.cfg.Projects[projectName]
-	if !ok {
-		return "{}", nil
-	}
-	cast, err := pc.ResolveCast(requested)
-	if err != nil {
-		return "", err
-	}
-	if len(cast) == 0 {
-		return "{}", nil
-	}
-	data, err := json.Marshal(cast)
-	if err != nil {
-		return "", fmt.Errorf("marshal agent flavors: %w", err)
-	}
-	return string(data), nil
-}
-
 // validateDependsOn verifies that every dependency references an existing issue
 // and marshals the deduplicated list for storage. Deps can only point at issues
 // that already exist at submit time, so cycles are impossible by construction.
@@ -586,39 +548,35 @@ func (e *Engine) validateDependsOn(deps []int64) (string, error) {
 	return string(data), nil
 }
 
-func parseIssueCast(raw string) map[string]string {
-	out := map[string]string{}
-	if raw == "" || raw == "{}" {
-		return out
-	}
-	_ = json.Unmarshal([]byte(raw), &out)
-	return out
-}
-
-// runPipeline executes research -> plan -> implementation.
+// runPipeline walks the issue's frozen agent flow step by step.
 func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, dryRun bool) error {
-	phases := []string{"research", "plan", "implementation"}
+	steps, err := e.stepsForIssue(issue)
+	if err != nil {
+		return err
+	}
 
-	for _, phaseName := range phases {
-		currentPhase, status, err := e.currentPhaseState(project.ID, issue.ID)
+	for _, step := range steps {
+		phaseName := step.Key
+		currentPhase, status, err := e.currentStepState(project.ID, issue.ID, steps)
 		if err != nil {
 			return err
 		}
 
-		// currentPhaseState returns the first non-done phase. If it reports a
-		// phase ahead of the one we expect, that earlier phase is already done.
-		phaseIdx := indexOf(phases, phaseName)
-		currentIdx := indexOf(phases, currentPhase)
-		if currentIdx > phaseIdx {
+		// currentStepState returns the first non-done step. If it reports a
+		// step ahead of the one we expect, that earlier step is already done.
+		stepIdx := stepIndex(steps, phaseName)
+		currentIdx := stepIndex(steps, currentPhase)
+		if currentIdx > stepIdx {
 			continue
 		}
 
-		// If currentPhaseState points at an earlier phase than our loop variable,
-		// use the current phase so we pick up the correct config and input.
-		if currentIdx < phaseIdx {
-			phaseName = currentPhase
+		// If currentStepState points at an earlier step than our loop variable,
+		// use the current step so we pick up the correct config and input.
+		if currentIdx < stepIdx {
+			step = steps[currentIdx]
+			phaseName = step.Key
 		}
-		phaseCfg, err := e.agentConfigForIssue(project, issue, phaseName)
+		phaseCfg, err := e.stepAgentConfig(issue, step)
 		if err != nil {
 			e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("agent config for %s: %w", phaseName, err)
@@ -663,7 +621,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			Phase: phaseName, Status: sqlite.StatusInProgress,
 		})
 
-		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, issue.Title, issue.Description)
+		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, prevStepKey(steps, phaseName), issue.Title, issue.Description)
 		if err != nil {
 			e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("build input for %s: %w", phaseName, err)
@@ -709,15 +667,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		// exclusive mode). Fail safe on unload failure: residency is unknown,
 		// so return before the next phase starts. The persisted result lets
 		// resume/recovery pick the phase up correctly.
-		keep := result.Status == "done" && nextPhaseName(phaseName) != ""
-		if keep && phaseName == "plan" {
-			// The effort gate may hold the pipeline for a human right after
-			// release; don't keep the model pinned for that wait.
-			pc, perr := e.typedProjectConfig(project)
-			if perr != nil || EffortRequiresGate(result.Effort, EffortGateMin(pc)) {
-				keep = false
-			}
-		}
+		keep := result.Status == "done" && nextStepKey(steps, phaseName) != ""
 		if err := releaseModel(keep); err != nil {
 			e.failIssueInferenceError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("unload model after %s: %w", phaseName, err)
@@ -731,7 +681,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		// the dashboard shows the transition before the next phase_started lands.
 		phaseForIssue := phaseName
 		if result.Status == "done" {
-			if next := nextPhaseName(phaseName); next != "" {
+			if next := nextStepKey(steps, phaseName); next != "" {
 				phaseForIssue = next
 			}
 		}
@@ -750,15 +700,7 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			if e.escalator != nil {
 				e.escalator.Observe(ctx, notify.Event{Success: true, Project: project.Name, IssueID: issue.ID, Phase: phaseName})
 			}
-			// After an accepted plan, optionally hold before implementation.
-			if phaseName == "plan" {
-				if held, herr := e.maybeHoldForEffort(ctx, project, issue, result); herr != nil {
-					return herr
-				} else if held {
-					return nil
-				}
-			}
-			// Pipeline continues; issue stays in_progress until all phases finish.
+			// Pipeline continues; issue stays in_progress until all steps finish.
 			continue
 		case "waiting_human":
 			e.Publish(Event{
@@ -779,10 +721,11 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		}
 	}
 
-	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusDone, "implementation")
+	lastKey := steps[len(steps)-1].Key
+	_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusDone, lastKey)
 	e.Publish(Event{
 		Type: EventIssueStatus, IssueID: issue.ID, ProjectID: project.ID,
-		Phase: "implementation", Status: sqlite.StatusDone,
+		Phase: lastKey, Status: sqlite.StatusDone,
 	})
 	return nil
 }
@@ -938,40 +881,13 @@ func (e *Engine) acquirePhaseModel(ctx context.Context, project *sqlite.Project,
 }
 
 // sideloadedModels returns the set of model names configured with
-// sideload: true across global agents and every project's flavors (YAML, plus
-// synced DB rows so an orphan project's resumed issues are still covered).
-// The set is derived per call — config is small and static per process.
+// sideload: true across the global agents (YAML). There are no project
+// overlays anymore: sideloading is a per-agent property.
 func (e *Engine) sideloadedModels() map[string]bool {
 	out := map[string]bool{}
-	collect := func(agentType string, overlay config.AgentConfig, hasOverlay bool) {
-		cfg := e.cfg.Agent(agentType)
-		if hasOverlay {
-			cfg = config.MergeAgent(cfg, overlay)
-		}
+	for _, cfg := range e.cfg.Agents {
 		if cfg.Sideload != nil && *cfg.Sideload && cfg.Model.Model != "" {
 			out[cfg.Model.Model] = true
-		}
-	}
-	walkProject := func(pc config.ProjectConfig) {
-		for agentType, pac := range pc.Agents {
-			for _, flavor := range pac.Flavors {
-				collect(agentType, flavor, true)
-			}
-		}
-	}
-	for name := range e.cfg.Agents {
-		collect(name, config.AgentConfig{}, false)
-	}
-	for _, pc := range e.cfg.Projects {
-		walkProject(pc)
-	}
-	if projects, err := e.projects.List(); err == nil {
-		for _, p := range projects {
-			pc, perr := e.typedProjectConfig(p)
-			if perr != nil {
-				continue
-			}
-			walkProject(pc)
 		}
 	}
 	return out
@@ -1037,6 +953,13 @@ func (e *Engine) failIssuePhaseError(ctx context.Context, project *sqlite.Projec
 
 // runPhase runs a single phase with adjudication attempts.
 func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, phase string, cfg config.AgentConfig, baseInput string, dryRun bool) (*PhaseResult, error) {
+	steps, err := e.stepsForIssue(issue)
+	if err != nil {
+		return nil, fmt.Errorf("resolve steps: %w", err)
+	}
+	prevKey := prevStepKey(steps, phase)
+	flow := flowAgentIDs(steps)
+
 	maxAttempts := cfg.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -1093,7 +1016,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 		}
 
 		// Build task.json.
-		task, err := e.buildTask(ctx, project.ID, issue.ID, phase, cfg, attempt, outputPath, dryRun)
+		task, err := e.buildTask(ctx, project.ID, issue.ID, phase, cfg, flow, prevKey, attempt, outputPath, dryRun)
 		if err != nil {
 			return nil, fmt.Errorf("build task: %w", err)
 		}
@@ -1105,20 +1028,29 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			return nil, fmt.Errorf("write task.json: %w", err)
 		}
 
-		// Create run record before workspace setup so branch names can use run_id.
+		// Create run record for per-attempt usage tracking.
 		modelName := cfg.Model.Model
 		if dryRun {
 			modelName = "dryrun"
 		}
-		run, err := e.runs.Create(issue.ID, phaseAgentType(phase), modelName, "in_progress")
+		run, err := e.runs.Create(issue.ID, cfg.ID, modelName, "in_progress")
 		if err != nil {
 			return nil, fmt.Errorf("create run: %w", err)
 		}
 
-		// Implementation phases need a clean workspace (git worktree or snapshot copy).
-		if phase == "implementation" {
-			if err := e.prepareImplementerWorkspace(ctx, project, issue, run); err != nil {
+		// Steps whose agent can edit files work on the shared issue-level
+		// workspace (git worktree or snapshot copy), prepared once per issue.
+		if cfg.HasEditingTool() {
+			if err := e.prepareIssueWorkspaceOnce(ctx, project, issue); err != nil {
 				return nil, fmt.Errorf("prepare workspace: %w", err)
+			}
+			wsKey := storage.WorkspacePath(project.ID, issue.ID)
+			branchName := ""
+			if gitCfg, gerr := e.projectGitConfig(project); gerr == nil && gitCfg.Enabled() {
+				branchName = gorchgit.IssueBranchName(issue.ID)
+			}
+			if err := e.runs.SetWorkspace(run.ID, wsKey, branchName); err != nil {
+				return nil, fmt.Errorf("set run workspace: %w", err)
 			}
 		}
 
@@ -1126,19 +1058,18 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			storage.IssueDir(project.ID, issue.ID),
 			storage.SourcePath(project.ID, issue.ID),
 		}
-		if phase == "implementation" {
+		if cfg.HasEditingTool() {
 			allowlist = append(allowlist, storage.WorkspacePath(project.ID, issue.ID))
 		}
 
 		// Agents need explicit path guidance; short names like "source" only
 		// work once BasePath/allowlist resolution is documented in context.
-		input = input + pathGuide(project.ID, issue.ID, phase, allowlist)
+		input = input + pathGuide(project.ID, issue.ID, phase, cfg.HasEditingTool(), allowlist)
 
 		totalTokens := 0
 		loopCount := 0
 		var loopErr error
 		var doneRationale string
-		var finishEffort string
 		var phaseDone bool = true
 
 		for loop := 1; loop <= loops; loop++ {
@@ -1149,7 +1080,7 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			}
 
 			loopInput := e.buildLoopInput(ctx, input, outputPath, loop)
-			output, done, rationale, effort, tokens, err := e.runAgentLoop(ctx, project.ID, issue.ID, phase, cfg, loopInput, outputPath, eventsPath, allowlist, attempt, loop, run.ID, dryRun)
+			output, done, rationale, tokens, err := e.runAgentLoop(ctx, project.ID, issue.ID, phase, cfg, loopInput, outputPath, eventsPath, allowlist, attempt, loop, run.ID, dryRun)
 			if err != nil {
 				loopErr = err
 				loopCount = loop
@@ -1159,9 +1090,6 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			totalTokens += tokens
 			if rationale != "" {
 				doneRationale = rationale
-			}
-			if effort != "" {
-				finishEffort = effort
 			}
 			phaseDone = done
 			_ = output
@@ -1193,7 +1121,6 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			TokensUsed:    totalTokens,
 			DurationMs:    duration,
 			DoneRationale: doneRationale,
-			Effort:        finishEffort,
 			LatestOutput:  latestOutput,
 			Timestamp:     time.Now().UTC().Format(time.RFC3339),
 		}
@@ -1205,18 +1132,6 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 
 		if loopErr != nil {
 			return result, nil
-		}
-
-		// After a successful implementer run, create the single structured commit.
-		if phase == "implementation" {
-			if err := e.commitImplementerWorkspace(ctx, project, issue, run); err != nil {
-				log.Printf("git commit after implementer: %v", err)
-				result.Status = "failed"
-				result.Error = "git commit: " + err.Error()
-				_ = writeResult(ctx, e.store, resultPath, *result)
-				_ = e.runs.UpdateStatus(run.ID, "failed", totalTokens, int(duration), loopCount)
-				return result, nil
-			}
 		}
 
 		// Apply adjudicator at the boundary.
@@ -1231,6 +1146,15 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 
 		switch decision.Outcome {
 		case adjudication.Pass:
+			// After an accepted step whose agent can edit files, commit the
+			// issue workspace so each accepted step lands in git history in
+			// order (no-op when nothing changed or the project is not
+			// git-backed).
+			if cfg.HasEditingTool() {
+				if err := e.commitIssueWorkspace(ctx, project, issue, phase); err != nil {
+					log.Printf("git commit after %s: %v", phase, err)
+				}
+			}
 			result.Status = "done"
 			result.DoneRationale = doneRationale
 			if err := writeResult(ctx, e.store, resultPath, *result); err != nil {
@@ -1312,15 +1236,15 @@ func (e *Engine) buildPhaseModel(ctx context.Context, cfg config.AgentConfig, is
 }
 
 // runAgentLoop runs one loop of an agent and returns the loop output, the
-// finish_task done flag, rationale, effort tag (planner), token count, and any error.
-func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, allowlist []string, attempt, loop int, runID int64, dryRun bool) ([]byte, bool, string, string, int, error) {
-	// Single-shot phases skip tools/MCP and the ADK runner entirely.
+// finish_task done flag, rationale, token count, and any error.
+func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, userContent *genai.Content, outputPath, eventsPath string, allowlist []string, attempt, loop int, runID int64, dryRun bool) ([]byte, bool, string, int, error) {
+	// Single-shot agents skip tools/MCP and the ADK runner entirely.
 	if cfg.SingleShot != nil && *cfg.SingleShot {
 		llmModel, err := e.buildPhaseModel(ctx, cfg, issueID, phase, eventsPath, dryRun)
 		if err != nil {
-			return nil, false, "", "", 0, err
+			return nil, false, "", 0, err
 		}
-		return e.runSingleShot(ctx, llmModel, phase, cfg, userContent, outputPath, eventsPath, attempt, loop)
+		return e.runSingleShot(ctx, llmModel, cfg, userContent, outputPath, eventsPath, attempt, loop)
 	}
 
 	outputWritten := false
@@ -1335,67 +1259,61 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		ReadFileMaxLines: e.cfg.Tools.ReadFile.MaxLines,
 		OutputWritten:    &outputWritten,
 	}
-	if phase == "implementation" {
-		wsKey := storage.WorkspacePath(projectID, issueID)
-		bt.WorkspacePath = wsKey
-		bt.WorkspaceHostPath = storage.Abs(e.cfg.StorageRoot, wsKey)
-		// Default short paths (list ".", read "main.go") to the workspace.
-		bt.BasePath = wsKey
-		// Resolve project for test config (issue → project).
-		if issue, ierr := e.issues.Get(issueID); ierr == nil && issue != nil {
-			if project, perr := e.projects.Get(issue.ProjectID); perr == nil && project != nil {
-				tc, _ := e.projectTestConfig(project)
-				if dryRun {
-					tc.DryRun = true
-				}
-				if tc.Command != "" {
-					bt.Test = &tc
-				}
+	// Steps whose agent can edit files work on the shared issue-level
+	// workspace: short paths (list ".", read "main.go") resolve there.
+	issue, issueErr := e.issues.Get(issueID)
+	if issueErr == nil && issue != nil && cfg.HasEditingTool() {
+		if wsKey, werr := e.workspaceKey(ctx, issue); werr == nil {
+			bt.WorkspacePath = wsKey
+			bt.WorkspaceHostPath = storage.Abs(e.cfg.StorageRoot, wsKey)
+			bt.BasePath = wsKey
+		}
+	}
+	// Resolve project for test config (issue → project).
+	if issue != nil {
+		if project, perr := e.projects.Get(issue.ProjectID); perr == nil && project != nil {
+			tc, _ := e.projectTestConfig(project)
+			if dryRun {
+				tc.DryRun = true
+			}
+			if tc.Command != "" {
+				bt.Test = &tc
 			}
 		}
 	}
 
-	var registry []tool.Tool
-	var err error
-	switch phase {
-	case "research":
-		registry, err = tools.NewResearcherRegistry(bt)
-	case "plan":
-		registry, err = tools.NewPlannerRegistry(bt)
-	case "implementation":
-		registry, err = tools.NewImplementerRegistry(bt)
-	}
+	registry, err := tools.NewCoreRegistry(bt)
 	if err != nil {
-		return nil, false, "", "", 0, fmt.Errorf("build tool registry: %w", err)
+		return nil, false, "", 0, fmt.Errorf("build tool registry: %w", err)
 	}
 	registry = tools.FilterByNames(registry, cfg.Tools)
 	if e.mcp != nil && len(cfg.MCPServers) > 0 {
 		mcpTools, merr := e.mcp.ToolsForAgent(cfg.MCPServers)
 		if merr != nil {
-			return nil, false, "", "", 0, fmt.Errorf("mcp tools: %w", merr)
+			return nil, false, "", 0, fmt.Errorf("mcp tools: %w", merr)
 		}
 		registry = append(registry, mcpTools...)
 	}
 
 	llmModel, err := e.buildPhaseModel(ctx, cfg, issueID, phase, eventsPath, dryRun)
 	if err != nil {
-		return nil, false, "", "", 0, err
+		return nil, false, "", 0, err
 	}
 
-	agentInst, err := e.buildAgent(phase, cfg, llmModel, registry)
+	agentInst, err := e.buildAgent(cfg, llmModel, registry)
 	if err != nil {
-		return nil, false, "", "", 0, fmt.Errorf("build agent: %w", err)
+		return nil, false, "", 0, fmt.Errorf("build agent: %w", err)
 	}
 
 	wrapper, err := agent.New(agent.Config{
-		Name:        phaseAgentType(phase) + "-runner",
+		Name:        cfg.ID + "-runner",
 		Description: "wrapper to run a task-mode agent through the runner",
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return llmagent.RunLLMAgentAsNode(agentInst, agent.NewContext(ctx), ctx.UserContent())
 		},
 	})
 	if err != nil {
-		return nil, false, "", "", 0, fmt.Errorf("create agent wrapper: %w", err)
+		return nil, false, "", 0, fmt.Errorf("create agent wrapper: %w", err)
 	}
 
 	sessionID := fmt.Sprintf("run-%d-attempt-%d-loop-%d", runID, attempt, loop)
@@ -1406,12 +1324,11 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		AutoCreateSession: true,
 	})
 	if err != nil {
-		return nil, false, "", "", 0, fmt.Errorf("create runner: %w", err)
+		return nil, false, "", 0, fmt.Errorf("create runner: %w", err)
 	}
 
 	loopTokens := 0
 	var finishRationale string
-	var finishEffort string
 	var finishDone *bool
 	var finalText string
 
@@ -1427,9 +1344,9 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 				Error:     err.Error(),
 			})
 			if llm.IsBudgetExceeded(err) {
-				return nil, false, "", "", loopTokens, err
+				return nil, false, "", loopTokens, err
 			}
-			return nil, false, "", "", 0, fmt.Errorf("loop %d: %w", loop, err)
+			return nil, false, "", 0, fmt.Errorf("loop %d: %w", loop, err)
 		}
 		if ev == nil || ev.Content == nil {
 			continue
@@ -1480,9 +1397,6 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 							if d, ok := args["done"].(bool); ok {
 								finishDone = &d
 							}
-							if ef, ok := args["effort"].(string); ok {
-								finishEffort = NormalizeEffort(ef)
-							}
 						}
 					}
 				}
@@ -1520,62 +1434,42 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 	// If the agent did not use write_output, fall back to the final model text.
 	if !outputWritten && finalText != "" {
 		if err := e.store.Write(ctx, outputPath, []byte(finalText)); err != nil {
-			return nil, false, "", "", 0, fmt.Errorf("write fallback output: %w", err)
+			return nil, false, "", 0, fmt.Errorf("write fallback output: %w", err)
 		}
 	}
 
-	// For the implementer, the real output is the workspace; create a summary
+	// For editing agents the real output is the workspace; create a summary
 	// output.md if the agent did not write one.
-	if phase == "implementation" {
+	if cfg.HasEditingTool() {
 		if exists, _ := e.store.Exists(ctx, outputPath); !exists {
-			summary := fmt.Sprintf("Implementation complete.\n\nRationale: %s", finishRationale)
+			summary := fmt.Sprintf("%s complete.\n\nRationale: %s", cfg.ID, finishRationale)
 			if err := e.store.Write(ctx, outputPath, []byte(summary)); err != nil {
-				return nil, false, "", "", 0, fmt.Errorf("write implementation summary: %w", err)
+				return nil, false, "", 0, fmt.Errorf("write workspace summary: %w", err)
 			}
 		}
 	}
 
 	output, _ := e.store.Read(ctx, outputPath)
-	if phase != "implementation" && !outputWritten && finalText == "" && len(output) == 0 {
-		return nil, false, "", "", 0, fmt.Errorf("loop %d produced empty output", loop)
+	if !cfg.HasEditingTool() && !outputWritten && finalText == "" && len(output) == 0 {
+		return nil, false, "", 0, fmt.Errorf("loop %d produced empty output", loop)
 	}
 
 	if finishDone == nil {
-		return nil, false, "", "", 0, fmt.Errorf("loop %d did not call finish_task", loop)
+		return nil, false, "", 0, fmt.Errorf("loop %d did not call finish_task", loop)
 	}
 
-	return output, *finishDone, finishRationale, finishEffort, loopTokens, nil
+	return output, *finishDone, finishRationale, loopTokens, nil
 }
 
-// buildAgent constructs the ADK agent for a phase.
-func (e *Engine) buildAgent(phase string, cfg config.AgentConfig, llmModel adkmodel.LLM, tools []tool.Tool) (agent.Agent, error) {
-	switch phase {
-	case "research":
-		a := agents.NewResearcher()
-		if cfg.SystemPrompt != "" {
-			a.SystemPrompt = cfg.SystemPrompt
-		}
-		return a.Build(llmModel, tools)
-	case "plan":
-		a := agents.NewPlanner()
-		if cfg.SystemPrompt != "" {
-			a.SystemPrompt = cfg.SystemPrompt
-		}
-		return a.Build(llmModel, tools)
-	case "implementation":
-		a := agents.NewImplementer()
-		if cfg.SystemPrompt != "" {
-			a.SystemPrompt = cfg.SystemPrompt
-		}
-		return a.Build(llmModel, tools)
-	default:
-		return nil, fmt.Errorf("unknown phase: %s", phase)
-	}
+// buildAgent constructs the ADK agent for one step of the issue flow.
+func (e *Engine) buildAgent(cfg config.AgentConfig, llmModel adkmodel.LLM, tools []tool.Tool) (agent.Agent, error) {
+	return agents.NewTask(cfg.ID, cfg.SystemPrompt).Build(llmModel, tools)
 }
 
-// buildTask constructs the task.json content for a phase.
-func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, attempt int, outputPath string, dryRun bool) (PhaseTask, error) {
-	agentType := phaseAgentType(phase)
+// buildTask constructs the task.json content for a step. prevKey is the key
+// of the preceding step ("" for the first); its accepted output is listed in
+// input_context_paths.
+func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase string, cfg config.AgentConfig, flow []string, prevKey string, attempt int, outputPath string, dryRun bool) (PhaseTask, error) {
 	model := map[string]string{
 		"provider": cfg.Model.Provider,
 		"model":    cfg.Model.Model,
@@ -1585,13 +1479,9 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 		model["model"] = "dryrun"
 	}
 
-	var toolList []tool.Tool
-	bt := &tools.BoundTools{}
-	switch phase {
-	case "research", "plan":
-		toolList, _ = tools.NewResearcherRegistry(bt)
-	case "implementation":
-		toolList, _ = tools.NewImplementerRegistry(bt)
+	toolList, err := tools.NewCoreRegistry(&tools.BoundTools{})
+	if err != nil {
+		return PhaseTask{}, err
 	}
 	toolList = tools.FilterByNames(toolList, cfg.Tools)
 	toolSchemas, err := schemasFromTools(toolList)
@@ -1603,7 +1493,7 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 		storage.IssueDir(projectID, issueID),
 		storage.SourcePath(projectID, issueID),
 	}
-	if phase == "implementation" {
+	if cfg.HasEditingTool() {
 		allowlist = append(allowlist, storage.WorkspacePath(projectID, issueID))
 	}
 
@@ -1613,18 +1503,17 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 			inputPaths = append(inputPaths, storage.AttachmentPath(projectID, issueID, name))
 		}
 	}
-	if phase != "research" {
-		prev := previousPhase(phase)
-		if prev != "" {
-			res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issueID, prev))
-			if err == nil && res.LatestOutput != "" {
-				inputPaths = append(inputPaths, res.LatestOutput)
-			}
+	if prevKey != "" {
+		res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issueID, prevKey))
+		if err == nil && res.LatestOutput != "" {
+			inputPaths = append(inputPaths, res.LatestOutput)
 		}
 	}
 
 	return PhaseTask{
-		AgentType:         agentType,
+		AgentType:         cfg.ID,
+		StepKey:           phase,
+		Flow:              flow,
 		SystemPrompt:      cfg.SystemPrompt,
 		Model:             model,
 		Adjudicator:       cfg.Adjudicator,
@@ -1637,16 +1526,15 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 }
 
 // buildBaseInput composes the issue (title, description, attachment paths)
-// plus the previous accepted phase output.
-func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, phase, issueTitle, description string) (string, error) {
+// plus the preceding step's accepted output (prevKey "" for the first step).
+func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, phase, prevKey, issueTitle, description string) (string, error) {
 	// Prefer SQLite description; fall back to empty if unset (legacy issues).
 	names, _ := e.listAttachmentNames(ctx, projectID, issueID)
 	input := buildIssueUserInput(issueTitle, description, names)
-	prev := previousPhase(phase)
-	if prev == "" {
+	if prevKey == "" {
 		return input, nil
 	}
-	res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issueID, prev))
+	res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issueID, prevKey))
 	if err != nil {
 		return input, nil
 	}
@@ -1657,14 +1545,15 @@ func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, p
 	if err != nil || len(data) == 0 {
 		return input, nil
 	}
-	input += fmt.Sprintf("\n\nAccepted %s output:\n%s", prev, string(data))
+	input += fmt.Sprintf("\n\nAccepted %s output:\n%s", prevKey, string(data))
 	return input, nil
 }
 
 // pathGuide tells the agent how tool paths work for this issue. Without it,
 // models guess names like "attempts" or "." against the storage root and
-// loop on "path not allowed".
-func pathGuide(projectID, issueID int64, phase string, allowlist []string) string {
+// loop on "path not allowed". hasWorkspace marks steps whose agent can edit
+// files: they default to the issue workspace as their base.
+func pathGuide(projectID, issueID int64, phase string, hasWorkspace bool, allowlist []string) string {
 	issueDir := storage.IssueDir(projectID, issueID)
 	source := storage.SourcePath(projectID, issueID)
 	var b strings.Builder
@@ -1672,10 +1561,10 @@ func pathGuide(projectID, issueID int64, phase string, allowlist []string) strin
 	b.WriteString("Tool paths are relative to the issue directory (short names like `source`), ")
 	b.WriteString("or full storage keys under the allowlist. Path traversal (`..`) is rejected.\n")
 	b.WriteString(fmt.Sprintf("- Issue root (`list_directory` with path omitted or `.`): `%s`\n", issueDir))
-	b.WriteString(fmt.Sprintf("- Source snapshot (start research/plan here): `%s` or `source`\n", source))
-	if phase == "implementation" {
+	b.WriteString(fmt.Sprintf("- Source snapshot (read-only, start here): `%s` or `source`\n", source))
+	if hasWorkspace {
 		ws := storage.WorkspacePath(projectID, issueID)
-		b.WriteString(fmt.Sprintf("- Workspace (default base for implementer; edit here): `%s`\n", ws))
+		b.WriteString(fmt.Sprintf("- Workspace (default base; edit here): `%s`\n", ws))
 	}
 	b.WriteString("- Allowlist prefixes:\n")
 	for _, a := range allowlist {
@@ -1750,30 +1639,29 @@ func (e *Engine) adminEmails() []string {
 	return out
 }
 
-// CurrentPhaseState returns the current phase and its status from the filesystem.
-func (e *Engine) CurrentPhaseState(projectID, issueID int64) (string, string, error) {
-	return e.currentPhaseState(projectID, issueID)
+// CurrentStepState returns the current step of the issue flow and its status
+// from the filesystem. steps come from the issue's pipeline_json.
+func (e *Engine) CurrentStepState(projectID, issueID int64, steps []sqlite.Step) (string, string, error) {
+	return e.currentStepState(projectID, issueID, steps)
 }
 
-// currentPhaseState returns the current phase and its status from the filesystem.
-func (e *Engine) currentPhaseState(projectID, issueID int64) (string, string, error) {
-	phases := []string{"research", "plan", "implementation"}
-	for _, phase := range phases {
-		result, err := readResult(context.Background(), e.store, storage.ResultPath(projectID, issueID, phase))
+func (e *Engine) currentStepState(projectID, issueID int64, steps []sqlite.Step) (string, string, error) {
+	for _, step := range steps {
+		result, err := readResult(context.Background(), e.store, storage.ResultPath(projectID, issueID, step.Key))
 		if err != nil {
-			// No result.json yet means this phase hasn't run.
-			return phase, "in_progress", nil
+			// No result.json yet means this step hasn't run.
+			return step.Key, "in_progress", nil
 		}
 		switch result.Status {
 		case "done":
 			continue
 		case "":
-			return phase, "in_progress", nil
+			return step.Key, "in_progress", nil
 		default:
-			return phase, result.Status, nil
+			return step.Key, result.Status, nil
 		}
 	}
-	return "implementation", "done", nil
+	return steps[len(steps)-1].Key, "done", nil
 }
 
 // prepareIssueSource sets up the issue's source/ tree: git worktree when
@@ -1813,18 +1701,27 @@ func (e *Engine) prepareGitSource(ctx context.Context, projectID, issueID int64,
 	return mgr.CreateSourceWorktree(ctx, projectID, abs, cfg)
 }
 
-// prepareImplementerWorkspace creates a git worktree branch or seeds from snapshot.
-func (e *Engine) prepareImplementerWorkspace(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, run *sqlite.Run) error {
+// prepareIssueWorkspaceOnce creates the issue-level mutable workspace: a git
+// worktree on the per-issue branch when the project is git-backed, otherwise a
+// seeded copy of the source snapshot. It runs once per issue — the first step
+// whose agent has editing tools — and later steps reuse what is already
+// there (a prepared workspace is never re-seeded or re-created).
+func (e *Engine) prepareIssueWorkspaceOnce(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue) error {
 	gitCfg, err := e.projectGitConfig(project)
 	if err != nil {
 		return err
 	}
 	wsKey := storage.WorkspacePath(project.ID, issue.ID)
 	if gitCfg.Enabled() {
-		mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
-		branch := gorchgit.BranchName(issue.ID, run.ID)
 		abs := storage.Abs(e.cfg.StorageRoot, wsKey)
-		// Lock only the git mutations so the DB write runs unlocked.
+		// A worktree is already checked out at this path when a previous step
+		// prepared it.
+		if dirNonEmpty(abs) {
+			return nil
+		}
+		mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
+		branch := gorchgit.IssueBranchName(issue.ID)
+		// Lock only the git mutations.
 		lock := gitWorkspaceLocks.lock(project.ID)
 		lock.Lock()
 		if err := mgr.EnsureCache(ctx, project.ID, gitCfg); err != nil {
@@ -1836,17 +1733,26 @@ func (e *Engine) prepareImplementerWorkspace(ctx context.Context, project *sqlit
 			return err
 		}
 		lock.Unlock()
-		return e.runs.SetWorkspace(run.ID, wsKey, branch)
+		return nil
 	}
-	sourceSnapshotPath := storage.SourcePath(project.ID, issue.ID)
-	if err := e.seedWorkspace(ctx, project.ID, issue.ID, sourceSnapshotPath); err != nil {
-		return err
+	// No git: seed once from the frozen source snapshot. A non-empty workspace
+	// is left alone (idempotency across steps and retries).
+	if dirNonEmpty(storage.Abs(e.cfg.StorageRoot, wsKey)) {
+		return nil
 	}
-	return e.runs.SetWorkspace(run.ID, wsKey, "")
+	return e.seedWorkspace(ctx, project.ID, issue.ID, storage.SourcePath(project.ID, issue.ID))
 }
 
-// commitImplementerWorkspace stages and commits (and optionally pushes/PRs).
-func (e *Engine) commitImplementerWorkspace(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, run *sqlite.Run) error {
+// dirNonEmpty reports whether the directory exists and has at least one entry.
+func dirNonEmpty(abs string) bool {
+	dirs, err := os.ReadDir(abs)
+	return err == nil && len(dirs) > 0
+}
+
+// commitIssueWorkspace commits the issue workspace after a step the human
+// accepted, so each accepted step lands in git history in order. No-op when
+// nothing changed or the project is not git-backed.
+func (e *Engine) commitIssueWorkspace(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, stepKey string) error {
 	gitCfg, err := e.projectGitConfig(project)
 	if err != nil {
 		return err
@@ -1857,7 +1763,7 @@ func (e *Engine) commitImplementerWorkspace(ctx context.Context, project *sqlite
 	wsKey := storage.WorkspacePath(project.ID, issue.ID)
 	abs := storage.Abs(e.cfg.StorageRoot, wsKey)
 	mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
-	msg := gorchgit.CommitMessage(issue.Title, issue.ID, run.ID)
+	msg := gorchgit.CommitMessage(issue.Title, issue.ID, stepKey)
 	created, err := mgr.CommitAll(ctx, abs, msg, gitCfg.AuthorName, gitCfg.AuthorEmail)
 	if err != nil {
 		return err
@@ -1865,17 +1771,14 @@ func (e *Engine) commitImplementerWorkspace(ctx context.Context, project *sqlite
 	if !created {
 		return nil
 	}
-	branch := run.BranchName
-	if branch == "" {
-		branch = gorchgit.BranchName(issue.ID, run.ID)
-	}
+	branch := gorchgit.IssueBranchName(issue.ID)
 	if gitCfg.Push {
 		if err := mgr.Push(ctx, abs, branch); err != nil {
 			return err
 		}
 	}
 	if gitCfg.CreatePR {
-		body := fmt.Sprintf("Automated PR for issue #%d (run %d).", issue.ID, run.ID)
+		body := fmt.Sprintf("Automated PR for issue #%d (%s).", issue.ID, stepKey)
 		if err := mgr.CreatePR(ctx, abs, gitCfg.BaseBranch, issue.Title, body); err != nil {
 			return err
 		}
@@ -2132,29 +2035,6 @@ func listRecursive(ctx context.Context, store storage.Port, key string) ([]strin
 	return out, nil
 }
 
-// phaseAgentType maps a phase name to its agent type.
-func indexOf(sl []string, s string) int {
-	for i, v := range sl {
-		if v == s {
-			return i
-		}
-	}
-	return -1
-}
-
-func phaseAgentType(phase string) string {
-	switch phase {
-	case "research":
-		return "researcher"
-	case "plan":
-		return "planner"
-	case "implementation":
-		return "implementer"
-	default:
-		return phase
-	}
-}
-
 // mapPhaseResultToIssueStatus converts a phase result.json status into an
 // issue-row status. Phase "done" must not mark the issue done — the pipeline
 // may still have plan/implementation left. Only runPipeline's final UpdateStatus
@@ -2174,30 +2054,6 @@ func mapPhaseResultToIssueStatus(phaseResult string) string {
 			return sqlite.StatusInProgress
 		}
 		return phaseResult
-	}
-}
-
-// previousPhase returns the phase that feeds into the given phase.
-func previousPhase(phase string) string {
-	switch phase {
-	case "plan":
-		return "research"
-	case "implementation":
-		return "plan"
-	default:
-		return ""
-	}
-}
-
-// nextPhaseName returns the following pipeline phase, or "" after implementation.
-func nextPhaseName(phase string) string {
-	switch phase {
-	case "research":
-		return "plan"
-	case "plan":
-		return "implementation"
-	default:
-		return ""
 	}
 }
 

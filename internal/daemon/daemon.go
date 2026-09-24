@@ -227,7 +227,10 @@ func (d *Daemon) worker(ctx context.Context, id int) {
 				if issue != nil && issue.Status == sqlite.StatusInProgress {
 					// Abrupt cancel: leave in_progress for recovery, or mark cancelled
 					// if the pipeline already wrote cancelled to FS.
-					phase, fsStatus, _ := d.eng.CurrentPhaseState(issue.ProjectID, issue.ID)
+					phase, fsStatus := "", ""
+					if steps, serr := d.eng.StepsForIssue(issue); serr == nil && len(steps) > 0 {
+						phase, fsStatus, _ = d.eng.CurrentStepState(issue.ProjectID, issue.ID, steps)
+					}
 					if fsStatus == "cancelled" {
 						_ = d.eng.Issues().UpdateStatus(issue.ID, sqlite.StatusCancelled, phase)
 					}

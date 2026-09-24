@@ -25,7 +25,7 @@ type WriteFileResult struct {
 func newWriteFileTool(bt *BoundTools) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "write_file",
-		Description: "Write a file within the implementer's workspace.",
+		Description: "Write a file within the issue workspace.",
 	}, func(ctx agent.Context, args WriteFileArgs) (WriteFileResult, error) {
 		return writeFile(ctx, bt, args)
 	})

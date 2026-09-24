@@ -83,7 +83,7 @@ func TestManager_WorktreeLifecycle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ws, "feature.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	msg := CommitMessage("add feature", 1, 42)
+	msg := CommitMessage("add feature", 1, "step-3")
 	created, err := m.CommitAll(ctx, ws, msg, "", "")
 	if err != nil {
 		t.Fatalf("CommitAll: %v", err)
@@ -137,7 +137,7 @@ func TestEnsureCacheFetchWithPushedImplementerBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ws, "feature.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CommitAll(ctx, ws, CommitMessage("add feature", 1, 42), "", ""); err != nil {
+	if _, err := m.CommitAll(ctx, ws, CommitMessage("add feature", 1, "step-3"), "", ""); err != nil {
 		t.Fatalf("CommitAll: %v", err)
 	}
 	if err := m.Push(ctx, ws, branch); err != nil {
@@ -183,8 +183,8 @@ func TestBranchNameAndMessage(t *testing.T) {
 	if got := BranchName(3, 9); got != "ai-implementer/3-9" {
 		t.Fatalf("BranchName: %q", got)
 	}
-	msg := CommitMessage("fix auth", 3, 9)
-	if !strings.Contains(msg, "Issue: #3") || !strings.Contains(msg, "Run: 9") {
+	msg := CommitMessage("fix auth", 3, "step-2")
+	if !strings.Contains(msg, "Issue: #3") || !strings.Contains(msg, "Step: step-2") {
 		t.Fatalf("message: %q", msg)
 	}
 }

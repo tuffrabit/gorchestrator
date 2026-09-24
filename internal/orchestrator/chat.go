@@ -286,12 +286,10 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		fail(err)
 		return
 	}
-	cfg := eng.cfg.Agent(thread.AgentType)
-	if overlay, ok, oerr := pc.FlavorOverlay(thread.AgentType, thread.Flavor); oerr != nil {
-		fail(oerr)
+	cfg, aerr := eng.cfg.AgentMust(thread.AgentType)
+	if aerr != nil {
+		fail(aerr)
 		return
-	} else if ok {
-		cfg = config.MergeAgent(cfg, overlay)
 	}
 
 	release, err := s.acquireChatModel(ctx, thread, cfg, stage)

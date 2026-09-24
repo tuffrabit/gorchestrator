@@ -7,6 +7,9 @@ import (
 	"testing"
 )
 
+// testFlowJSON is a valid frozen agent flow used by sqlite tests.
+const testFlowJSON = `["researcher","planner","implementer"]`
+
 func depsTestRepo(t *testing.T) (*IssueRepo, *ProjectRepo) {
 	t.Helper()
 	db, err := Open(filepath.Join(t.TempDir(), "t.db"))
@@ -24,15 +27,15 @@ func TestClaimQueued_SkipsBlockedClaimsEligible(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blocker, err := issues.Create(p.ID, "blocker") // in_progress
+	blocker, err := issues.Create(p.ID, "blocker", "step-1", testFlowJSON) // in_progress
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, err := issues.CreateQueuedFrom(p.ID, "dependent", false, "manual", "", "{}", fmt.Sprintf("[%d]", blocker.ID))
+	blocked, err := issues.CreateQueuedFrom(p.ID, "dependent", "step-1", testFlowJSON, "{}", fmt.Sprintf("[%d]", blocker.ID), false, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	free, err := issues.CreateQueued(p.ID, "free", false)
+	free, err := issues.CreateQueued(p.ID, "free", "step-1", testFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,11 +65,11 @@ func TestClaimQueued_ClaimsAfterDependencyDone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blocker, err := issues.Create(p.ID, "blocker") // in_progress
+	blocker, err := issues.Create(p.ID, "blocker", "step-1", testFlowJSON) // in_progress
 	if err != nil {
 		t.Fatal(err)
 	}
-	dependent, err := issues.CreateQueuedFrom(p.ID, "dependent", false, "manual", "", "{}", fmt.Sprintf("[%d]", blocker.ID))
+	dependent, err := issues.CreateQueuedFrom(p.ID, "dependent", "step-1", testFlowJSON, "{}", fmt.Sprintf("[%d]", blocker.ID), false, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,19 +101,19 @@ func TestClaimQueued_FIFOPreservedAmongEligible(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := issues.CreateQueued(p.ID, "first", false)
+	first, err := issues.CreateQueued(p.ID, "first", "step-1", testFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocker, err := issues.Create(p.ID, "blocker") // in_progress
+	blocker, err := issues.Create(p.ID, "blocker", "step-1", testFlowJSON) // in_progress
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked, err := issues.CreateQueuedFrom(p.ID, "blocked", false, "manual", "", "{}", fmt.Sprintf("[%d]", blocker.ID))
+	blocked, err := issues.CreateQueuedFrom(p.ID, "blocked", "step-1", testFlowJSON, "{}", fmt.Sprintf("[%d]", blocker.ID), false, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := issues.CreateQueued(p.ID, "third", false)
+	third, err := issues.CreateQueued(p.ID, "third", "step-1", testFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,14 +156,14 @@ func TestClaimQueued_FailedDependencyStaysBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blocker, err := issues.CreateQueued(p.ID, "blocker", false)
+	blocker, err := issues.CreateQueued(p.ID, "blocker", "step-1", testFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := issues.UpdateStatus(blocker.ID, StatusFailed, "research"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := issues.CreateQueuedFrom(p.ID, "dependent", false, "manual", "", "{}", fmt.Sprintf("[%d]", blocker.ID)); err != nil {
+	if _, err := issues.CreateQueuedFrom(p.ID, "dependent", "step-1", testFlowJSON, "{}", fmt.Sprintf("[%d]", blocker.ID), false, "manual", ""); err != nil {
 		t.Fatal(err)
 	}
 

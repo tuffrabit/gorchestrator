@@ -32,10 +32,10 @@ type DecideOptions struct {
 
 // PhaseStep is one step in the research → plan → implementation strip.
 type PhaseStep struct {
-	Name   string // research | plan | implementation
-	Agent  string // researcher | planner | implementer
+	Name   string // step key ("step-1", "step-2", …)
+	Agent  string // agent ID for this step
 	State  string // pending | current | done | failed | waiting
-	Status string // raw phase result.json status (may be empty)
+	Status string // raw step result.json status (may be empty)
 }
 
 // IssueView is a read model for API/dashboard consumers.
@@ -66,7 +66,8 @@ type IssueView struct {
 // SubmitIssue creates the issue (snapshot source if configured), sets status
 // queued, and returns immediately. Daemon workers pick it up.
 // Project must be declared in YAML (cfg.Projects); unknown names hard-fail.
-// Pathological scope is held as waiting_human on research before any agent run.
+// Pathological scope is held as waiting_human on the first step before any
+// agent run.
 func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issue, error) {
 	if opts.IssueTitle == "" {
 		return nil, fmt.Errorf("issue title is required")
@@ -77,7 +78,11 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 		return nil, err
 	}
 
-	castJSON, err := e.resolveAndMarshalCast(project.Name, opts.AgentFlavors)
+	flow, err := e.resolveFlow(project.Name, opts.Flow)
+	if err != nil {
+		return nil, err
+	}
+	pipelineJSON, err := marshalFlowJSON(flow)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +95,7 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 	if err != nil {
 		return nil, err
 	}
-	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, opts.DryRun, source, opts.ExternalID, castJSON, dependsOnJSON)
+	issue, err := e.issues.CreateQueuedFrom(project.ID, opts.IssueTitle, "step-1", pipelineJSON, "{}", dependsOnJSON, opts.DryRun, source, opts.ExternalID)
 	if err != nil {
 		return nil, fmt.Errorf("create issue: %w", err)
 	}
@@ -149,7 +154,11 @@ func (e *Engine) Decide(ctx context.Context, opts DecideOptions) error {
 	if phase == "" {
 		phase = issue.CurrentPhase
 	}
-	fsPhase, fsStatus, err := e.currentPhaseState(project.ID, issue.ID)
+	steps, err := e.stepsForIssue(issue)
+	if err != nil {
+		return err
+	}
+	fsPhase, fsStatus, err := e.currentStepState(project.ID, issue.ID, steps)
 	if err != nil {
 		return err
 	}
@@ -284,20 +293,11 @@ func (e *Engine) applyHumanDecisionWithBy(ctx context.Context, project *sqlite.P
 
 	switch decision {
 	case adjudication.Pass:
-		// Scope hold: research never ran. Clearing result.json lets the pipeline
-		// start research (currentPhaseState → research/in_progress). Marking
-		// research "done" would skip it — forbidden.
-		if phase == "research" && IsScopeHoldError(result.Error) {
+		// Scope hold: the first step never ran. Clearing result.json lets the
+		// pipeline start it. Marking it "done" would skip it — forbidden.
+		if IsScopeHoldError(result.Error) {
 			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
 				return fmt.Errorf("clear scope hold result: %w", err)
-			}
-			return nil
-		}
-		// Effort hold: plan is already done; clear implementation hold marker so
-		// implementer can start.
-		if phase == "implementation" && IsEffortHoldError(result.Error) {
-			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
-				return fmt.Errorf("clear effort hold result: %w", err)
 			}
 			return nil
 		}
@@ -312,21 +312,10 @@ func (e *Engine) applyHumanDecisionWithBy(ctx context.Context, project *sqlite.P
 		result.Timestamp = nowRFC3339()
 		return writeResult(ctx, e.store, resultPath, result)
 	case adjudication.Retry:
-		// Scope hold retry: clear hold and re-queue research with feedback.
-		if phase == "research" && IsScopeHoldError(result.Error) {
+		// Scope hold retry: clear hold and re-queue the first step with feedback.
+		if IsScopeHoldError(result.Error) {
 			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
 				return fmt.Errorf("clear scope hold result: %w", err)
-			}
-			if strings.TrimSpace(feedback) != "" {
-				fbPath := storage.FeedbackPath(project.ID, issue.ID, phase, 1)
-				_ = e.store.Write(ctx, fbPath, []byte(feedback))
-			}
-			return nil
-		}
-		// Effort hold retry: clear hold and run implementer with feedback.
-		if phase == "implementation" && IsEffortHoldError(result.Error) {
-			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
-				return fmt.Errorf("clear effort hold result: %w", err)
 			}
 			if strings.TrimSpace(feedback) != "" {
 				fbPath := storage.FeedbackPath(project.ID, issue.ID, phase, 1)
@@ -415,7 +404,11 @@ func (e *Engine) recoverIssue(ctx context.Context, issue *sqlite.Issue) error {
 		return fmt.Errorf("project %d not found", issue.ProjectID)
 	}
 
-	phase, fsStatus, err := e.currentPhaseState(project.ID, issue.ID)
+	steps, err := e.stepsForIssue(issue)
+	if err != nil {
+		return err
+	}
+	phase, fsStatus, err := e.currentStepState(project.ID, issue.ID, steps)
 	if err != nil {
 		return err
 	}
@@ -431,11 +424,11 @@ func (e *Engine) recoverIssue(ctx context.Context, issue *sqlite.Issue) error {
 	// Terminal filesystem states: reconcile SQLite.
 	switch fsStatus {
 	case "done":
-		if phase == "implementation" {
+		if nextStepKey(steps, phase) == "" {
 			_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusDone, phase)
 			return nil
 		}
-		// Intermediate phase done but pipeline not finished → re-queue.
+		// Intermediate step done but flow not finished → re-queue.
 		_ = e.issues.UpdateStatus(issue.ID, sqlite.StatusQueued, phase)
 		return nil
 	case "failed", "cancelled":
@@ -557,8 +550,12 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 	attempt := 0
 	var phases []PhaseStep
 	if project != nil {
-		phase, status, err := e.currentPhaseState(project.ID, issue.ID)
-		if err == nil {
+		steps, serr := e.stepsForIssue(issue)
+		phase, status := "", ""
+		if serr == nil {
+			phase, status, _ = e.currentStepState(project.ID, issue.ID, steps)
+		}
+		if status != "" {
 			phaseStatus = status
 			_ = phase
 			res, err := readResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, issue.CurrentPhase))
@@ -621,21 +618,24 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 	}, nil
 }
 
-// buildPhaseSteps derives the dashboard phase strip from issue state + each
-// phase's result.json. Completed phases show as done; the issue's current_phase
-// shows as current while the issue is still active.
+// buildPhaseSteps derives the dashboard step strip from the issue's flow +
+// each step's result.json. Completed steps show as done; the issue's
+// current_phase shows as current while the issue is still active.
 func (e *Engine) buildPhaseSteps(ctx context.Context, projectID int64, issue *sqlite.Issue) []PhaseStep {
-	names := []string{"research", "plan", "implementation"}
-	steps := make([]PhaseStep, 0, len(names))
-	curIdx := indexOf(names, issue.CurrentPhase)
+	steps, err := e.stepsForIssue(issue)
+	if err != nil {
+		return nil
+	}
+	out := make([]PhaseStep, 0, len(steps))
+	curIdx := stepIndex(steps, issue.CurrentPhase)
 
-	for i, name := range names {
+	for i, s := range steps {
 		step := PhaseStep{
-			Name:  name,
-			Agent: phaseAgentType(name),
+			Name:  s.Key,
+			Agent: s.AgentID,
 			State: "pending",
 		}
-		if res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issue.ID, name)); err == nil {
+		if res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issue.ID, s.Key)); err == nil {
 			step.Status = res.Status
 		}
 
@@ -646,9 +646,9 @@ func (e *Engine) buildPhaseSteps(ctx context.Context, projectID int64, issue *sq
 			step.State = "done"
 		case step.Status == "failed" || step.Status == "cancelled":
 			step.State = "failed"
-		case step.Status == "waiting_human" || (issue.Status == sqlite.StatusWaitingHuman && name == issue.CurrentPhase):
+		case step.Status == "waiting_human" || (issue.Status == sqlite.StatusWaitingHuman && s.Key == issue.CurrentPhase):
 			step.State = "waiting"
-		case name == issue.CurrentPhase && issue.Status != sqlite.StatusFailed && issue.Status != sqlite.StatusCancelled:
+		case s.Key == issue.CurrentPhase && issue.Status != sqlite.StatusFailed && issue.Status != sqlite.StatusCancelled:
 			// Active issue on this phase (running, queued mid-pipeline, or retrying).
 			if step.Status == "done" {
 				step.State = "done"
@@ -665,9 +665,9 @@ func (e *Engine) buildPhaseSteps(ctx context.Context, projectID int64, issue *sq
 		default:
 			step.State = "pending"
 		}
-		steps = append(steps, step)
+		out = append(out, step)
 	}
-	return steps
+	return out
 }
 
 // ArtifactPath resolves a relative artifact path under an issue directory.
@@ -816,10 +816,18 @@ func (e *Engine) maybeHoldForScope(ctx context.Context, project *sqlite.Project,
 		return nil
 	}
 
+	// The hold is written on the issue's first step: the pipeline never ran,
+	// so step-1 (legacy issues: research) is where it will resume.
+	steps, serr := e.stepsForIssue(issue)
+	if serr != nil || len(steps) == 0 {
+		return fmt.Errorf("resolve issue flow: %w", serr)
+	}
+	firstKey := steps[0].Key
+
 	summary := hit.Summary()
 	log.Printf("scope hold: issue %d project %s: %s", issue.ID, project.Name, summary)
 
-	resultPath := storage.ResultPath(project.ID, issue.ID, "research")
+	resultPath := storage.ResultPath(project.ID, issue.ID, firstKey)
 	if err := writeResult(ctx, e.store, resultPath, PhaseResult{
 		Status:    "waiting_human",
 		Error:     summary,
@@ -829,11 +837,11 @@ func (e *Engine) maybeHoldForScope(ctx context.Context, project *sqlite.Project,
 		return fmt.Errorf("write scope hold result: %w", err)
 	}
 
-	if _, err := e.decisions.CreateWithFeedback(issue.ID, "research", summary); err != nil {
+	if _, err := e.decisions.CreateWithFeedback(issue.ID, firstKey, summary); err != nil {
 		log.Printf("scope hold: record pending decision: %v", err)
 	}
 
-	if err := e.issues.UpdateStatus(issue.ID, sqlite.StatusWaitingHuman, "research"); err != nil {
+	if err := e.issues.UpdateStatus(issue.ID, sqlite.StatusWaitingHuman, firstKey); err != nil {
 		return fmt.Errorf("set scope hold status: %w", err)
 	}
 
@@ -841,7 +849,7 @@ func (e *Engine) maybeHoldForScope(ctx context.Context, project *sqlite.Project,
 		Type:      EventDecisionRequested,
 		IssueID:   issue.ID,
 		ProjectID: project.ID,
-		Phase:     "research",
+		Phase:     firstKey,
 		Status:    sqlite.StatusWaitingHuman,
 		Message:   summary,
 		Data: map[string]any{
@@ -850,67 +858,6 @@ func (e *Engine) maybeHoldForScope(ctx context.Context, project *sqlite.Project,
 		},
 	})
 
-	notify.NotifyHumanGate(ctx, e.notifier, issue.ID, "research", project.Name, issue.Title, e.adminEmails())
+	notify.NotifyHumanGate(ctx, e.notifier, issue.ID, firstKey, project.Name, issue.Title, e.adminEmails())
 	return nil
-}
-
-// maybeHoldForEffort inserts a human gate before implementation when planner
-// effort meets or exceeds projects.<name>.guardrails.effort_gate_min.
-// Plan phase remains done; hold is written as implementation waiting_human.
-// Returns held=true when the pipeline should stop for a human decision.
-func (e *Engine) maybeHoldForEffort(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, planResult *PhaseResult) (bool, error) {
-	if planResult == nil {
-		return false, nil
-	}
-	pc, err := e.typedProjectConfig(project)
-	if err != nil {
-		return false, err
-	}
-	min := EffortGateMin(pc)
-	effort := EffectiveEffort(planResult.Effort)
-	// Persist normalized effort on plan result when missing/invalid (treated as high).
-	if NormalizeEffort(planResult.Effort) == "" {
-		planResult.Effort = effort
-		_ = writeResult(ctx, e.store, storage.ResultPath(project.ID, issue.ID, "plan"), *planResult)
-	}
-	if !EffortRequiresGate(effort, min) {
-		return false, nil
-	}
-
-	summary := fmt.Sprintf("effort: %s (gate_min=%s)", effort, min)
-	log.Printf("effort hold: issue %d project %s: %s", issue.ID, project.Name, summary)
-
-	resultPath := storage.ResultPath(project.ID, issue.ID, "implementation")
-	if err := writeResult(ctx, e.store, resultPath, PhaseResult{
-		Status:    "waiting_human",
-		Error:     summary,
-		Attempt:   0,
-		Timestamp: nowRFC3339(),
-	}); err != nil {
-		return false, fmt.Errorf("write effort hold result: %w", err)
-	}
-
-	if _, err := e.decisions.CreateWithFeedback(issue.ID, "implementation", summary); err != nil {
-		log.Printf("effort hold: record pending decision: %v", err)
-	}
-
-	if err := e.issues.UpdateStatus(issue.ID, sqlite.StatusWaitingHuman, "implementation"); err != nil {
-		return false, fmt.Errorf("set effort hold status: %w", err)
-	}
-
-	e.Publish(Event{
-		Type:      EventDecisionRequested,
-		IssueID:   issue.ID,
-		ProjectID: project.ID,
-		Phase:     "implementation",
-		Status:    sqlite.StatusWaitingHuman,
-		Message:   summary,
-		Data: map[string]any{
-			"hold":   "effort",
-			"effort": effort,
-			"min":    min,
-		},
-	})
-	notify.NotifyHumanGate(ctx, e.notifier, issue.ID, "implementation", project.Name, issue.Title, e.adminEmails())
-	return true, nil
 }

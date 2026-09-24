@@ -48,7 +48,7 @@ func TestBreaker_DecideOnTrippedIssueClears(t *testing.T) {
 
 	eng, project, issue := newManualEngine(t, cfg)
 
-	other, err := eng.issues.CreateQueued(project.ID, "unrelated queued issue", true)
+	other, err := eng.issues.CreateQueued(project.ID, "unrelated queued issue", "step-1", defaultTestFlowJSON, true)
 	if err != nil {
 		t.Fatalf("create queued issue: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestBreaker_DecideOnTrippedIssueClears(t *testing.T) {
 
 	// A retry decision on the tripped issue clears the breaker; claiming
 	// resumes and the retried issue is claimable again.
-	if err := eng.issues.UpdateStatus(issue.ID, sqlite.StatusFailed, "research"); err != nil {
+	if err := eng.issues.UpdateStatus(issue.ID, sqlite.StatusFailed, "step-1"); err != nil {
 		t.Fatalf("mark tripped issue failed: %v", err)
 	}
 	if err := eng.Decide(ctx, DecideOptions{

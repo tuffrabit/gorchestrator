@@ -23,7 +23,7 @@ func TestIssueRepo_DeleteCascade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issue, err := issues.CreateQueued(p.ID, "delete me", false)
+	issue, err := issues.CreateQueued(p.ID, "delete me", "step-1", testFlowJSON, false)
 	if err != nil {
 		t.Fatal(err)
 	}

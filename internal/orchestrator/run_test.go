@@ -35,29 +35,45 @@ func testConfig(tmp string) *config.Config {
 		},
 		Agents: map[string]config.AgentConfig{
 			"researcher": {
-				Adjudicator: "self",
-				MaxAttempts: 1,
-				Loops:       1,
+				SystemPrompt: "Research the issue and report findings.",
+				Adjudicator:  "self",
+				MaxAttempts:  1,
+				Loops:        1,
 			},
 			"planner": {
-				Adjudicator: "self",
-				MaxAttempts: 1,
-				Loops:       1,
+				SystemPrompt: "Plan the work as a checklist.",
+				Adjudicator:  "self",
+				MaxAttempts:  1,
+				Loops:        1,
 			},
 			"implementer": {
-				Adjudicator: "self",
-				MaxAttempts: 1,
-				Loops:       1,
+				SystemPrompt: "Implement the plan in the workspace.",
+				Adjudicator:  "self",
+				MaxAttempts:  1,
+				Loops:        1,
+			},
+			"writer": {
+				SystemPrompt: "Write documentation for the change.",
+				Adjudicator:  "self",
+				MaxAttempts:  1,
+				Loops:        1,
+			},
+			"reviewer": {
+				SystemPrompt: "Review the changes.",
+				Adjudicator:  "self",
+				MaxAttempts:  1,
+				Loops:        1,
 			},
 		},
-		// Register common fixture project names used across orchestrator tests.
+		// Register common fixture projects used across orchestrator tests. Each
+		// gets a default_flow so tests that don't pass an explicit flow work.
 		Projects: map[string]config.ProjectConfig{
-			"acme":       {},
-			"foo":        {},
-			"steps":      {},
-			"done-steps": {},
-			"delproj":    {},
-			"gitproj":    {},
+			"acme":       {DefaultFlow: []string{"researcher", "planner", "implementer"}},
+			"foo":        {DefaultFlow: []string{"researcher", "planner", "implementer"}},
+			"steps":      {DefaultFlow: []string{"researcher", "planner", "implementer", "writer"}},
+			"done-steps": {DefaultFlow: []string{"researcher", "planner", "implementer"}},
+			"delproj":    {DefaultFlow: []string{"researcher", "planner", "implementer"}},
+			"gitproj":    {DefaultFlow: []string{"researcher", "planner", "implementer"}},
 		},
 	}
 }
@@ -140,7 +156,16 @@ func TestRun_DryRun_Pipeline(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	for _, phase := range []string{"research", "plan", "implementation"} {
+	// pipeline_json must be persisted on the issue.
+	if issue.PipelineJSON == "" {
+		t.Fatal("issue.pipeline_json is empty")
+	}
+	if issue.CurrentPhase != "step-3" {
+		t.Fatalf("issue current_phase = %q, want step-3", issue.CurrentPhase)
+	}
+
+	wantAgents := map[string]string{"step-1": "researcher", "step-2": "planner", "step-3": "implementer"}
+	for _, phase := range []string{"step-1", "step-2", "step-3"} {
 		taskPath := storage.TaskPath(project.ID, issue.ID, phase)
 		if exists, _ := store.Exists(ctx, taskPath); !exists {
 			t.Fatalf("%s task.json missing: %s", phase, taskPath)
@@ -153,25 +178,23 @@ func TestRun_DryRun_Pipeline(t *testing.T) {
 		if err := json.Unmarshal(taskData, &task); err != nil {
 			t.Fatalf("parse %s task.json: %v", phase, err)
 		}
-		if task.AgentType != phaseAgentType(phase) {
-			t.Fatalf("%s agent_type = %q, want %q", phase, task.AgentType, phaseAgentType(phase))
+		if task.AgentType != wantAgents[phase] {
+			t.Fatalf("%s agent_type = %q, want %q", phase, task.AgentType, wantAgents[phase])
 		}
 		if task.Adjudicator != "self" {
 			t.Fatalf("%s adjudicator = %q, want self", phase, task.Adjudicator)
 		}
 
 		outputPath := storage.AttemptOutputPath(project.ID, issue.ID, phase, 1)
-		if phase != "implementation" {
-			if exists, _ := store.Exists(ctx, outputPath); !exists {
-				t.Fatalf("%s output.md missing: %s", phase, outputPath)
-			}
-			outputData, err := store.Read(ctx, outputPath)
-			if err != nil {
-				t.Fatalf("read %s output.md: %v", phase, err)
-			}
-			if len(outputData) == 0 {
-				t.Fatalf("%s output.md is empty", phase)
-			}
+		if exists, _ := store.Exists(ctx, outputPath); !exists {
+			t.Fatalf("%s output.md missing: %s", phase, outputPath)
+		}
+		outputData, err := store.Read(ctx, outputPath)
+		if err != nil {
+			t.Fatalf("read %s output.md: %v", phase, err)
+		}
+		if len(outputData) == 0 {
+			t.Fatalf("%s output.md is empty", phase)
 		}
 
 		eventsPath := storage.EventsPath(project.ID, issue.ID, phase)
@@ -226,12 +249,6 @@ func TestRun_DryRun_Pipeline(t *testing.T) {
 		}
 	}
 
-	// The implementer workspace should exist and contain the dryrun file.
-	wsPath := storage.WorkspacePath(project.ID, issue.ID)
-	if exists, _ := store.Exists(ctx, filepath.Join(wsPath, "dryrun.go")); !exists {
-		t.Fatalf("implementer workspace missing dryrun.go")
-	}
-
 	// Each phase should have recorded token usage (write_output + finish_task = 25).
 	run, err = runs.Get(1)
 	if err != nil {
@@ -261,7 +278,7 @@ func TestRun_DryRun_SourceSnapshot_ExcludesGit(t *testing.T) {
 		t.Fatalf("write .git/config: %v", err)
 	}
 
-	cfg.Projects["foo"] = config.ProjectConfig{SourcePath: sourceDir}
+	cfg.Projects["foo"] = config.ProjectConfig{SourcePath: sourceDir, DefaultFlow: []string{"researcher", "planner", "implementer"}}
 	opts := RunOptions{
 		ProjectName: "foo",
 		IssueTitle:  "add auth",
@@ -308,7 +325,7 @@ func TestRun_DryRun_SourceSnapshot(t *testing.T) {
 		t.Fatalf("write main.go: %v", err)
 	}
 
-	cfg.Projects["foo"] = config.ProjectConfig{SourcePath: sourceDir}
+	cfg.Projects["foo"] = config.ProjectConfig{SourcePath: sourceDir, DefaultFlow: []string{"researcher", "planner", "implementer"}}
 	opts := RunOptions{
 		ProjectName: "foo",
 		IssueTitle:  "add auth",
@@ -360,7 +377,7 @@ func TestRun_DryRun_Cancellation(t *testing.T) {
 	}
 
 	pid, iid := firstIssueIDs(t, cfg.DBPath)
-	resultPath := storage.ResultPath(pid, iid, "research")
+	resultPath := storage.ResultPath(pid, iid, "step-1")
 	resultData, err := store.Read(context.Background(), resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -378,9 +395,13 @@ func TestRun_DefaultAdjudicatorWaitsForHuman(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
-	// No adjudicator configured for the researcher: the built-in default is a
-	// human gate, so the pipeline pauses after the research phase.
-	delete(cfg.Agents, "researcher")
+	// No adjudicator configured for the step-1 agent: the built-in default is a
+	// human gate, so the pipeline pauses after step-1.
+	cfg.Agents["researcher"] = config.AgentConfig{
+		SystemPrompt: cfg.Agents["researcher"].SystemPrompt,
+		MaxAttempts:  1,
+		Loops:        1,
+	}
 
 	opts := RunOptions{
 		ProjectName: "foo",
@@ -411,7 +432,7 @@ func TestRun_DefaultAdjudicatorWaitsForHuman(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init storage: %v", err)
 	}
-	resultPath := storage.ResultPath(issue.ProjectID, issue.ID, "research")
+	resultPath := storage.ResultPath(issue.ProjectID, issue.ID, "step-1")
 	resultData, err := store.Read(ctx, resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -430,11 +451,12 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
 
-	// Configure research to use human adjudication so the pipeline pauses.
+	// Configure step-1 (researcher) to use human adjudication so the pipeline pauses.
 	cfg.Agents["researcher"] = config.AgentConfig{
-		Adjudicator: "human",
-		MaxAttempts: 3,
-		Loops:       1,
+		SystemPrompt: cfg.Agents["researcher"].SystemPrompt,
+		Adjudicator:  "human",
+		MaxAttempts:  3,
+		Loops:        1,
 	}
 
 	opts := RunOptions{
@@ -488,7 +510,7 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 		t.Fatalf("issue status after retry = %q, want waiting_human", issue.Status)
 	}
 
-	feedbackPath := storage.FeedbackPath(issue.ProjectID, issue.ID, "research", 1)
+	feedbackPath := storage.FeedbackPath(issue.ProjectID, issue.ID, "step-1", 1)
 	fbData, err := store.Read(ctx, feedbackPath)
 	if err != nil {
 		t.Fatalf("read feedback: %v", err)
@@ -498,7 +520,7 @@ func TestResume_RetryWithFeedback(t *testing.T) {
 	}
 
 	// A second attempt directory should exist.
-	attempt2Output := storage.AttemptOutputPath(issue.ProjectID, issue.ID, "research", 2)
+	attempt2Output := storage.AttemptOutputPath(issue.ProjectID, issue.ID, "step-1", 2)
 	if exists, _ := store.Exists(ctx, attempt2Output); !exists {
 		t.Fatalf("attempt 2 output missing")
 	}
@@ -525,9 +547,10 @@ func TestResume_Pass(t *testing.T) {
 	cfg := testConfig(tmp)
 
 	cfg.Agents["researcher"] = config.AgentConfig{
-		Adjudicator: "human",
-		MaxAttempts: 1,
-		Loops:       1,
+		SystemPrompt: cfg.Agents["researcher"].SystemPrompt,
+		Adjudicator:  "human",
+		MaxAttempts:  1,
+		Loops:        1,
 	}
 
 	opts := RunOptions{
@@ -556,7 +579,7 @@ func TestResume_Pass(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	resultPath := storage.ResultPath(pid, iid, "research")
+	resultPath := storage.ResultPath(pid, iid, "step-1")
 	resultData, err := store.Read(ctx, resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -579,9 +602,10 @@ func TestResume_Fail(t *testing.T) {
 	cfg := testConfig(tmp)
 
 	cfg.Agents["researcher"] = config.AgentConfig{
-		Adjudicator: "human",
-		MaxAttempts: 1,
-		Loops:       1,
+		SystemPrompt: cfg.Agents["researcher"].SystemPrompt,
+		Adjudicator:  "human",
+		MaxAttempts:  1,
+		Loops:        1,
 	}
 
 	opts := RunOptions{
@@ -611,7 +635,7 @@ func TestResume_Fail(t *testing.T) {
 		t.Fatalf("init storage: %v", err)
 	}
 
-	resultPath := storage.ResultPath(pid, iid, "research")
+	resultPath := storage.ResultPath(pid, iid, "step-1")
 	resultData, err := store.Read(ctx, resultPath)
 	if err != nil {
 		t.Fatalf("read result.json: %v", err)
@@ -654,7 +678,7 @@ func TestCrashRecovery_RerunInProgressPhase(t *testing.T) {
 	if err != nil || project == nil {
 		t.Fatalf("get project: %v", err)
 	}
-	issue, err := eng.issues.Create(project.ID, "add auth")
+	issue, err := eng.issues.Create(project.ID, "add auth", "step-1", `["researcher","planner","implementer"]`)
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -670,7 +694,7 @@ func TestCrashRecovery_RerunInProgressPhase(t *testing.T) {
 		t.Fatalf("snapshot source: %v", err)
 	}
 
-	resultPath := storage.ResultPath(project.ID, issue.ID, "research")
+	resultPath := storage.ResultPath(project.ID, issue.ID, "step-1")
 	if err := writeResult(ctx, eng.store, resultPath, PhaseResult{
 		Status:    "in_progress",
 		Attempt:   1,
@@ -692,14 +716,14 @@ func TestCrashRecovery_RerunInProgressPhase(t *testing.T) {
 		t.Fatalf("research result status = %q, want done", result.Status)
 	}
 
-	// Pipeline should have continued through plan and implementation.
-	implResultPath := storage.ResultPath(project.ID, issue.ID, "implementation")
+	// Pipeline should have continued through step-2 and step-3.
+	implResultPath := storage.ResultPath(project.ID, issue.ID, "step-3")
 	implResult, err := readResult(ctx, eng.store, implResultPath)
 	if err != nil {
-		t.Fatalf("read implementation result: %v", err)
+		t.Fatalf("read step-3 result: %v", err)
 	}
 	if implResult.Status != "done" {
-		t.Fatalf("implementation result status = %q, want done", implResult.Status)
+		t.Fatalf("step-3 result status = %q, want done", implResult.Status)
 	}
 }
 

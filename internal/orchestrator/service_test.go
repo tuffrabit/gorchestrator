@@ -37,12 +37,16 @@ func TestSubmitIssue_QueuesWithoutRunning(t *testing.T) {
 	}
 
 	// Pipeline must not have run yet.
-	phase, status, err := eng.CurrentPhaseState(issue.ProjectID, issue.ID)
+	steps, err := eng.StepsForIssue(issue)
 	if err != nil {
-		t.Fatalf("CurrentPhaseState: %v", err)
+		t.Fatalf("steps: %v", err)
 	}
-	if phase != "research" || status != "in_progress" {
-		// no result.json yet → in_progress from currentPhaseState
+	phase, status, err := eng.CurrentStepState(issue.ProjectID, issue.ID, steps)
+	if err != nil {
+		t.Fatalf("CurrentStepState: %v", err)
+	}
+	if phase != "step-1" || status != "in_progress" {
+		// no result.json yet → in_progress from currentStepState
 		if status != "in_progress" {
 			t.Fatalf("phase state = %s/%s", phase, status)
 		}
@@ -67,7 +71,7 @@ func TestProcessIssue_DryRunCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitIssue: %v", err)
 	}
-	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "research")
+	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "step-1")
 
 	if err := eng.ProcessIssue(ctx, issue.ID); err != nil {
 		t.Fatalf("ProcessIssue: %v", err)
@@ -100,7 +104,7 @@ func TestRecoverAll_RequeuesInProgress(t *testing.T) {
 		t.Fatalf("SubmitIssue: %v", err)
 	}
 	// Simulate a crash: leave as in_progress with no result.json terminal.
-	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "research")
+	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "step-1")
 
 	if err := eng.RecoverAll(ctx); err != nil {
 		t.Fatalf("RecoverAll: %v", err)
@@ -116,9 +120,10 @@ func TestDecide_RetryRequeues(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
 	cfg.Agents["researcher"] = config.AgentConfig{
-		Adjudicator: "human",
-		MaxAttempts: 3,
-		Loops:       1,
+		SystemPrompt: cfg.Agents["researcher"].SystemPrompt,
+		Adjudicator:  "human",
+		MaxAttempts:  3,
+		Loops:        1,
 	}
 	eng, err := NewEngine(cfg)
 	if err != nil {
@@ -135,7 +140,7 @@ func TestDecide_RetryRequeues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitIssue: %v", err)
 	}
-	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "research")
+	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "step-1")
 	if err := eng.ProcessIssue(ctx, issue.ID); err != nil {
 		t.Fatalf("ProcessIssue: %v", err)
 	}
@@ -189,7 +194,7 @@ func TestDecide_RetryFromFailed(t *testing.T) {
 	}
 
 	// Write a failed research result and mark the issue failed.
-	resultPath := storage.ResultPath(issue.ProjectID, issue.ID, "research")
+	resultPath := storage.ResultPath(issue.ProjectID, issue.ID, "step-1")
 	if err := eng.Store().Write(ctx, resultPath, []byte(`{
 		"status": "failed",
 		"error": "model timed out",
@@ -200,7 +205,7 @@ func TestDecide_RetryFromFailed(t *testing.T) {
 	}`)); err != nil {
 		t.Fatalf("write result: %v", err)
 	}
-	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusFailed, "research")
+	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusFailed, "step-1")
 
 	if err := eng.Decide(ctx, DecideOptions{
 		IssueID:   issue.ID,
@@ -216,7 +221,7 @@ func TestDecide_RetryFromFailed(t *testing.T) {
 	}
 
 	// Worker path: process should re-run research (dry-run) and complete.
-	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "research")
+	_ = eng.Issues().UpdateStatus(issue.ID, sqlite.StatusInProgress, "step-1")
 	if err := eng.ProcessIssue(ctx, issue.ID); err != nil {
 		t.Fatalf("ProcessIssue after failed-retry: %v", err)
 	}
@@ -226,11 +231,11 @@ func TestDecide_RetryFromFailed(t *testing.T) {
 	}
 
 	// Attempt 2 should exist (attempt 1 was the failed one).
-	attempt2 := storage.AttemptOutputPath(issue.ProjectID, issue.ID, "research", 2)
+	attempt2 := storage.AttemptOutputPath(issue.ProjectID, issue.ID, "step-1", 2)
 	if exists, _ := eng.Store().Exists(ctx, attempt2); !exists {
 		t.Fatalf("expected attempt 2 output at %s", attempt2)
 	}
-	fb, err := eng.Store().Read(ctx, storage.FeedbackPath(issue.ProjectID, issue.ID, "research", 1))
+	fb, err := eng.Store().Read(ctx, storage.FeedbackPath(issue.ProjectID, issue.ID, "step-1", 1))
 	if err != nil {
 		t.Fatalf("read feedback: %v", err)
 	}

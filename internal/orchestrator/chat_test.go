@@ -475,22 +475,15 @@ func TestChat_SideloadSkipsController(t *testing.T) {
 	baseURL := "http://127.0.0.1:9/chat-sideload"
 	eng, user, project, _ := chatTestEngine(t, func(cfg *config.Config) {
 		sideload := true
-		pc := cfg.Projects["foo"]
-		pc.Agents = map[string]config.ProjectAgentConfig{
-			"researcher": {
-				Default: "cheap",
-				Flavors: map[string]config.AgentConfig{
-					"cheap": {Sideload: &sideload},
-				},
-			},
-		}
-		cfg.Projects["foo"] = pc
+		agent := cfg.Agents["researcher"]
+		agent.Sideload = &sideload
+		cfg.Agents["researcher"] = agent
 		cfg.Inference = config.InferenceConfig{Type: "llama-swap", BaseURL: baseURL, Mode: "exclusive"}
 	})
 	ctl := &fakeChatController{}
 	eng.controller = ctl
 
-	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "cheap")
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}

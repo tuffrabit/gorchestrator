@@ -36,6 +36,20 @@ func TestChatSourcePath(t *testing.T) {
 	}
 }
 
+func TestWorkspacePaths(t *testing.T) {
+	// The issue-level workspace is shared by every editing step.
+	if got := WorkspacePath(7, 3); got != "projects/7/issues/3/workspace" {
+		t.Fatalf("WorkspacePath(7, 3) = %q, want projects/7/issues/3/workspace", got)
+	}
+	// Legacy issues kept their workspace under the implementation phase dir.
+	if got := LegacyWorkspacePath(7, 3); got != "projects/7/issues/3/implementation/workspace" {
+		t.Fatalf("LegacyWorkspacePath(7, 3) = %q, want projects/7/issues/3/implementation/workspace", got)
+	}
+	if WorkspacePath(7, 3) == LegacyWorkspacePath(7, 3) {
+		t.Fatal("WorkspacePath and LegacyWorkspacePath must not collide")
+	}
+}
+
 func TestJoinContained(t *testing.T) {
 	key, err := JoinContained("projects/1/issues/2", "research/result.json")
 	if err != nil {

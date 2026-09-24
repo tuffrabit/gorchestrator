@@ -12,7 +12,7 @@ import (
 // Parameters). Empty properties cause models to call tools with {} forever.
 func TestFunctionToolDeclarationsHaveParameterSchemas(t *testing.T) {
 	bt := &BoundTools{RootPath: "/tmp", Allowlist: []string{"."}, OutputPath: "out.md"}
-	regs, err := NewResearcherRegistry(bt)
+	regs, err := NewCoreRegistry(bt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,6 +22,8 @@ func TestFunctionToolDeclarationsHaveParameterSchemas(t *testing.T) {
 		"list_directory": {"path"},
 		"grep_search":    {"path", "pattern", "regex"},
 		"write_output":   {"content"},
+		"write_file":     {"path", "content"},
+		"update_file":    {"path", "content"},
 	}
 	// Fields that must NOT be required (optional with defaults).
 	mustNotRequire := map[string][]string{

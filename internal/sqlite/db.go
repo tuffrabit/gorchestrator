@@ -220,6 +220,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id);
 `,
 	},
+	{
+		version: 13,
+		name:    "issue_pipeline",
+		sql: `
+ALTER TABLE issues ADD COLUMN pipeline_json TEXT NOT NULL DEFAULT '[]';
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -41,23 +42,26 @@ type AdapterConfig struct {
 	ManifestPath string `yaml:"manifest_path"`
 }
 
-// AgentConfig overrides the orchestrator's defaults for a specific agent type.
-// Supported keys: "researcher", "planner", "implementer".
+// AgentConfig configures one user-defined agent id under the top-level agents:
+// block. Agent ids are arbitrary user-chosen slugs (see validateAgents); there
+// are no built-in prompts.
 //
-// Merge layers (see Config.Agent / orchestrator cast): built-in defaults →
-// default_model → global agents.<type> → project flavor → frozen issue cast name.
+// Merge layers (see Config.Agent): generic defaults (default_model, human
+// adjudicator, attempt caps) → global agents.<id>.
 type AgentConfig struct {
-	Model              ModelConfig `yaml:"model" json:"model,omitempty"`
-	Temperature        *float64    `yaml:"temperature" json:"temperature,omitempty"`
-	MaxTokens          int         `yaml:"max_tokens" json:"max_tokens,omitempty"`
-	SystemPrompt       string      `yaml:"system_prompt" json:"system_prompt,omitempty"`               // full override
-	SystemPromptAppend string      `yaml:"system_prompt_append" json:"system_prompt_append,omitempty"` // appended after base/override
-	Tools              []string    `yaml:"tools" json:"tools,omitempty"`                               // core tool name allowlist; empty = all for type
-	MCPServers         []string    `yaml:"mcp_servers" json:"mcp_servers,omitempty"`                   // per-agent MCP server allowlist
-	Adjudicator        string      `yaml:"adjudicator" json:"adjudicator,omitempty"`
-	MaxAttempts        int         `yaml:"max_attempts" json:"max_attempts,omitempty"`
-	Loops              int         `yaml:"loops" json:"loops,omitempty"`
-	Rubric             string      `yaml:"rubric" json:"rubric,omitempty"`
+	// ID is the agent's key under agents: in config. It is populated by the
+	// accessors (Agent/AgentMust), not read from YAML.
+	ID           string      `yaml:"-" json:"id,omitempty"`
+	Model        ModelConfig `yaml:"model" json:"model,omitempty"`
+	Temperature  *float64    `yaml:"temperature" json:"temperature,omitempty"`
+	MaxTokens    int         `yaml:"max_tokens" json:"max_tokens,omitempty"`
+	SystemPrompt string      `yaml:"system_prompt" json:"system_prompt,omitempty"` // required; no built-in default
+	Tools        []string    `yaml:"tools" json:"tools,omitempty"`                 // optional allowlist; empty = full core tool list
+	MCPServers   []string    `yaml:"mcp_servers" json:"mcp_servers,omitempty"`     // per-agent MCP server allowlist; "*" = every configured server
+	Adjudicator  string      `yaml:"adjudicator" json:"adjudicator,omitempty"`
+	MaxAttempts  int         `yaml:"max_attempts" json:"max_attempts,omitempty"`
+	Loops        int         `yaml:"loops" json:"loops,omitempty"`
+	Rubric       string      `yaml:"rubric" json:"rubric,omitempty"`
 	// SingleShot bypasses the tool-call loop: one GenerateContent call, the reply
 	// text is the phase output. Pointer for tri-state merge (nil = inherit).
 	SingleShot *bool `yaml:"single_shot" json:"single_shot,omitempty"`
@@ -73,15 +77,6 @@ type AgentConfig struct {
 	// ContextFiles pins exact repo-relative paths for pre-stuffing instead of the
 	// auto digest (still bounded by SingleShotContextBytes).
 	ContextFiles []string `yaml:"context_files" json:"context_files,omitempty"`
-}
-
-// CoreAgentTypes are the only agent type keys allowed under projects.*.agents.
-var CoreAgentTypes = []string{"researcher", "planner", "implementer"}
-
-// ProjectAgentConfig is the per-type flavor catalog under projects.<name>.agents.<type>.
-type ProjectAgentConfig struct {
-	Default string                 `yaml:"default" json:"default,omitempty"`
-	Flavors map[string]AgentConfig `yaml:"flavors" json:"flavors,omitempty"`
 }
 
 // ProjectGitConfig is git workspace settings for a project (YAML + synced config_json).
@@ -114,125 +109,15 @@ type ProjectTestConfig struct {
 	Runtime    string   `yaml:"runtime" json:"runtime,omitempty"`
 }
 
-// ProjectGuardrails holds Phase 5 per-project guardrail thresholds.
-type ProjectGuardrails struct {
-	// EffortGateMin is the minimum planner effort that inserts a human gate
-	// before implementation: low | medium | high. Default high (only high gates).
-	EffortGateMin string `yaml:"effort_gate_min" json:"effort_gate_min,omitempty"`
-}
-
 // ProjectConfig is one entry under the top-level projects: map (YAML source of truth).
 type ProjectConfig struct {
-	SourcePath    string                        `yaml:"source_path" json:"source_path,omitempty"`
-	Git           *ProjectGitConfig             `yaml:"git" json:"git,omitempty"`
-	Test          *ProjectTestConfig            `yaml:"test" json:"test,omitempty"`
-	TrustExternal bool                          `yaml:"trust_external" json:"trust_external,omitempty"`
-	Guardrails    ProjectGuardrails             `yaml:"guardrails" json:"guardrails,omitempty"`
-	Agents        map[string]ProjectAgentConfig `yaml:"agents" json:"agents,omitempty"`
-}
-
-// AgentFlavorInfo is the UI/API catalog for one core agent type on a project.
-type AgentFlavorInfo struct {
-	Default string   `json:"default,omitempty"`
-	Flavors []string `json:"flavors"` // names only; empty when no flavors
-}
-
-// FlavorCatalog returns per-type flavor names + defaults for submit UI.
-// Types with zero or one flavor still appear so the client can hide pickers.
-func (p ProjectConfig) FlavorCatalog() map[string]AgentFlavorInfo {
-	out := make(map[string]AgentFlavorInfo, len(CoreAgentTypes))
-	for _, typ := range CoreAgentTypes {
-		info := AgentFlavorInfo{Flavors: []string{}}
-		ac, ok := p.Agents[typ]
-		if !ok || len(ac.Flavors) == 0 {
-			out[typ] = info
-			continue
-		}
-		names := make([]string, 0, len(ac.Flavors))
-		for name := range ac.Flavors {
-			names = append(names, name)
-		}
-		// stable order for templates/tests
-		sort.Strings(names)
-		info.Flavors = names
-		info.Default = ac.Default
-		if info.Default == "" && len(names) == 1 {
-			info.Default = names[0]
-		}
-		out[typ] = info
-	}
-	return out
-}
-
-// ResolveCast validates and fills agent flavor names for submit.
-// requested may be nil or partial; missing keys use project default when flavors exist.
-// Empty cast when the project has no flavors for a type.
-func (p ProjectConfig) ResolveCast(requested map[string]string) (map[string]string, error) {
-	out := map[string]string{}
-	for _, typ := range CoreAgentTypes {
-		want, hasWant := requested[typ]
-		ac, hasAgents := p.Agents[typ]
-		if !hasAgents || len(ac.Flavors) == 0 {
-			if hasWant && want != "" {
-				return nil, fmt.Errorf("project has no %s flavors; cannot select %q", typ, want)
-			}
-			continue
-		}
-		name := want
-		if name == "" {
-			name = ac.Default
-			if name == "" && len(ac.Flavors) == 1 {
-				for k := range ac.Flavors {
-					name = k
-				}
-			}
-		}
-		if name == "" {
-			return nil, fmt.Errorf("project agents.%s requires a default or submit choice", typ)
-		}
-		if _, ok := ac.Flavors[name]; !ok {
-			return nil, fmt.Errorf("unknown %s flavor %q", typ, name)
-		}
-		out[typ] = name
-	}
-	// Reject unknown keys in requested.
-	for k := range requested {
-		switch k {
-		case "researcher", "planner", "implementer":
-		default:
-			return nil, fmt.Errorf("unknown agent type %q in agent_flavors", k)
-		}
-	}
-	return out, nil
-}
-
-// FlavorOverlay returns the AgentConfig overlay for a frozen cast name.
-// empty name with no flavors → nil overlay (ok). missing named flavor → error.
-func (p ProjectConfig) FlavorOverlay(agentType, flavorName string) (AgentConfig, bool, error) {
-	ac, ok := p.Agents[agentType]
-	if !ok || len(ac.Flavors) == 0 {
-		if flavorName != "" {
-			return AgentConfig{}, false, fmt.Errorf("cast names %s flavor %q but project has no flavors for that type", agentType, flavorName)
-		}
-		return AgentConfig{}, false, nil
-	}
-	name := flavorName
-	if name == "" {
-		name = ac.Default
-		if name == "" && len(ac.Flavors) == 1 {
-			for k := range ac.Flavors {
-				name = k
-			}
-		}
-	}
-	if name == "" {
-		return AgentConfig{}, false, fmt.Errorf("no %s flavor selected and no project default", agentType)
-	}
-	overlay, ok := ac.Flavors[name]
-	if !ok {
-		return AgentConfig{}, false, fmt.Errorf("cast names %s flavor %q which is not defined on the project", agentType, name)
-	}
-	return overlay, true, nil
+	SourcePath    string             `yaml:"source_path" json:"source_path,omitempty"`
+	Git           *ProjectGitConfig  `yaml:"git" json:"git,omitempty"`
+	Test          *ProjectTestConfig `yaml:"test" json:"test,omitempty"`
+	TrustExternal bool               `yaml:"trust_external" json:"trust_external,omitempty"`
+	// DefaultFlow is the ordered list of agent ids used for webhook/adapter/CLI
+	// submits that carry no flow; it also prefills the web submit form.
+	DefaultFlow []string `yaml:"default_flow" json:"default_flow,omitempty"`
 }
 
 // InferenceConfig configures explicit model-lifecycle control of a
@@ -395,6 +280,21 @@ func LoadFrom(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
+	// Friendly pre-pass: flag the removed project-level agents block before the
+	// strict decoder rejects it with an opaque unknown-field error.
+	var probe struct {
+		Projects map[string]struct {
+			Agents any `yaml:"agents"`
+		} `yaml:"projects"`
+	}
+	if perr := yaml.Unmarshal(data, &probe); perr == nil {
+		for name, pc := range probe.Projects {
+			if pc.Agents != nil {
+				return nil, fmt.Errorf("projects.%s.agents was removed; agent ids are now global under top-level agents: and flows are chosen per issue", name)
+			}
+		}
+	}
+
 	var cfg Config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // fail on unknown keys instead of silently dropping them
@@ -447,10 +347,10 @@ func LoadFrom(path string) (*Config, error) {
 	if err := applyAuthDefaults(&cfg); err != nil {
 		return nil, err
 	}
-	if err := normalizeProjects(&cfg, home); err != nil {
+	if err := validateAgents(&cfg); err != nil {
 		return nil, err
 	}
-	if err := validateAgentOverrides(&cfg); err != nil {
+	if err := normalizeProjects(&cfg, home); err != nil {
 		return nil, err
 	}
 	normalizeProviders(&cfg)
@@ -504,25 +404,16 @@ func normalizeProjects(cfg *Config, home string) error {
 		if pc.SourcePath != "" {
 			pc.SourcePath = expandTilde(pc.SourcePath, home)
 		}
-		min := strings.ToLower(strings.TrimSpace(pc.Guardrails.EffortGateMin))
-		switch min {
-		case "":
-			pc.Guardrails.EffortGateMin = "high"
-		case "low", "medium", "high":
-			pc.Guardrails.EffortGateMin = min
-		default:
-			return fmt.Errorf("projects.%s.guardrails.effort_gate_min: want low|medium|high, got %q", name, pc.Guardrails.EffortGateMin)
-		}
-		for agentType := range pc.Agents {
-			switch agentType {
-			case "researcher", "planner", "implementer":
-			default:
-				return fmt.Errorf("projects.%s.agents: unknown agent type %q (want researcher|planner|implementer)", name, agentType)
+		if pc.DefaultFlow != nil {
+			if len(pc.DefaultFlow) == 0 {
+				return fmt.Errorf("projects.%s.default_flow: list must not be empty", name)
 			}
-			ac := pc.Agents[agentType]
-			if ac.Default != "" && len(ac.Flavors) > 0 {
-				if _, ok := ac.Flavors[ac.Default]; !ok {
-					return fmt.Errorf("projects.%s.agents.%s: default %q is not a defined flavor", name, agentType, ac.Default)
+			if len(pc.DefaultFlow) > 8 {
+				return fmt.Errorf("projects.%s.default_flow: too many agents (max 8), got %d", name, len(pc.DefaultFlow))
+			}
+			for _, id := range pc.DefaultFlow {
+				if _, ok := cfg.Agents[id]; !ok {
+					return fmt.Errorf("projects.%s.default_flow: agent %q is not configured under agents:", name, id)
 				}
 			}
 		}
@@ -531,44 +422,59 @@ func normalizeProjects(cfg *Config, home string) error {
 	return nil
 }
 
-// validateAgentOverrides rejects malformed fields in global agents.<type> and
-// project flavor configs that would otherwise be silently degraded at runtime
-// (e.g. a typo'd model.timeout falling back to 60s in modelTimeout).
-func validateAgentOverrides(cfg *Config) error {
-	check := func(where, agentType string, ac AgentConfig) error {
+var agentIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+
+// validateAgents rejects malformed global agent entries that would otherwise
+// be silently degraded at runtime (e.g. a typo'd model.timeout falling back
+// to 60s in modelTimeout, or an unknown tool name).
+func validateAgents(cfg *Config) error {
+	core := make(map[string]struct{}, len(KnownToolNames))
+	for _, name := range KnownToolNames {
+		core[name] = struct{}{}
+	}
+	mcp := make(map[string]struct{}, len(cfg.MCPServers))
+	for _, s := range cfg.MCPServers {
+		mcp[s.Name] = struct{}{}
+	}
+	seen := map[string]string{} // lowercased id → id (catch case-only duplicates)
+	for id, ac := range cfg.Agents {
+		if !agentIDPattern.MatchString(id) {
+			return fmt.Errorf("agents.%s: invalid agent id (want ^[a-z0-9][a-z0-9_-]{0,31}$, lowercase)", id)
+		}
+		if other, dup := seen[strings.ToLower(id)]; dup {
+			return fmt.Errorf("agents.%s: duplicate of %q (ids differ only by case)", id, other)
+		}
+		seen[strings.ToLower(id)] = id
+		if strings.TrimSpace(ac.SystemPrompt) == "" {
+			return fmt.Errorf("agents.%s: system_prompt is required", id)
+		}
+		for _, name := range ac.Tools {
+			if _, ok := core[name]; !ok {
+				return fmt.Errorf("agents.%s: unknown tool %q", id, name)
+			}
+		}
+		for _, name := range ac.MCPServers {
+			if name == "*" {
+				continue
+			}
+			if _, ok := mcp[name]; !ok {
+				return fmt.Errorf("agents.%s: unknown mcp server %q (declare it under mcp_servers:, or use \"*\")", id, name)
+			}
+		}
 		if ac.Model.Timeout != "" {
 			if _, err := time.ParseDuration(ac.Model.Timeout); err != nil {
-				return fmt.Errorf("%s: parse model.timeout: %w", where, err)
+				return fmt.Errorf("agents.%s: parse model.timeout: %w", id, err)
 			}
 		}
 		if ac.Adjudicator != "" {
 			switch ac.Adjudicator {
 			case "null", "self", "human":
 			default:
-				return fmt.Errorf("%s: unknown adjudicator %q (want null|self|human)", where, ac.Adjudicator)
+				return fmt.Errorf("agents.%s: unknown adjudicator %q (want null|self|human)", id, ac.Adjudicator)
 			}
 		}
 		if ac.SingleShotContextBytes < 0 {
-			return fmt.Errorf("%s: single_shot_context_bytes must be >= 0, got %d", where, ac.SingleShotContextBytes)
-		}
-		if agentType == "implementer" && ac.SingleShot != nil && *ac.SingleShot {
-			return fmt.Errorf("%s: single_shot is not supported for the implementer (its output is the workspace, not reply text)", where)
-		}
-		return nil
-	}
-	for agentType, ac := range cfg.Agents {
-		if err := check("agents."+agentType, agentType, ac); err != nil {
-			return err
-		}
-	}
-	for projName, pc := range cfg.Projects {
-		for agentType, pac := range pc.Agents {
-			for flavor, ac := range pac.Flavors {
-				where := fmt.Sprintf("projects.%s.agents.%s.flavors.%s", projName, agentType, flavor)
-				if err := check(where, agentType, ac); err != nil {
-					return err
-				}
-			}
+			return fmt.Errorf("agents.%s: single_shot_context_bytes must be >= 0, got %d", id, ac.SingleShotContextBytes)
 		}
 	}
 	return nil
@@ -732,21 +638,76 @@ func expandTilde(path, home string) string {
 	return path
 }
 
-// Agent returns the configuration for the named agent type, merging user
-// overrides with built-in defaults and global default_model. Unknown agent
-// names receive the defaults. Project flavor / issue cast layers are applied
-// by the orchestrator on top of this result.
-func (c *Config) Agent(name string) AgentConfig {
-	def := defaultAgentConfig(name, c.DefaultModel)
-	ovr, ok := c.Agents[name]
-	if !ok {
-		return def
+// KnownToolNames is the canonical set of core tool names. An agent's Tools
+// allowlist may only name tools from this set (config validation fails
+// closed on anything else). internal/tools uses this list so the two never
+// drift.
+var KnownToolNames = []string{
+	"read_file",
+	"list_directory",
+	"grep_search",
+	"write_output",
+	"write_file",
+	"update_file",
+	"run_test",
+}
+
+var editingToolNames = map[string]struct{}{
+	"write_file":  {},
+	"update_file": {},
+	"run_test":    {},
+}
+
+// HasEditingTool reports whether the agent's effective tool list includes a
+// file-mutating tool. An empty Tools list means the full core list, which
+// includes the editing tools.
+func (a AgentConfig) HasEditingTool() bool {
+	if len(a.Tools) == 0 {
+		return true
 	}
-	return MergeAgent(def, ovr)
+	for _, name := range a.Tools {
+		if _, ok := editingToolNames[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Agent returns the config for a configured agent id. ok=false when the id
+// is not defined under agents:. The returned config carries ID set to the
+// agent's key.
+func (c *Config) Agent(id string) (AgentConfig, bool) {
+	ovr, ok := c.Agents[id]
+	if !ok {
+		return AgentConfig{}, false
+	}
+	merged := MergeAgent(defaultAgentConfig(c.DefaultModel), ovr)
+	merged.ID = id
+	return merged, true
+}
+
+// AgentMust is the strict form used by the pipeline.
+func (c *Config) AgentMust(id string) (AgentConfig, error) {
+	ac, ok := c.Agent(id)
+	if !ok {
+		return AgentConfig{}, fmt.Errorf("agent %q is not configured under agents: in config", id)
+	}
+	return ac, nil
+}
+
+// AgentIDs returns sorted configured ids (for UI/API).
+func (c *Config) AgentIDs() []string {
+	ids := make([]string, 0, len(c.Agents))
+	for id := range c.Agents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // MergeAgent overlays non-zero fields from overlay onto base.
-// SystemPromptAppend is baked into SystemPrompt at the end of the merge.
+// Since SystemPrompt has no default, the merge never invents one — config
+// validation guarantees it exists on the merged result.
 func MergeAgent(base, overlay AgentConfig) AgentConfig {
 	out := base
 	if overlay.Model.Provider != "" {
@@ -766,14 +727,6 @@ func MergeAgent(base, overlay AgentConfig) AgentConfig {
 	}
 	if overlay.SystemPrompt != "" {
 		out.SystemPrompt = overlay.SystemPrompt
-	}
-	if overlay.SystemPromptAppend != "" {
-		out.SystemPromptAppend = overlay.SystemPromptAppend
-	}
-	// Apply append after merge so full override + append both work.
-	if out.SystemPromptAppend != "" {
-		out.SystemPrompt = out.SystemPrompt + "\n\n" + out.SystemPromptAppend
-		out.SystemPromptAppend = ""
 	}
 	if overlay.Temperature != nil {
 		t := *overlay.Temperature
@@ -817,8 +770,8 @@ func MergeAgent(base, overlay AgentConfig) AgentConfig {
 	return out
 }
 
-func defaultAgentConfig(name string, defaultModel ModelConfig) AgentConfig {
-	cfg := AgentConfig{
+func defaultAgentConfig(defaultModel ModelConfig) AgentConfig {
+	return AgentConfig{
 		Model: ModelConfig{
 			Provider:  defaultModel.Provider,
 			Model:     defaultModel.Model,
@@ -829,117 +782,6 @@ func defaultAgentConfig(name string, defaultModel ModelConfig) AgentConfig {
 		Adjudicator: "human",
 		MaxAttempts: 3,
 		Loops:       1,
-		Rubric:      "The output is complete, accurate, and ready for the next phase.",
+		Rubric:      "The output is complete, accurate, and ready for the next step.",
 	}
-	switch name {
-	case "researcher":
-		cfg.SystemPrompt = defaultResearcherPrompt()
-	case "planner":
-		cfg.SystemPrompt = defaultPlannerPrompt()
-	case "implementer":
-		cfg.SystemPrompt = defaultImplementerPrompt()
-	}
-	return cfg
-}
-
-// DefaultSystemPrompt returns the built-in (pre-merge) system prompt for an
-// agent type ("researcher", "planner", "implementer"), or "" for unknown types.
-// The orchestrator compares merged configs against this to tell a user override
-// apart from the baked-in default.
-func DefaultSystemPrompt(agentType string) string {
-	switch agentType {
-	case "researcher":
-		return defaultResearcherPrompt()
-	case "planner":
-		return defaultPlannerPrompt()
-	case "implementer":
-		return defaultImplementerPrompt()
-	}
-	return ""
-}
-
-// DefaultSingleShotPrompt returns the built-in system prompt for single-shot
-// (no-tools) execution of an agent type, or "" for unknown or unsupported
-// types. Single-shot is supported for researcher and planner only.
-func DefaultSingleShotPrompt(agentType string) string {
-	switch agentType {
-	case "researcher":
-		return singleShotResearcherPrompt()
-	case "planner":
-		return singleShotPlannerPrompt()
-	}
-	return ""
-}
-
-func singleShotResearcherPrompt() string {
-	return `You are a Researcher agent investigating a software engineering issue. You have NO tools: everything you know about the repository is in the user's message (issue details and a source snapshot digest).
-
-Produce a concise findings document for the next phase (Planner):
-- What the issue asks for, restated precisely.
-- The relevant files, symbols, and current behavior found in the provided source context.
-- Gaps or ambiguities the Planner must account for.
-
-Reply with the complete findings document as plain markdown text. Do not ask questions; work only from the provided context.`
-}
-
-func singleShotPlannerPrompt() string {
-	return `You are a Planner agent. The user's message contains the issue, the Researcher's accepted findings, and a source snapshot digest. You have NO tools.
-
-Produce a concrete, self-contained implementation plan for the Implementer, who will NOT see this conversation or the research output. Include:
-- The exact files to create or modify, with the specific changes in each.
-- Tests to add or update.
-- Anything the Implementer needs copied verbatim (signatures, constants, snippets) — never refer to context they cannot see.
-
-Reply with the complete plan as plain markdown text.`
-}
-
-func defaultResearcherPrompt() string {
-	return `You are a Researcher agent. Investigate the issue, read the project source snapshot, and produce concise findings in the designated output file.
-
-Core tools:
-- read_file: read source files (whole-file or surgical line range)
-- list_directory: explore the source tree
-- grep_search: locate relevant code, then use surgical read_file
-- write_output: write your final findings to the orchestrator-designated output file
-
-Rules:
-1. Gather context from the allowed paths.
-2. Write your findings using write_output.
-3. Be concise and actionable for the Planner.
-4. When finished, call finish_task with done=true and a brief rationale evaluating your work against the rubric.`
-}
-
-func defaultPlannerPrompt() string {
-	return `You are a Planner agent. Read the issue and the Researcher's findings, then produce a concrete implementation plan in the designated output file.
-
-Core tools:
-- read_file: read source files and previous phase outputs
-- list_directory: explore the source tree
-- grep_search: locate relevant code
-- write_output: write the implementation plan
-
-Rules:
-1. Base the plan on the issue and the accepted research output.
-2. Include specific files to change and tests to add.
-3. Write the plan using write_output.
-4. When finished, call finish_task with done=true, a brief rationale evaluating the plan, and effort set to low, medium, or high based on implementation complexity (high = large multi-file or risky changes; low = small localized fix).
-5. If the plan is incomplete, call finish_task with done=false, explain what is missing, and still set effort.`
-}
-
-func defaultImplementerPrompt() string {
-	return `You are an Implementer agent. Read the issue, the accepted research findings, and the accepted plan, then edit the workspace to implement the changes.
-
-Core tools:
-- read_file: read files in the workspace or source snapshot
-- list_directory: explore the workspace
-- grep_search: locate relevant code
-- write_file: create new files in the workspace
-- update_file: overwrite existing files in the workspace
-- run_test: run the project's immutable tests in a container sandbox
-
-Rules:
-1. Edit only within the implementer's workspace.
-2. Write clean, testable code matching the existing style.
-3. Use run_test for test-and-fix when available.
-4. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.`
 }

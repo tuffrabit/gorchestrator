@@ -25,12 +25,12 @@ func testConfig(tmp string) *config.Config {
 			ReadFile: config.ReadFileConfig{MaxBytes: 64 * 1024, MaxLines: 2000},
 		},
 		Agents: map[string]config.AgentConfig{
-			"researcher":  {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
-			"planner":     {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
-			"implementer": {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+			"researcher":  {SystemPrompt: "Research the issue.", Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+			"planner":     {SystemPrompt: "Plan the work.", Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+			"implementer": {SystemPrompt: "Implement the plan.", Adjudicator: "self", MaxAttempts: 1, Loops: 1},
 		},
 		Projects: map[string]config.ProjectConfig{
-			"acme": {},
+			"acme": {DefaultFlow: []string{"researcher", "planner", "implementer"}},
 		},
 		Server: config.ServerConfig{
 			Listen:              "127.0.0.1:0",

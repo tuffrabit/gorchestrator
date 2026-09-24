@@ -24,7 +24,7 @@ type UpdateFileResult struct {
 func newUpdateFileTool(bt *BoundTools) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "update_file",
-		Description: "Update (overwrite) a file within the implementer's workspace.",
+		Description: "Update (overwrite) a file within the issue workspace.",
 	}, func(ctx agent.Context, args UpdateFileArgs) (UpdateFileResult, error) {
 		if bt.WorkspacePath == "" {
 			return UpdateFileResult{}, fmt.Errorf("workspace path not configured")
