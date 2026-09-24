@@ -1,27 +1,28 @@
 {{define "partials/drawer_submit.html"}}
-<form hx-post="/partials/submit"
+<form id="submit-form" class="drawer-form"
+  hx-post="/partials/submit"
   hx-target="#issue-feed"
   hx-swap="afterbegin settle:0s"
   hx-encoding="multipart/form-data"
   enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-  <div class="form-row">
+  <div class="form-row" id="project-select-row">
     <label for="project">Project</label>
     <select id="project" name="project" required
-      hx-get="/partials/submit/flavors"
+      hx-get="/partials/submit/flow"
+      hx-target="#agent-flow"
+      hx-swap="innerHTML"
       hx-trigger="change"
-      hx-target="#agent-flavors"
-      hx-include="this"
-      hx-swap="innerHTML">
+      hx-include="this">
       <option value="" disabled {{if not .SelectedProject}}selected{{end}}>Select a project…</option>
       {{range .Projects}}
-      <option value="{{.Name}}" {{if eq $.SelectedProject .Name}}selected{{end}}>{{.Name}}</option>
+      <option value="{{.Name}}" {{if eq .Name $.SelectedProject}}selected{{end}}>{{.Name}}</option>
       {{end}}
     </select>
   </div>
   <div class="form-row">
     <label for="title">Title</label>
-    <input id="title" name="title" required placeholder="Add OIDC login" value="{{.Title}}">
+    <input id="title" name="title" required maxlength="200" placeholder="Add OIDC login" value="{{.Title}}">
   </div>
   <div class="form-row">
     <label for="description">Description <span class="card-meta">(optional)</span></label>
@@ -38,8 +39,8 @@
     <label for="depends_on">Depends on <span class="card-meta">(optional, comma-separated issue IDs)</span></label>
     <input id="depends_on" name="depends_on" placeholder="12,14" value="{{.DependsOn}}">
   </div>
-  <div id="agent-flavors">
-    {{template "partials/submit_flavors.html" .}}
+  <div id="agent-flow">
+    {{template "partials/submit_flow.html" .}}
   </div>
   <div class="form-row form-row-checkbox">
     <label class="checkbox-label"><input type="checkbox" name="dry_run" value="1" {{if .DryRun}}checked{{end}}> Dry run</label>

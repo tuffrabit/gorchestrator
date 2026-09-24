@@ -58,17 +58,19 @@ func (s *Server) handleWebhookIssue(w http.ResponseWriter, r *http.Request) {
 		Source:      "webhook",
 	})
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "unknown project") || strings.Contains(msg, "not declared") {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+		// Flow resolution failures (no default_flow configured, unknown agent
+		// id) are the caller's problem to fix in YAML, not a server fault.
+		if isSubmitClientError(err.Error()) {
+			writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id":     issue.ID,
 		"status": issue.Status,
 		"source": issue.Source,
+		"flow":   pipelineStepObjects(issue.PipelineJSON),
 	})
 }

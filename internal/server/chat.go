@@ -28,7 +28,7 @@ type chatProjectOption struct {
 }
 
 // chatIdentityOption is one entry in the chat agent-identity <select>.
-// Value is "<agentType>" for the base identity or "<agentType>:<flavor>".
+// Value is the configured agent id.
 type chatIdentityOption struct {
 	Value    string
 	Label    string
@@ -86,10 +86,10 @@ func (s *Server) handlePartialChat(w http.ResponseWriter, r *http.Request) {
 		"CanWrite":        u != nil && roleAtLeast(u.Role, auth.RoleMember),
 	}
 	if selected != nil {
-		agentType, flavor := s.defaultChatIdentity(selected.Project.Name)
+		identity := s.defaultChatIdentity(selected.Project.Name)
 		data["SelectedProject"] = selected.Project.Name
 		data["IdentityOptions"] = s.chatIdentityOptions(selected.Project.Name, "")
-		data["Thread"] = s.chatThreadData(r, selected, agentType, flavor, u)
+		data["Thread"] = s.chatThreadData(r, selected, identity, u)
 	}
 	if err := render(w, "partials/drawer_chat.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -116,35 +116,27 @@ func (s *Server) handlePartialChatOptions(w http.ResponseWriter, r *http.Request
 }
 
 // handlePartialChatThread renders the message list + composer for one
-// (project, agent, flavor) selection. Read-only: never creates a thread.
+// (project, agent) selection. Read-only: never creates a thread.
 func (s *Server) handlePartialChatThread(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	q := r.URL.Query()
 	project := q.Get("project")
-	agentType, flavor := chatSelectionFromQuery(q.Get("agent"), q.Get("flavor"), q.Get("identity"))
-	if err := validateChatSelection(agentType, flavor); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	identity := chatSelectionFromQuery(q.Get("agent"), q.Get("identity"))
 	rp, err := s.chatProject(r.Context(), project)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if agentType == "" && flavor == "" {
+	if identity == "" {
 		// Project-select refresh path: fall back to the same default identity
 		// the options list marks selected, so thread and select agree.
-		agentType, flavor = s.defaultChatIdentity(project)
+		identity = s.defaultChatIdentity(project)
 	}
-	if !validChatAgentType(agentType) {
-		http.Error(w, fmt.Sprintf("unknown agent type %q", agentType), http.StatusBadRequest)
+	if !s.validChatAgent(identity) {
+		http.Error(w, fmt.Sprintf("unknown agent %q", identity), http.StatusBadRequest)
 		return
 	}
-	if err := s.validateChatFlavor(project, agentType, flavor); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-	data := s.chatThreadData(r, rp, agentType, flavor, u)
+	data := s.chatThreadData(r, rp, identity, u)
 	if err := render(w, "partials/chat_thread.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -161,7 +153,7 @@ func (s *Server) handlePartialChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 	u := auth.UserFromContext(r.Context())
 	project := strings.TrimSpace(r.FormValue("project"))
-	agentType, flavor := chatSelectionFromQuery(r.FormValue("agent"), r.FormValue("flavor"), r.FormValue("identity"))
+	identity := chatSelectionFromQuery(r.FormValue("agent"), r.FormValue("identity"))
 	message := strings.TrimSpace(r.FormValue("message"))
 
 	if project == "" {
@@ -181,15 +173,11 @@ func (s *Server) handlePartialChatSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	if agentType == "" && flavor == "" {
-		agentType, flavor = s.defaultChatIdentity(project)
+	if identity == "" {
+		identity = s.defaultChatIdentity(project)
 	}
-	if !validChatAgentType(agentType) {
-		http.Error(w, fmt.Sprintf("unknown agent type %q", agentType), http.StatusUnprocessableEntity)
-		return
-	}
-	if err := s.validateChatFlavor(project, agentType, flavor); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+	if !s.validChatAgent(identity) {
+		http.Error(w, fmt.Sprintf("unknown agent %q", identity), http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -198,7 +186,7 @@ func (s *Server) handlePartialChatSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not resolve user: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	thread, err := s.eng.ChatRepo().GetOrCreateThread(uid, rp.Project.ID, agentType, flavor)
+	thread, err := s.eng.ChatRepo().GetOrCreateThread(uid, rp.Project.ID, identity, "")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -213,7 +201,7 @@ func (s *Server) handlePartialChatSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := s.chatThreadData(r, rp, agentType, flavor, u)
+	data := s.chatThreadData(r, rp, identity, u)
 	if err := render(w, "partials/chat_thread.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -234,24 +222,20 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 	}
 	u := auth.UserFromContext(r.Context())
 	project := strings.TrimSpace(r.FormValue("project"))
-	agentType, flavor := chatSelectionFromQuery(r.FormValue("agent"), r.FormValue("flavor"), r.FormValue("identity"))
+	identity := chatSelectionFromQuery(r.FormValue("agent"), r.FormValue("identity"))
 
 	rp, err := s.chatProject(r.Context(), project)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	if agentType == "" && flavor == "" {
+	if identity == "" {
 		// Same default-identity fallback as the send/thread handlers so the
 		// clear targets the thread the drawer is actually showing.
-		agentType, flavor = s.defaultChatIdentity(project)
+		identity = s.defaultChatIdentity(project)
 	}
-	if !validChatAgentType(agentType) {
-		http.Error(w, fmt.Sprintf("unknown agent type %q", agentType), http.StatusUnprocessableEntity)
-		return
-	}
-	if err := s.validateChatFlavor(project, agentType, flavor); err != nil {
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+	if !s.validChatAgent(identity) {
+		http.Error(w, fmt.Sprintf("unknown agent %q", identity), http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -264,7 +248,7 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 	}
 	var thread *sqlite.ChatThread
 	if uid != 0 {
-		thread, err = s.eng.ChatRepo().FindThread(uid, rp.Project.ID, agentType, flavor)
+		thread, err = s.eng.ChatRepo().FindThread(uid, rp.Project.ID, identity, "")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -272,7 +256,7 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 	}
 	if thread == nil {
 		// Nothing to clear: the empty-state partial is the success shape.
-		if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, agentType, flavor, u)); err != nil {
+		if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, identity, u)); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
@@ -285,7 +269,7 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 			// (chatThreadData's Error slot renders as a notice banner) so the
 			// composer and drawer survive — a plain http.Error body would be
 			// swapped into #chat-thread and blank the composer.
-			data := s.chatThreadData(r, rp, agentType, flavor, u)
+			data := s.chatThreadData(r, rp, identity, u)
 			data["Error"] = "A reply is still being generated. Try again in a moment."
 			if err := render(w, "partials/chat_thread.html", data); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -302,7 +286,7 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = s.eng.Audit().Record(auditUID, "clear_chat", "chat_thread", strconv.FormatInt(thread.ID, 10), map[string]any{"messages_removed": n})
 
-	if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, agentType, flavor, u)); err != nil {
+	if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, identity, u)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -324,124 +308,59 @@ func (s *Server) chatProject(ctx context.Context, name string) (*orchestrator.Re
 	return nil, fmt.Errorf("unknown project %q", name)
 }
 
-// chatSelectionFromQuery resolves agent/flavor from the explicit params
-// (agent + flavor, used by SSE refresh and tests) or the combined identity
-// select value ("<agentType>" or "<agentType>:<flavor>").
-func chatSelectionFromQuery(agent, flavor, identity string) (string, string) {
+// chatSelectionFromQuery resolves the identity from the explicit agent param
+// (used by SSE refresh and tests) or the combined identity select value.
+func chatSelectionFromQuery(agent, identity string) string {
 	if identity != "" {
-		a, f, err := splitChatIdentity(identity)
-		if err == nil {
-			if agent == "" {
-				agent = a
-			}
-			if flavor == "" {
-				flavor = f
-			}
-		}
+		return strings.TrimSpace(identity)
 	}
-	return strings.TrimSpace(agent), strings.TrimSpace(flavor)
+	return strings.TrimSpace(agent)
 }
 
-func validateChatSelection(agent, flavor string) error {
-	if agent == "" && flavor == "" {
-		return nil // blank selection → default identity
+// validChatAgent reports whether the agent id exists in the global config.
+func (s *Server) validChatAgent(agent string) bool {
+	if s.eng.Cfg() == nil {
+		return false
 	}
-	if agent == "" {
-		return fmt.Errorf("agent is required when flavor is set")
-	}
-	return nil
-}
-
-func splitChatIdentity(v string) (agent, flavor string, err error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "", "", fmt.Errorf("empty identity")
-	}
-	if i := strings.Index(v, ":"); i >= 0 {
-		agent, flavor = v[:i], v[i+1:]
-	} else {
-		agent = v
-	}
-	if agent == "" {
-		return "", "", fmt.Errorf("missing agent type in identity %q", v)
-	}
-	return agent, flavor, nil
-}
-
-func validChatAgentType(agent string) bool {
-	for _, typ := range config.CoreAgentTypes {
-		if typ == agent {
-			return true
-		}
-	}
-	return false
-}
-
-// validateChatFlavor accepts an empty flavor (base identity) and rejects
-// named flavors the project does not define.
-func (s *Server) validateChatFlavor(project, agent, flavor string) error {
-	if flavor == "" {
-		return nil
-	}
-	pc, ok := s.eng.ProjectConfig(project)
-	if !ok {
-		return fmt.Errorf("unknown project %q", project)
-	}
-	if _, _, err := pc.FlavorOverlay(agent, flavor); err != nil {
-		return err
-	}
-	return nil
+	_, ok := s.eng.Cfg().Agent(agent)
+	return ok
 }
 
 // defaultChatIdentity is the selection shown when nothing is preselected:
-// the first core agent type, using its project-default flavor when present.
-func (s *Server) defaultChatIdentity(project string) (agent, flavor string) {
-	agent = config.CoreAgentTypes[0]
-	pc, ok := s.eng.ProjectConfig(project)
-	if !ok {
-		return agent, ""
-	}
-	if info, ok := pc.FlavorCatalog()[agent]; ok {
-		return agent, info.Default
-	}
-	return agent, ""
+// the first configured agent id.
+func (s *Server) defaultChatIdentity(project string) string {
+	return firstAgentID(s.eng.Cfg())
 }
 
-// chatIdentityOptions lists base identity + one option per flavor for every
-// core agent type. When selected is empty the default identity (the first
-// type's project-default flavor, else base) is marked selected — a <select>
-// can only show one selection, so per-type defaults for later types are not
-// marked (that would leave the select showing the last type's default).
+// chatIdentityOptions lists every configured agent id as one option each. When
+// selected is empty the default identity (the first configured agent) is
+// marked selected.
 func (s *Server) chatIdentityOptions(project, selected string) []chatIdentityOption {
-	if selected == "" {
-		agent, flavor := s.defaultChatIdentity(project)
-		selected = agent
-		if flavor != "" {
-			selected += ":" + flavor
-		}
+	ids := s.eng.Cfg().AgentIDs()
+	if selected == "" && len(ids) > 0 {
+		selected = ids[0]
 	}
-	pc, ok := s.eng.ProjectConfig(project)
-	var catalog map[string]config.AgentFlavorInfo
-	if ok {
-		catalog = pc.FlavorCatalog()
-	}
-	out := make([]chatIdentityOption, 0, len(config.CoreAgentTypes)*3)
-	for _, typ := range config.CoreAgentTypes {
+	out := make([]chatIdentityOption, 0, len(ids))
+	for _, id := range ids {
 		out = append(out, chatIdentityOption{
-			Value:    typ,
-			Label:    typ + " (base)",
-			Selected: selected == typ,
+			Value:    id,
+			Label:    id,
+			Selected: selected == id,
 		})
-		for _, f := range catalog[typ].Flavors {
-			val := typ + ":" + f
-			out = append(out, chatIdentityOption{
-				Value:    val,
-				Label:    typ + ": " + f,
-				Selected: selected == val,
-			})
-		}
 	}
 	return out
+}
+
+// firstAgentID returns the first configured agent id, or "" when none.
+func firstAgentID(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	ids := cfg.AgentIDs()
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
 }
 
 // chatUserID resolves the users-table row for the request user. With
@@ -483,11 +402,10 @@ func (s *Server) chatUserID(u *auth.User, create bool) (int64, error) {
 // chatThreadData builds the view model for chat_thread.html: the current
 // selection, the message rows (assistant replies pre-rendered as markdown),
 // and composer fields. Never creates a thread.
-func (s *Server) chatThreadData(r *http.Request, rp *orchestrator.RegisteredProject, agentType, flavor string, u *auth.User) map[string]any {
+func (s *Server) chatThreadData(r *http.Request, rp *orchestrator.RegisteredProject, identity string, u *auth.User) map[string]any {
 	data := map[string]any{
 		"Project":  rp.Project.Name,
-		"Agent":    agentType,
-		"Flavor":   flavor,
+		"Agent":    identity,
 		"CSRF":     auth.CSRFToken(r),
 		"CanWrite": u != nil && roleAtLeast(u.Role, auth.RoleMember),
 	}
@@ -495,7 +413,7 @@ func (s *Server) chatThreadData(r *http.Request, rp *orchestrator.RegisteredProj
 	if err != nil || uid == 0 {
 		return data // no user row yet → no threads yet → empty state
 	}
-	thread, err := s.eng.ChatRepo().FindThread(uid, rp.Project.ID, agentType, flavor)
+	thread, err := s.eng.ChatRepo().FindThread(uid, rp.Project.ID, identity, "")
 	if err != nil || thread == nil {
 		return data
 	}

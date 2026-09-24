@@ -69,6 +69,12 @@ func (e *Engine) StepsForIssue(issue *sqlite.Issue) ([]sqlite.Step, error) {
 	return e.stepsForIssue(issue)
 }
 
+// WorkspaceKey is the exported form of workspaceKey for out-of-package
+// callers (server): new layout first, legacy fallback for old issues.
+func (e *Engine) WorkspaceKey(ctx context.Context, issue *sqlite.Issue) (string, error) {
+	return e.workspaceKey(ctx, issue)
+}
+
 // stepIndex finds the 0-based position of a step key in the flow.
 func stepIndex(steps []sqlite.Step, key string) int {
 	for i, s := range steps {

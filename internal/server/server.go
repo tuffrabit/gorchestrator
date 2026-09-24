@@ -62,6 +62,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/issues/{id}/decisions", s.auth.Require(auth.RoleMember, http.HandlerFunc(s.handleDecide)))
 	s.mux.Handle("GET /api/events", s.auth.Require(auth.RoleViewer, http.HandlerFunc(s.handleSSE)))
 	s.mux.Handle("GET /api/projects", s.auth.Require(auth.RoleViewer, http.HandlerFunc(s.handleListProjects)))
+	s.mux.Handle("GET /api/agents", s.auth.Require(auth.RoleViewer, http.HandlerFunc(s.handleAgents)))
 	s.mux.Handle("GET /api/notifications", s.auth.Require(auth.RoleViewer, http.HandlerFunc(s.handleListNotifications)))
 
 	// Dashboard (HTML)
@@ -78,7 +79,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /partials/issues/{id}/drawer", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialDrawer)))
 	s.mux.Handle("GET /partials/issues/{id}/workspace-file", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialWorkspaceFile)))
 	s.mux.Handle("GET /partials/submit", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmit)))
-	s.mux.Handle("GET /partials/submit/flavors", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitFlavors)))
+	s.mux.Handle("GET /partials/submit/flow", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitFlow)))
 	s.mux.Handle("POST /partials/issues/{id}/decisions", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialDecide)))
 	s.mux.Handle("POST /partials/submit", s.auth.RequireHTML(auth.RoleMember, http.HandlerFunc(s.handlePartialSubmitPost)))
 	s.mux.Handle("GET /partials/chat", s.auth.RequireHTML(auth.RoleViewer, http.HandlerFunc(s.handlePartialChat)))

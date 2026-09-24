@@ -2,16 +2,14 @@
 <div id="chat-thread-inner" class="chat-thread-inner"
   data-chat-project="{{.Project}}"
   data-chat-agent="{{.Agent}}"
-  data-chat-flavor="{{.Flavor}}"
   {{if .ThreadID}}data-chat-thread-id="{{.ThreadID}}"{{end}}>
   {{if and .CanWrite .ThreadID}}
   <div class="chat-actions">
     <form hx-post="/partials/chat/clear" hx-target="#chat-thread" hx-swap="innerHTML"
-          hx-confirm="Clear this conversation with {{.Agent}}{{if .Flavor}}:{{.Flavor}}{{end}} for {{.Project}}? Previous chats with other identities are kept.">
+          hx-confirm="Clear this conversation with {{.Agent}} for {{.Project}}? Previous chats with other agents are kept.">
       <input type="hidden" name="csrf_token" value="{{.CSRF}}">
       <input type="hidden" name="project" value="{{.Project}}">
       <input type="hidden" name="agent" value="{{.Agent}}">
-      <input type="hidden" name="flavor" value="{{.Flavor}}">
       <button class="btn btn-danger" type="submit">Clear chat</button>
     </form>
   </div>
@@ -51,7 +49,7 @@
     {{else if not .Error}}
     <div class="chat-empty">
       <p>No messages yet.</p>
-      <p class="card-meta">Ask {{.Agent}}{{if .Flavor}}:{{.Flavor}}{{end}} anything about {{.Project}}.</p>
+      <p class="card-meta">Ask {{.Agent}} anything about {{.Project}}.</p>
     </div>
     {{end}}
   </div>
@@ -60,9 +58,8 @@
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <input type="hidden" name="project" value="{{.Project}}">
     <input type="hidden" name="agent" value="{{.Agent}}">
-    <input type="hidden" name="flavor" value="{{.Flavor}}">
     <textarea name="message" class="chat-draft" rows="2" maxlength="8000"
-      placeholder="Message {{.Agent}}{{if .Flavor}}:{{.Flavor}}{{end}}…"></textarea>
+      placeholder="Message {{.Agent}}…"></textarea>
     <button class="btn btn-primary" type="submit">Send</button>
   </form>
   {{end}}

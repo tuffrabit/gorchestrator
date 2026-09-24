@@ -19,7 +19,12 @@
     <span class="card-title">{{if .Issue.ProjectName}}{{.Issue.ProjectName}} · {{end}}{{$issue.Title}}</span>
     <span class="card-meta">
       <span class="status-chip"{{if .Issue.FailureReason}} title="{{.Issue.FailureReason}}"{{end}}>{{statusLabel $issue.Status}}</span>
+      {{if .Issue.IsLegacy}}
       <span class="phase-chip" title="current phase">{{$issue.CurrentPhase}}</span>
+      {{else}}
+      {{/* Frozen flow: "1 · scout → 2 · coder" with the live step marked. */}}
+      <span class="flow-chip" title="frozen agent flow">{{range $i, $f := .Issue.Phases}}{{if $i}}<span class="flow-sep" aria-hidden="true">→</span>{{end}}<span class="flow-step {{$f.State}}">{{$f.Index}} · {{$f.AgentID}}</span>{{end}}</span>
+      {{end}}
       {{if .Issue.ModelActivity}}<span class="model-chip" title="inference server is busy for this issue"><span class="model-chip-dot" aria-hidden="true"></span>{{.Issue.ModelActivity.Label}}</span>{{end}}
       {{if .Issue.BlockedBy}}<span class="blocked-chip" title="queued — waiting on dependencies">blocked by {{range $i, $dep := .Issue.BlockedBy}}{{if $i}}, {{end}}#{{$dep}}{{end}}</span>{{end}}
       {{if .Issue.PhaseStatus}}<span class="mono" title="phase result status">{{.Issue.PhaseStatus}}</span>{{end}}
@@ -33,21 +38,17 @@
       {{range $i, $p := .Issue.Phases}}
         {{if $i}}<span class="phase-sep" aria-hidden="true">→</span>{{end}}
         <span class="phase-step {{$p.State}}" role="listitem"
-          title="{{$p.Agent}}: {{if $p.Status}}{{$p.Status}}{{else}}{{$p.State}}{{end}}">
+          title="{{$p.AgentID}}: {{if $p.Status}}{{$p.Status}}{{else}}{{$p.State}}{{end}}">
           {{if eq $p.State "done"}}<span class="phase-mark" aria-hidden="true">✓</span>{{end}}
           {{if eq $p.State "current"}}<span class="phase-mark pulse" aria-hidden="true">●</span>{{end}}
           {{if eq $p.State "waiting"}}<span class="phase-mark" aria-hidden="true">⏸</span>{{end}}
           {{if eq $p.State "failed"}}<span class="phase-mark" aria-hidden="true">✕</span>{{end}}
-          <span class="phase-name">{{$p.Name}}</span>
-          <span class="phase-agent">{{$p.Agent}}</span>
+          {{if $.Issue.IsLegacy}}<span class="phase-name">{{$p.Key}}</span>{{else}}<span class="phase-name">{{$p.Index}}</span>{{end}}
+          <span class="phase-agent">{{$p.AgentID}}</span>
         </span>
       {{else}}
         {{/* Fallback when Phases is empty (older views). */}}
-        <span class="phase-step {{if eq $issue.CurrentPhase "research"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "plan") (eq $issue.CurrentPhase "implementation")}}done{{end}}">research</span>
-        <span class="phase-sep">→</span>
-        <span class="phase-step {{if eq $issue.CurrentPhase "plan"}}current{{else if or (eq $issue.Status "done") (eq $issue.CurrentPhase "implementation")}}done{{end}}">plan</span>
-        <span class="phase-sep">→</span>
-        <span class="phase-step {{if eq $issue.CurrentPhase "implementation"}}current{{else if eq $issue.Status "done"}}done{{end}}">implementation</span>
+        <span class="phase-step {{if eq $issue.Status "done"}}done{{end}} {{if ne $issue.Status "done"}}current{{end}}">{{$issue.CurrentPhase}}</span>
       {{end}}
     </div>
     <div class="card-meta" style="margin-bottom:0.75rem">
@@ -93,8 +94,8 @@
       <button class="btn" type="button"
         onclick="openArtifactDrawer({{$issue.ID}}, 'activity')">activity</button>
       <button class="btn" type="button"
-        onclick="openArtifactDrawer({{$issue.ID}}, 'output', 'implementation')"
-        title="Implementation workspace tree and per-file diffs">workspace</button>
+        onclick="openArtifactDrawer({{$issue.ID}}, 'workspace')"
+        title="Workspace tree and per-file diffs">workspace</button>
       {{if .CanWrite}}
       {{if eq $issue.Status "in_progress"}}
       <button class="btn btn-danger" type="button"
@@ -152,9 +153,9 @@
       {{end}}
     </form>
       {{else if eq $issue.Status "done"}}
-    <p class="card-meta">Issue complete — all phases finished.</p>
+    <p class="card-meta">Issue complete — all flow steps finished.</p>
       {{else}}
-    <p class="card-meta">Pipeline active on <strong>{{$issue.CurrentPhase}}</strong> ({{$issue.Status}}). Intervene when it pauses or fails.</p>
+    <p class="card-meta">Flow active on <strong>{{$issue.CurrentPhase}}</strong> ({{$issue.Status}}). Intervene when it pauses or fails.</p>
       {{end}}
     {{else}}
     <p class="card-meta">Adjudication requires member role.</p>

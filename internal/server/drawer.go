@@ -17,15 +17,11 @@ import (
 	gmhtml "github.com/yuin/goldmark/renderer/html"
 
 	"github.com/tuffrabit/gorchestrator/internal/orchestrator"
+	"github.com/tuffrabit/gorchestrator/internal/sqlite"
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 )
 
-const (
-	phaseResearch       = "research"
-	phasePlan           = "plan"
-	phaseImplementation = "implementation"
-	drawerPayloadCap    = 256 * 1024
-)
+const drawerPayloadCap = 256 * 1024
 
 // drawerMarkdown renders agent output.md for the artifact drawer.
 // WithUnsafe keeps intentional raw HTML in free-form agent artifacts (HTML
@@ -34,45 +30,19 @@ var drawerMarkdown = goldmark.New(
 	goldmark.WithRendererOptions(gmhtml.WithUnsafe()),
 )
 
-var knownPhases = []string{phaseResearch, phasePlan, phaseImplementation}
-
-func normalizePhase(phase string) string {
-	switch strings.ToLower(strings.TrimSpace(phase)) {
-	case phaseResearch, "researcher":
-		return phaseResearch
-	case phasePlan, "planner":
-		return phasePlan
-	case phaseImplementation, "implementer", "impl":
-		return phaseImplementation
-	default:
-		return ""
-	}
+// stepKeyIn reports whether key is one of the issue's frozen step keys.
+func stepKeyIn(steps []sqlite.Step, key string) bool {
+	return stepIndexOf(steps, key) >= 0
 }
 
-func phaseLabel(phase string) string {
-	switch phase {
-	case phaseResearch:
-		return "Research"
-	case phasePlan:
-		return "Plan"
-	case phaseImplementation:
-		return "Implementation"
-	default:
-		return phase
+// stepIndexOf returns the 0-based position of key in steps, or -1.
+func stepIndexOf(steps []sqlite.Step, key string) int {
+	for i, st := range steps {
+		if st.Key == key {
+			return i
+		}
 	}
-}
-
-func phaseAgent(phase string) string {
-	switch phase {
-	case phaseResearch:
-		return "researcher"
-	case phasePlan:
-		return "planner"
-	case phaseImplementation:
-		return "implementer"
-	default:
-		return phase
-	}
+	return -1
 }
 
 // drawerPayload is one rendered drawer tab: raw text (Content) or rendered
@@ -85,48 +55,56 @@ type drawerPayload struct {
 	Truncated   bool
 }
 
-func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, tab, phase string) (drawerPayload, error) {
+func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, tab, stepKey string) (drawerPayload, error) {
 	if view == nil || view.Issue == nil {
 		return drawerPayload{}, fmt.Errorf("no issue")
 	}
 	issue := view.Issue
-	if phase == "" {
-		phase = issue.CurrentPhase
-	}
-	phase = normalizePhase(phase)
-	if phase == "" {
-		phase = normalizePhase(issue.CurrentPhase)
-	}
-	if phase == "" {
-		phase = phaseResearch
-	}
-
-	projectID := issue.ProjectID
-	issueID := issue.ID
 	ctx := r.Context()
+	steps, err := s.eng.StepsForIssue(issue)
+	if err != nil || len(steps) == 0 {
+		return drawerPayload{}, fmt.Errorf("resolve issue flow: %w", err)
+	}
+	if tab == "workspace" {
+		html, werr := s.renderWorkspaceTree(ctx, view)
+		if werr != nil {
+			return drawerPayload{Content: werr.Error()}, nil
+		}
+		return drawerPayload{ContentHTML: html}, nil
+	}
+	if !stepKeyIn(steps, stepKey) {
+		if stepKeyIn(steps, issue.CurrentPhase) {
+			stepKey = issue.CurrentPhase
+		} else if tab == "output" {
+			stepKey = steps[len(steps)-1].Key
+		} else {
+			stepKey = steps[0].Key
+		}
+	}
+	idx := stepIndexOf(steps, stepKey)
+	step := steps[idx]
+	isFinal := idx == len(steps)-1
 
 	switch tab {
 	case "result":
-		key := storage.ResultPath(projectID, issueID, phase)
-		data, err := s.eng.Store().Read(ctx, key)
-		if err != nil {
+		data, rerr := s.eng.Store().Read(ctx, storage.ResultPath(issue.ProjectID, issue.ID, step.Key))
+		if rerr != nil {
 			return drawerPayload{Content: "(no result.json yet)"}, nil
 		}
 		return drawerPayload{Content: string(data)}, nil
 	case "output":
-		if phase == phaseImplementation {
-			html, err := s.renderWorkspaceTree(ctx, view)
-			if err != nil {
-				return drawerPayload{Content: err.Error()}, nil
+		if isFinal && s.workspaceStepDone(ctx, issue, stepKey) {
+			html, herr := s.renderWorkspaceTree(ctx, view)
+			if herr != nil {
+				return drawerPayload{Content: herr.Error()}, nil
 			}
 			return drawerPayload{ContentHTML: html}, nil
 		}
-		content, contentHTML, err := s.drawerPhaseOutput(ctx, view, phase)
-		return drawerPayload{Content: content, ContentHTML: contentHTML}, err
+		content, contentHTML, oerr := s.stepOutput(ctx, view, step)
+		return drawerPayload{Content: content, ContentHTML: contentHTML}, oerr
 	case "activity", "events":
-		key := storage.EventsPath(projectID, issueID, phase)
-		data, err := s.eng.Store().Read(ctx, key)
-		if err != nil {
+		data, aerr := s.eng.Store().Read(ctx, storage.EventsPath(issue.ProjectID, issue.ID, step.Key))
+		if aerr != nil {
 			return drawerPayload{Content: "(no events yet)"}, nil
 		}
 		truncated := false
@@ -134,7 +112,7 @@ func (s *Server) drawerContent(r *http.Request, view *orchestrator.IssueView, ta
 			data = data[:drawerPayloadCap]
 			// Keep only complete lines: a mid-line cut leaves an invalid
 			// trailing JSON record, which would forfeit the tree view for
-			// exactly the large implementation logs that need it most.
+			// exactly the large workspace logs that need it most.
 			if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
 				data = data[:i]
 			}
@@ -177,21 +155,20 @@ func eventsToJSONArray(data []byte) string {
 	return string(out)
 }
 
-func (s *Server) drawerPhaseOutput(ctx context.Context, view *orchestrator.IssueView, phase string) (string, template.HTML, error) {
+func (s *Server) stepOutput(ctx context.Context, view *orchestrator.IssueView, step sqlite.Step) (string, template.HTML, error) {
 	issue := view.Issue
 	projectID := issue.ProjectID
 	issueID := issue.ID
 
-	key := storage.ResultPath(projectID, issueID, phase)
-	data, err := s.eng.Store().Read(ctx, key)
+	data, err := s.eng.Store().Read(ctx, storage.ResultPath(projectID, issueID, step.Key))
 	if err != nil {
 		return "(no output)", "", nil
 	}
-	// Always resolve against *this* phase's result — not the issue's current-phase attempt.
-	outPath := storage.AttemptOutputPath(projectID, issueID, phase, 1)
-	if res, err := readPhaseResultMeta(data); err == nil {
+	// Always resolve against *this* step's result — not the issue's current-step attempt.
+	outPath := storage.AttemptOutputPath(projectID, issueID, step.Key, 1)
+	if res, err := readStepResultMeta(data); err == nil {
 		if res.Attempt > 0 {
-			outPath = storage.AttemptOutputPath(projectID, issueID, phase, res.Attempt)
+			outPath = storage.AttemptOutputPath(projectID, issueID, step.Key, res.Attempt)
 		}
 		if res.LatestOutput != "" {
 			outPath = res.LatestOutput
@@ -210,27 +187,38 @@ func (s *Server) drawerPhaseOutput(ctx context.Context, view *orchestrator.Issue
 	return string(out), "", nil
 }
 
-type phaseResultMeta struct {
+type stepResultMeta struct {
 	Status       string `json:"status"`
 	Attempt      int    `json:"attempt"`
 	LatestOutput string `json:"latest_output"`
 }
 
-func readPhaseResultMeta(data []byte) (phaseResultMeta, error) {
-	var m phaseResultMeta
+func readStepResultMeta(data []byte) (stepResultMeta, error) {
+	var m stepResultMeta
 	if err := jsonUnmarshal(data, &m); err != nil {
 		return m, err
 	}
 	return m, nil
 }
 
-// implementationDone reports whether the implementer phase finished successfully.
-func (s *Server) implementationDone(ctx context.Context, projectID, issueID int64) bool {
-	data, err := s.eng.Store().Read(ctx, storage.ResultPath(projectID, issueID, phaseImplementation))
+// workspaceStepDone reports whether the given step finished successfully
+// (result.json status == "done"). The final step of an issue's flow owns the
+// workspace, so the workspace download and the workspace output tab gate on
+// the final step.
+func (s *Server) workspaceStepDone(ctx context.Context, issue *sqlite.Issue, stepKey string) bool {
+	steps, err := s.eng.StepsForIssue(issue)
 	if err != nil {
 		return false
 	}
-	meta, err := readPhaseResultMeta(data)
+	idx := stepIndexOf(steps, stepKey)
+	if idx < 0 {
+		idx = len(steps) - 1
+	}
+	data, err := s.eng.Store().Read(ctx, storage.ResultPath(issue.ProjectID, issue.ID, steps[idx].Key))
+	if err != nil {
+		return false
+	}
+	meta, err := readStepResultMeta(data)
 	if err != nil {
 		return false
 	}
@@ -248,7 +236,11 @@ type workspaceNode struct {
 
 func (s *Server) renderWorkspaceTree(ctx context.Context, view *orchestrator.IssueView) (template.HTML, error) {
 	issue := view.Issue
-	ws := storage.WorkspacePath(issue.ProjectID, issue.ID)
+	// New layout first, legacy fallback for old issues (engine-level resolve).
+	ws, err := s.eng.WorkspaceKey(ctx, issue)
+	if err != nil {
+		return "", err
+	}
 	exists, err := s.eng.Store().Exists(ctx, ws)
 	if err != nil {
 		return "", err
@@ -271,14 +263,19 @@ func (s *Server) renderWorkspaceTree(ctx context.Context, view *orchestrator.Iss
 		changed[rel] = fileDiffers(ctx, s.eng.Store(), srcRoot, ws, rel)
 	}
 	tree := buildWorkspaceTree(files, ws, changed)
-	canDownload := s.implementationDone(ctx, issue.ProjectID, issue.ID)
+	steps, _ := s.eng.StepsForIssue(issue)
+	var lastKey string
+	if len(steps) > 0 {
+		lastKey = steps[len(steps)-1].Key
+	}
+	canDownload := s.workspaceStepDone(ctx, issue, lastKey)
 
 	var b strings.Builder
 	b.WriteString(`<div class="ws-browser">`)
 	if canDownload {
 		fmt.Fprintf(&b, `<div class="ws-toolbar"><a class="btn btn-primary" href="/api/issues/%d/workspace.zip">Download workspace (.zip)</a></div>`, issue.ID)
 	} else {
-		b.WriteString(`<div class="ws-toolbar"><span class="card-meta">Download available when implementation is done.</span></div>`)
+		b.WriteString(`<div class="ws-toolbar"><span class="card-meta">Download available when the workspace step is done.</span></div>`)
 	}
 	if len(tree) == 0 {
 		b.WriteString(`<p class="card-meta">(workspace is empty)</p>`)

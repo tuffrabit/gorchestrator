@@ -5,6 +5,7 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
+	"strconv"
 	"sync"
 )
 
@@ -25,6 +26,7 @@ func Templates() (*template.Template, error) {
 			"statusLabel": statusLabel,
 			"expandCard":  expandCard,
 			"cardCtx":     cardCtx,
+			"jsInt":       jsInt,
 		}
 		t := template.New("root").Funcs(funcMap)
 		t, tmplErr = t.ParseFS(content, "templates/*.html", "templates/partials/*.html")
@@ -81,6 +83,28 @@ func statusLabel(status string) string {
 		return "stopped"
 	default:
 		return status
+	}
+}
+
+// jsInt renders an integer as a bare JavaScript literal for use inside inline
+// event handlers. html/template's contextual escaper pads plain ints in JS
+// context (onclick="f( 1 )") and quotes string ones (onclick="f(\"1\")"), so
+// templates that generate numeric call arguments use this helper instead. The
+// value is formatted with strconv, so the output is always a numeric literal.
+func jsInt(v any) template.JS {
+	switch n := v.(type) {
+	case int:
+		return template.JS(strconv.Itoa(n))
+	case int32:
+		return template.JS(strconv.FormatInt(int64(n), 10))
+	case int64:
+		return template.JS(strconv.FormatInt(n, 10))
+	case float64:
+		return template.JS(strconv.FormatInt(int64(n), 10))
+	case nil:
+		return template.JS("0")
+	default:
+		return template.JS("0")
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/tuffrabit/gorchestrator/internal/config"
 )
@@ -36,5 +37,15 @@ func Validate(fs *flag.FlagSet, args []string) error {
 		fmt.Printf(" %s", name)
 	}
 	fmt.Println()
+
+	if len(cfg.AgentIDs()) > 0 {
+		fmt.Printf("agents: %s\n", strings.Join(cfg.AgentIDs(), ", "))
+	}
+	for _, name := range names {
+		pc := cfg.Projects[name]
+		if len(pc.DefaultFlow) > 0 {
+			fmt.Printf("project %q default_flow: %s\n", name, strings.Join(pc.DefaultFlow, ", "))
+		}
+	}
 	return nil
 }

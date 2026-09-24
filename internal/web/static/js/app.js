@@ -20,25 +20,22 @@ function closeDrawer() {
 }
 
 // openArtifactDrawer loads the artifact drawer for an issue.
-// tab: result | output | activity (legacy "diff" is remapped server-side to
-// implementation workspace output)
-// phase: research | plan | implementation (optional — defaults to the card's
-// current phase, then research).
+// tab: result | output | activity | workspace
+// phase: the flow step key to show (optional — defaults to the card's
+// current step).
 function openArtifactDrawer(issueId, tab, phase) {
   var resolvedTab = tab || 'result';
   var resolvedPhase = phase;
-  if (resolvedTab === 'diff') {
-    resolvedTab = 'output';
-    if (!resolvedPhase) resolvedPhase = 'implementation';
-  }
-  if (!resolvedPhase) {
+  if (!resolvedPhase && resolvedTab !== 'workspace') {
     var card = document.getElementById('issue-' + issueId);
     if (card && card.dataset.phase) {
       resolvedPhase = card.dataset.phase;
     }
   }
   var title = 'Issue #' + issueId;
-  if (resolvedPhase) {
+  if (resolvedTab === 'workspace') {
+    title += ' · workspace';
+  } else if (resolvedPhase) {
     title += ' · ' + resolvedPhase;
   }
   openDrawer(title);
@@ -50,6 +47,34 @@ function openArtifactDrawer(issueId, tab, phase) {
     htmx.ajax('GET', url, {
       target: '#drawer-body',
       swap: 'innerHTML'
+    });
+  }
+}
+
+// Drawer content bootstrap. HTMX swaps partials (artifact, chat, submit) into
+// #drawer-body; inline <script> tags inside swapped partials are unreliable,
+// so the drawer's one-time setup lives here instead: build the activity JSON
+// tree and syntax-highlight code blocks.
+document.addEventListener('htmx:afterSwap', function (e) {
+  var body = document.getElementById('drawer-body');
+  if (!body) return;
+  var target = e.target || (e.detail && e.detail.elt);
+  if (!target || (target !== body && !body.contains(target))) return;
+  initDrawerContent(body);
+});
+
+function initDrawerContent(root) {
+  if (!root) return;
+  root.querySelectorAll('.events-tree').forEach(function (tree) {
+    if (tree.dataset.built) return;
+    tree.dataset.built = '1';
+    if (typeof renderJsonTree === 'function') renderJsonTree(tree);
+  });
+  if (window.hljs) {
+    root.querySelectorAll('pre code').forEach(function (el) {
+      if (el.dataset.hljsDone) return;
+      el.dataset.hljsDone = '1';
+      hljs.highlightElement(el);
     });
   }
 }
@@ -455,8 +480,8 @@ function chatDrawerOpen() {
   return !!(drawer && drawer.classList.contains('open'));
 }
 
-function chatDraftKey(project, agent, flavor) {
-  return 'chat-draft:' + (project || '') + ':' + (agent || '') + ':' + (flavor || '');
+function chatDraftKey(project, agent) {
+  return 'chat-draft:' + (project || '') + ':' + (agent || '');
 }
 
 // Debounced re-render of the visible chat thread. The thread partial always
@@ -471,8 +496,7 @@ function refreshChatThread() {
     var root = chatThreadRoot();
     if (!root || !chatDrawerOpen() || !window.htmx) return;
     var url = '/partials/chat/thread?project=' + encodeURIComponent(root.dataset.chatProject || '') +
-      '&agent=' + encodeURIComponent(root.dataset.chatAgent || '') +
-      '&flavor=' + encodeURIComponent(root.dataset.chatFlavor || '');
+      '&agent=' + encodeURIComponent(root.dataset.chatAgent || '');
     htmx.ajax('GET', url, { target: '#chat-thread', swap: 'innerHTML' });
   }, 150);
 }
@@ -492,7 +516,7 @@ function chatInitThread(root) {
   if (!root) return;
   var ta = root.querySelector('textarea.chat-draft');
   if (ta) {
-    var key = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent, root.dataset.chatFlavor);
+    var key = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent);
     if (window._chatLastSentKey === key) {
       ta.value = '';
     } else {
@@ -510,7 +534,7 @@ document.addEventListener('input', function (e) {
   if (!ta || !ta.classList || !ta.classList.contains('chat-draft')) return;
   var root = ta.closest('#chat-thread-inner');
   if (!root) return;
-  var key = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent, root.dataset.chatFlavor);
+  var key = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent);
   try {
     if (ta.value) localStorage.setItem(key, ta.value);
     else localStorage.removeItem(key);
@@ -528,7 +552,7 @@ document.addEventListener('htmx:beforeRequest', function (e) {
   if (post !== '/partials/chat/send') return;
   var root = chatThreadRoot();
   if (!root) return;
-  window._chatLastSentKey = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent, root.dataset.chatFlavor);
+  window._chatLastSentKey = chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent);
   var form = elt.closest ? elt.closest('form') : null;
   var ta = form ? form.querySelector('textarea.chat-draft') : null;
   window._chatLastSentBackup = ta ? ta.value : '';
@@ -614,7 +638,7 @@ function isIssueSubmitRequest(detail) {
   var verb = (detail.requestConfig && detail.requestConfig.verb) || '';
   if (String(verb).toLowerCase() !== 'post') return false;
   var path = (detail.pathInfo && (detail.pathInfo.requestPath || detail.pathInfo.finalRequestPath)) || '';
-  // Match POST /partials/submit but not GET /partials/submit or /partials/submit/flavors.
+  // Match POST /partials/submit but not GET /partials/submit or /partials/submit/flow.
   return /\/partials\/submit\/?$/.test(String(path));
 }
 

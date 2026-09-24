@@ -1,30 +1,39 @@
 {{define "partials/drawer_artifact.html"}}
 {{$id := .Issue.Issue.ID}}
-{{$phase := .Phase}}
 {{$tab := .Tab}}
+{{$phase := .Phase}}
 <div class="drawer-artifact" data-issue-id="{{$id}}" data-phase="{{$phase}}" data-tab="{{$tab}}">
-  <div class="drawer-phase-tabs" role="tablist" aria-label="Agent phase">
+  {{if .PhaseTabs}}
+  <div class="drawer-phase-tabs" role="tablist" aria-label="Flow steps">
     {{range .PhaseTabs}}
-    <button type="button"
-      class="btn drawer-phase-tab {{if .Current}}btn-primary{{end}} state-{{.State}}"
-      role="tab"
+    {{if eq .Name "workspace"}}
+    <button type="button" class="btn drawer-phase-tab state-done {{if eq $tab "workspace"}}btn-primary{{end}}"
+      aria-selected="{{if eq $tab "workspace"}}true{{else}}false{{end}}"
+      title="Workspace tree and per-file diffs"
+      onclick="openArtifactDrawer({{jsInt $id}}, 'workspace')">
+      Workspace
+    </button>
+    {{else}}
+    <button type="button" class="btn drawer-phase-tab state-{{.State}} {{if .Current}}btn-primary{{end}}"
       aria-selected="{{if .Current}}true{{else}}false{{end}}"
-      title="{{.Agent}} ({{.State}})"
-      onclick="openArtifactDrawer({{$id}}, '{{$tab}}', '{{.Name}}')">
+      title="{{.Agent}} · {{.State}}"
+      onclick="openArtifactDrawer({{jsInt $id}}, '{{$tab}}', '{{.Name}}')">
       {{.Label}}
     </button>
     {{end}}
+    {{end}}
   </div>
-  <div class="drawer-tabs-inline" role="tablist" aria-label="Artifact view">
-    <button class="btn {{if eq $tab "result"}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{$id}}, 'result', '{{$phase}}')">Result</button>
-    <button class="btn {{if eq $tab "output"}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{$id}}, 'output', '{{$phase}}')">{{if eq $phase "implementation"}}Workspace{{else}}Output{{end}}</button>
-    <button class="btn {{if or (eq $tab "activity") (eq $tab "events")}}btn-primary{{end}}" type="button"
-      onclick="openArtifactDrawer({{$id}}, 'activity', '{{$phase}}')">Activity</button>
+  {{end}}
+  <div class="drawer-tabs-inline" role="tablist" aria-label="Artifact views">
+    <button type="button" class="btn {{if eq $tab "result"}}btn-primary{{end}}"
+      onclick="openArtifactDrawer({{jsInt $id}}, 'result', '{{$phase}}')">Result</button>
+    <button type="button" class="btn {{if eq $tab "output"}}btn-primary{{end}}"
+      onclick="openArtifactDrawer({{jsInt $id}}, 'output', '{{$phase}}')">Output</button>
+    <button type="button" class="btn {{if eq $tab "activity"}}btn-primary{{end}}"
+      onclick="openArtifactDrawer({{jsInt $id}}, 'activity', '{{$phase}}')">Activity</button>
   </div>
   <div class="drawer-content-pane">
-  {{if .EventsJSON}}
+    {{if .EventsJSON}}
     <div class="json-tree-toolbar">
       <button class="btn" type="button" onclick="jsonTreeAll(this, true)">Expand all</button>
       <button class="btn" type="button" onclick="jsonTreeAll(this, false)">Collapse all</button>
@@ -32,29 +41,13 @@
       {{if .Truncated}}<span class="card-meta">truncated — showing first 256 KB</span>{{end}}
     </div>
     <pre class="js-events-data" hidden>{{.EventsJSON}}</pre>
-    <div class="json-tree" role="tree"></div>
+    <div class="json-tree events-tree" role="tree" aria-label="Event log"></div>
     <pre class="json-raw" hidden><code class="language-json">{{.Content}}</code></pre>
-  {{else if .ContentHTML}}
-    <div class="md-body">{{.ContentHTML}}</div>
-  {{else}}
-    <pre><code class="language-json">{{.Content}}</code></pre>
-  {{end}}
+    {{else if .ContentHTML}}
+    <div class="drawer-content-html md-body">{{.ContentHTML}}</div>
+    {{else}}
+    <pre class="drawer-content-pre"><code class="language-json">{{.Content}}</code></pre>
+    {{end}}
   </div>
 </div>
-<script>
-  if (window.hljs) {
-    document.querySelectorAll('#drawer-body pre code').forEach(function (el) { hljs.highlightElement(el); });
-  }
-  if (window.htmx && typeof htmx.process === 'function') {
-    htmx.process(document.getElementById('drawer-body'));
-  }
-  var treeEl = document.querySelector('#drawer-body .json-tree');
-  if (treeEl && typeof renderJsonTree === 'function') {
-    renderJsonTree(treeEl);
-  }
-  var title = document.getElementById('drawer-title');
-  if (title) {
-    title.textContent = 'Issue #{{$id}} · {{.PhaseLabel}}';
-  }
-</script>
 {{end}}

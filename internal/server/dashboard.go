@@ -146,44 +146,55 @@ func (s *Server) handlePartialDrawer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	phase := normalizePhase(r.URL.Query().Get("phase"))
-	if phase == "" {
-		phase = normalizePhase(view.Issue.CurrentPhase)
+	// Resolve the requested step key against the issue's frozen flow.
+	steps, err := s.eng.StepsForIssue(view.Issue)
+	if err != nil || len(steps) == 0 {
+		http.Error(w, "issue has no agent flow", http.StatusNotFound)
+		return
 	}
-	if phase == "" {
-		phase = phaseResearch
-	}
-	// Deep links that used ?drawer=diff historically should land on implementation.
-	if r.URL.Query().Get("tab") == "diff" {
-		phase = phaseImplementation
+	phase := r.URL.Query().Get("phase")
+	if !stepKeyIn(steps, phase) {
+		if stepKeyIn(steps, view.Issue.CurrentPhase) {
+			phase = view.Issue.CurrentPhase
+		} else if tab == "output" || tab == "workspace" {
+			phase = steps[len(steps)-1].Key
+		} else {
+			phase = steps[0].Key
+		}
 	}
 	payload, err := s.drawerContent(r, view, tab, phase)
 	if err != nil {
 		payload.Content = err.Error()
 	}
-	// Build phase strip metadata for in-drawer tabs.
-	phaseTabs := make([]map[string]any, 0, len(knownPhases))
-	for _, p := range knownPhases {
-		st := "pending"
-		for _, step := range view.Phases {
-			if step.Name == p {
-				st = step.State
-				break
-			}
-		}
+	// Build step strip metadata for in-drawer tabs: one tab per flow step,
+	// plus a dedicated Workspace tab whenever the issue has a workspace.
+	phaseTabs := make([]map[string]any, 0, len(steps)+1)
+	for _, p := range view.Phases {
 		phaseTabs = append(phaseTabs, map[string]any{
-			"Name":    p,
-			"Label":   phaseLabel(p),
-			"Agent":   phaseAgent(p),
-			"State":   st,
-			"Current": p == phase,
+			"Name":    p.Key,
+			"Label":   fmt.Sprintf("%d · %s", p.Index, p.AgentID),
+			"Agent":   p.AgentID,
+			"State":   p.State,
+			"Current": p.Key == phase && tab != "workspace",
 		})
+	}
+	wsKey, werr := s.eng.WorkspaceKey(r.Context(), view.Issue)
+	if werr == nil {
+		if wsExists, _ := s.eng.Store().Exists(r.Context(), wsKey); wsExists {
+			phaseTabs = append(phaseTabs, map[string]any{
+				"Name":    "workspace",
+				"Label":   "Workspace",
+				"Agent":   "",
+				"State":   "done",
+				"Current": tab == "workspace",
+			})
+		}
 	}
 	data := map[string]any{
 		"Issue":       view,
 		"Tab":         tab,
 		"Phase":       phase,
-		"PhaseLabel":  phaseLabel(phase),
+		"PhaseLabel":  phase,
 		"PhaseTabs":   phaseTabs,
 		"Content":     payload.Content,
 		"ContentHTML": payload.ContentHTML,
@@ -218,7 +229,11 @@ func (s *Server) handlePartialWorkspaceFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	issue := view.Issue
-	ws := storage.WorkspacePath(issue.ProjectID, issue.ID)
+	ws, werr := s.eng.WorkspaceKey(r.Context(), issue)
+	if werr != nil {
+		http.Error(w, werr.Error(), http.StatusInternalServerError)
+		return
+	}
 	src := storage.SourcePath(issue.ProjectID, issue.ID)
 	diff, err := singleFileDiff(r.Context(), s.eng.Store(), src, ws, rel)
 	if err != nil {
@@ -235,21 +250,73 @@ func (s *Server) handlePartialWorkspaceFile(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handlePartialSubmit(w http.ResponseWriter, r *http.Request) {
-	data := s.submitFormData(r, r.URL.Query().Get("project"), "", false)
+	data := s.submitFormData(r, r.URL.Query().Get("project"), nil, "", false)
 	if err := render(w, "partials/drawer_submit.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
-func (s *Server) handlePartialSubmitFlavors(w http.ResponseWriter, r *http.Request) {
-	project := r.URL.Query().Get("project")
+// handlePartialSubmitFlow re-renders the flow builder. The hidden flow_state
+// input is the authoritative ordered flow; the request adds exactly one
+// change event (a changed select), a flow_remove index, or a flow_add.
+func (s *Server) handlePartialSubmitFlow(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	project := q.Get("project")
 	if project == "" {
 		project = r.FormValue("project")
 	}
-	data := s.submitFormData(r, project, "", false)
-	if err := render(w, "partials/submit_flavors.html", data); err != nil {
+	flow := splitFlowCSV(q.Get("flow_state"))
+	switch {
+	case q.Get("flow_add") != "":
+		if len(flow) < maxFlowSteps {
+			flow = append(flow, "")
+		}
+	case q.Get("flow_remove") != "":
+		if i, err := strconv.Atoi(q.Get("flow_remove")); err == nil && i >= 1 && i <= len(flow) {
+			flow = append(flow[:i-1], flow[i:]...)
+		}
+	default:
+		// A select's change event: HTMX serializes every flow_agent select in
+		// document order, so the changed one is the first value that differs
+		// from the authoritative flow_state.
+		for i, v := range q["flow_agent"] {
+			v = strings.TrimSpace(v)
+			if i < len(flow) {
+				if v != flow[i] {
+					flow[i] = v
+					break
+				}
+				continue
+			}
+			// A select beyond the stored state (a blank slot never made it into
+			// flow_state because trailing blanks join to ""): record the pick.
+			if v != "" && len(flow) < maxFlowSteps {
+				flow = append(flow, v)
+				break
+			}
+		}
+	}
+	data := s.submitFormData(r, project, flow, "", false)
+	if err := render(w, "partials/submit_flow.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// maxFlowSteps mirrors orchestrator.maxFlowSteps for the submit UI cap.
+const maxFlowSteps = 8
+
+// splitFlowCSV splits an authoritative flow-state CSV, keeping blank slots
+// ("a,,b" → ["a", "", "b"]).
+func splitFlowCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.TrimSpace(p))
+	}
+	return out
 }
 
 func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request) {
@@ -272,10 +339,14 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "project and title required", http.StatusUnprocessableEntity)
 		return
 	}
-	flavors := map[string]string{}
-	for _, typ := range []string{"researcher", "planner", "implementer"} {
-		if v := r.FormValue("agent_flavor_" + typ); v != "" {
-			flavors[typ] = v
+	// The <select name="flow_agent"> elements serialize in DOM order —
+	// r.PostForm[key] preserves document order, exactly the ordered flow we
+	// need. Blank slots (unpicked steps) are dropped; the engine's resolveFlow
+	// rejects the rest (unknown ids, duplicates, too long).
+	flow := make([]string, 0)
+	for _, v := range r.PostForm["flow_agent"] {
+		if v = strings.TrimSpace(v); v != "" {
+			flow = append(flow, v)
 		}
 	}
 	attachments, err := collectFormAttachments(r)
@@ -289,13 +360,13 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
-		ProjectName:  project,
-		IssueTitle:   title,
-		Description:  description,
-		Attachments:  attachments,
-		DryRun:       dryRun,
-		AgentFlavors: flavors,
-		DependsOn:    dependsOn,
+		ProjectName: project,
+		IssueTitle:  title,
+		Description: description,
+		Attachments: attachments,
+		DryRun:      dryRun,
+		Flow:        flow,
+		DependsOn:   dependsOn,
 	})
 	if err != nil {
 		msg := err.Error()
@@ -314,7 +385,7 @@ func (s *Server) handlePartialSubmitPost(w http.ResponseWriter, r *http.Request)
 	_ = s.eng.Audit().Record(uid, "submit_issue", "issue", orchestrator.IssueIDString(issue.ID), map[string]any{
 		"project": project, "title": title, "has_description": description != "",
 		"attachment_count": len(attachments), "dry_run": dryRun,
-		"agent_flavors": parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
+		"flow": pipelineStepObjects(issue.PipelineJSON),
 	})
 	view, _ := s.eng.GetIssue(r.Context(), issue.ID)
 	// Return the new card partial; HTMX can prepend it.
@@ -386,8 +457,10 @@ func collectFormAttachments(r *http.Request) ([]orchestrator.AttachmentFile, err
 	return out, nil
 }
 
-// submitFormData builds template data for the New-issue drawer.
-func (s *Server) submitFormData(r *http.Request, selectedProject, title string, dryRun bool) map[string]any {
+// submitFormData builds template data for the New-issue drawer. flow is the
+// in-progress flow for the selected project; when empty it is prefilled
+// from projects.<name>.default_flow.
+func (s *Server) submitFormData(r *http.Request, selectedProject string, flow []string, title string, dryRun bool) map[string]any {
 	registered, _ := s.eng.ListRegisteredProjects(r.Context())
 	type projOpt struct {
 		Name string
@@ -399,6 +472,13 @@ func (s *Server) submitFormData(r *http.Request, selectedProject, title string, 
 	if selectedProject == "" && len(projects) == 1 {
 		selectedProject = projects[0].Name
 	}
+	var defaultFlow []string
+	if pc, ok := s.eng.ProjectConfig(selectedProject); ok {
+		defaultFlow = pc.DefaultFlow
+	}
+	if len(flow) == 0 && len(defaultFlow) > 0 {
+		flow = defaultFlow
+	}
 	data := map[string]any{
 		"Projects":        projects,
 		"SelectedProject": selectedProject,
@@ -407,58 +487,52 @@ func (s *Server) submitFormData(r *http.Request, selectedProject, title string, 
 		"DependsOn":       "",
 		"DryRun":          dryRun,
 		"CSRF":            auth.CSRFToken(r),
-		"FlavorSelects":   s.flavorSelectsForProject(selectedProject),
+		"Flow":            flow,
+		"FlowCSV":         strings.Join(flow, ","),
+		"FlowSteps":       s.flowStepsForProject(selectedProject, flow),
+		"AgentIDs":        s.eng.Cfg().AgentIDs(),
+		"DefaultFlow":     defaultFlow,
+		"HasDefaultFlow":  len(defaultFlow) > 0,
+		"CanAddFlowStep":  len(flow) < maxFlowSteps,
 	}
 	return data
 }
 
-// flavorSelectOption is one option in a flavor <select>.
-type flavorSelectOption struct {
-	Name     string
+// flowStepOption is one option in a step's agent <select>.
+type flowStepOption struct {
+	ID       string
 	Selected bool
 }
 
-// flavorSelect is a multi-flavor stage shown in the submit form.
-type flavorSelect struct {
-	Type    string
-	Label   string
-	Options []flavorSelectOption
+// flowStep is one row of the flow builder: a 1-based step index plus the
+// agent options (every configured agent id is valid at every position).
+type flowStep struct {
+	Index   int
+	Options []flowStepOption
 }
 
-func (s *Server) flavorSelectsForProject(projectName string) []flavorSelect {
-	if projectName == "" {
+func (s *Server) flowStepsForProject(project string, current []string) []flowStep {
+	if project == "" {
 		return nil
 	}
-	pc, ok := s.eng.ProjectConfig(projectName)
-	if !ok {
+	if _, ok := s.eng.ProjectConfig(project); !ok {
 		return nil
 	}
-	catalog := pc.FlavorCatalog()
-	labels := map[string]string{
-		"researcher":  "Researcher flavor",
-		"planner":     "Planner flavor",
-		"implementer": "Implementer flavor",
-	}
-	var out []flavorSelect
-	for _, typ := range []string{"researcher", "planner", "implementer"} {
-		info := catalog[typ]
-		if len(info.Flavors) <= 1 {
-			continue
+	ids := s.eng.Cfg().AgentIDs()
+	steps := make([]flowStep, 0, len(current))
+	for i, sel := range current {
+		opts := make([]flowStepOption, 0, len(ids)+1)
+		// Unpicked step: lead with an explicit blank so the select does not
+		// silently default to the first agent.
+		if sel == "" {
+			opts = append(opts, flowStepOption{ID: "", Selected: true})
 		}
-		opts := make([]flavorSelectOption, 0, len(info.Flavors))
-		for _, name := range info.Flavors {
-			opts = append(opts, flavorSelectOption{
-				Name:     name,
-				Selected: name == info.Default,
-			})
+		for _, id := range ids {
+			opts = append(opts, flowStepOption{ID: id, Selected: id == sel && sel != ""})
 		}
-		out = append(out, flavorSelect{
-			Type:    typ,
-			Label:   labels[typ],
-			Options: opts,
-		})
+		steps = append(steps, flowStep{Index: i + 1, Options: opts})
 	}
-	return out
+	return steps
 }
 
 func (s *Server) handlePartialDeleteIssue(w http.ResponseWriter, r *http.Request) {
@@ -659,29 +733,14 @@ func (s *Server) permissionMatrix() []map[string]any {
 		return nil
 	}
 	// agent type → server allowlist from global defaults + project flavors
-	agentServers := map[string]map[string]struct{}{
-		"researcher":  {},
-		"planner":     {},
-		"implementer": {},
-	}
-	for _, typ := range []string{"researcher", "planner", "implementer"} {
-		ac := cfg.Agent(typ)
+	// agent id → server allowlist from the global agents: block
+	agentServers := map[string]map[string]struct{}{}
+	for id, ac := range cfg.Agents {
+		set := map[string]struct{}{}
 		for _, name := range ac.MCPServers {
-			agentServers[typ][name] = struct{}{}
+			set[name] = struct{}{}
 		}
-	}
-	for _, pc := range cfg.Projects {
-		for _, typ := range []string{"researcher", "planner", "implementer"} {
-			pac, ok := pc.Agents[typ]
-			if !ok {
-				continue
-			}
-			for _, fl := range pac.Flavors {
-				for _, name := range fl.MCPServers {
-					agentServers[typ][name] = struct{}{}
-				}
-			}
-		}
+		agentServers[id] = set
 	}
 
 	var mgr interface {

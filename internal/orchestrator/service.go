@@ -30,12 +30,13 @@ type DecideOptions struct {
 	BudgetOverrides map[string]int
 }
 
-// PhaseStep is one step in the research → plan → implementation strip.
+// PhaseStep is one step in the issue's frozen agent flow strip.
 type PhaseStep struct {
-	Name   string // step key ("step-1", "step-2", …)
-	Agent  string // agent ID for this step
-	State  string // pending | current | done | failed | waiting
-	Status string // raw step result.json status (may be empty)
+	Key     string // step key ("step-1", "step-2", …; legacy: research|plan|implementation)
+	AgentID string // agent ID for this step
+	Index   int    // 1-based position in the flow
+	State   string // pending | current | done | failed | waiting
+	Status  string // raw step result.json status (may be empty)
 }
 
 // IssueView is a read model for API/dashboard consumers.
@@ -52,7 +53,10 @@ type IssueView struct {
 	// phase's result.json error, or the last phase_error event when the phase
 	// died before writing a result. Empty otherwise.
 	FailureReason string
-	Phases        []PhaseStep // research → plan → implementation strip
+	Phases        []PhaseStep // frozen flow steps (legacy issues: research → plan → implementation)
+	// IsLegacy marks an issue created before the flow feature existed (empty
+	// pipeline_json). Dashboards keep rendering its old phase names untouched.
+	IsLegacy bool
 	// Attachments are basenames under attachments/ (issue context uploads).
 	Attachments []string
 	// BlockedBy lists unsatisfied dependency IDs for queued issues (read-time
@@ -612,6 +616,7 @@ func (e *Engine) issueView(ctx context.Context, issue *sqlite.Issue) (*IssueView
 		HoldReason:    holdReason,
 		FailureReason: failureReason,
 		Phases:        phases,
+		IsLegacy:      sqlite.IsLegacyIssue(issue),
 		Attachments:   atts,
 		BlockedBy:     blockedBy,
 		ModelActivity: modelAct,
@@ -631,9 +636,10 @@ func (e *Engine) buildPhaseSteps(ctx context.Context, projectID int64, issue *sq
 
 	for i, s := range steps {
 		step := PhaseStep{
-			Name:  s.Key,
-			Agent: s.AgentID,
-			State: "pending",
+			Key:     s.Key,
+			AgentID: s.AgentID,
+			Index:   s.Index,
+			State:   "pending",
 		}
 		if res, err := readResult(ctx, e.store, storage.ResultPath(projectID, issue.ID, s.Key)); err == nil {
 			step.Status = res.Status

@@ -245,6 +245,51 @@ button, input, select, textarea {
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
+/* Frozen flow badge on collapsed cards: 1 · scout → 2 · coder */
+.flow-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.flow-step {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  opacity: 0.65;
+  white-space: nowrap;
+}
+.flow-step.current {
+  background: color-mix(in srgb, var(--accent-pink) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent-pink) 55%, var(--border-subtle));
+  color: var(--accent-pink);
+  opacity: 1;
+}
+.flow-step.done {
+  color: var(--bar-in-progress);
+  border-color: color-mix(in srgb, var(--bar-in-progress) 40%, var(--border-subtle));
+  opacity: 1;
+}
+.flow-step.waiting {
+  color: var(--bar-waiting);
+  border-color: color-mix(in srgb, var(--bar-waiting) 50%, var(--border-subtle));
+  opacity: 1;
+}
+.flow-step.failed {
+  color: var(--bar-failed);
+  border-color: color-mix(in srgb, var(--bar-failed) 50%, var(--border-subtle));
+  opacity: 1;
+}
+.flow-sep {
+  color: var(--border-subtle);
+  user-select: none;
+}
 .phase-strip {
   display: flex;
   gap: 0.45rem;
@@ -927,6 +972,53 @@ button, input, select, textarea {
   margin: 0;
   accent-color: var(--accent-pink);
 }
+
+/* Submit drawer: agent flow builder (ordered agent picks) */
+.flow-builder {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 0.75rem;
+  margin-bottom: 0.85rem;
+  background: color-mix(in srgb, var(--bg-app) 60%, transparent);
+}
+.flow-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+.flow-row {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.flow-index {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+.flow-row select {
+  width: 100%;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+.btn-sm {
+  min-height: 2rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}
+.flow-add-row {
+  margin-bottom: 0;
+  display: flex;
+  justify-content: flex-start;
+}
 .issue-description,
 .issue-attachments {
   margin: 0 0 0.85rem;
@@ -1370,6 +1462,16 @@ button, input, select, textarea {
   .drawer-artifact .drawer-tabs-inline .btn {
     min-height: 44px;
     padding: 0.65rem 0.75rem;
+  }
+
+  .flow-row {
+    grid-template-columns: 1.4rem 1fr auto;
+  }
+
+  .flow-row select,
+  .flow-builder .btn {
+    min-height: 44px;
+    font-size: 1rem;
   }
 
   .drawer select,

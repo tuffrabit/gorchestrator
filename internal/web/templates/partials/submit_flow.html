@@ -1,0 +1,52 @@
+{{define "partials/submit_flow.html"}}
+{{/* Agent-flow builder: an ordered list of agent <select>s (one per step),
+     plus add/remove controls. The hidden flow_state input is the
+     authoritative ordered flow ("id1,id2,..." with blanks for unpicked
+     steps); the handler diff's the changed select against it. */}}
+<div class="flow-builder" id="flow-builder">
+  <div class="form-row flow-heading">
+    <label>Agent flow</label>
+    {{if .HasDefaultFlow}}
+    <span class="card-meta">project default: {{range $i, $a := .DefaultFlow}}{{if $i}} → {{end}}{{$a}}{{end}}</span>
+    {{end}}
+  </div>
+  <input type="hidden" name="flow_state" id="flow-state" value="{{.FlowCSV}}">
+  {{if not .FlowSteps}}
+  <p class="card-meta">Pick a project above to choose the agent flow for this issue.</p>
+  {{else}}
+  {{range .FlowSteps}}
+  <div class="flow-row">
+    <span class="flow-index" aria-hidden="true">{{.Index}}</span>
+    <select class="flow-agent" name="flow_agent"
+      hx-get="/partials/submit/flow"
+      hx-target="#flow-builder"
+      hx-swap="outerHTML"
+      hx-trigger="change"
+      hx-include="#flow-builder">
+      {{range .Options}}
+      <option value="{{.ID}}" {{if .Selected}}selected{{end}}>{{if .ID}}{{.ID}}{{else}}— pick an agent —{{end}}</option>
+      {{end}}
+    </select>
+    <button type="button" class="btn btn-sm" name="flow_remove" value="{{.Index}}"
+      hx-vals='{"flow_remove": "{{.Index}}"}'
+      hx-get="/partials/submit/flow"
+      hx-target="#flow-builder"
+      hx-swap="outerHTML"
+      hx-trigger="click"
+      hx-include="#flow-builder">✕</button>
+  </div>
+  {{end}}
+  {{if .CanAddFlowStep}}
+  <div class="flow-add-row">
+    <button type="button" class="btn btn-sm" name="flow_add" value="1"
+      hx-vals='{"flow_add": "1"}'
+      hx-get="/partials/submit/flow"
+      hx-target="#flow-builder"
+      hx-swap="outerHTML"
+      hx-trigger="click"
+      hx-include="#flow-builder">+ Add step</button>
+  </div>
+  {{end}}
+  {{end}}
+</div>
+{{end}}

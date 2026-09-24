@@ -34,6 +34,7 @@ func Run(fs *flag.FlagSet, args []string) error {
 	project := fs.String("project", "", "project name (must be declared under projects: in config YAML)")
 	dryRun := fs.Bool("dry-run", false, "use the dry-run LLM adapter")
 	dependsOn := fs.String("depends-on", "", "comma-separated IDs of issues that must be done before this one is claimable")
+	flow := fs.String("flow", "", "ordered agent flow for this issue (comma-separated agent ids, e.g. 'scout,fixer'); empty = project default_flow")
 	configPath := fs.String("config", "", "path to config yaml (default: ~/.config/gorchestrator/config.yaml)")
 
 	if err := fs.Parse(args); err != nil {
@@ -45,6 +46,11 @@ func Run(fs *flag.FlagSet, args []string) error {
 	}
 
 	deps, err := parseDependsOnFlag(*dependsOn)
+	if err != nil {
+		return err
+	}
+
+	flowIDs, err := parseFlowFlag(*flow)
 	if err != nil {
 		return err
 	}
@@ -97,9 +103,27 @@ func Run(fs *flag.FlagSet, args []string) error {
 		Attachments: attachments,
 		DryRun:      *dryRun,
 		DependsOn:   deps,
+		Flow:        flowIDs,
 	}
 
 	return orchestrator.Run(ctx, cfg, opts)
+}
+
+// parseFlowFlag parses an ordered agent flow ("scout,fixer").
+func parseFlowFlag(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("--flow: empty agent id in %q", raw)
+		}
+		out = append(out, part)
+	}
+	return out, nil
 }
 
 // parseDependsOnFlag parses a comma-separated issue ID list ("12,14").

@@ -31,12 +31,18 @@ func (s *Server) handleWorkspaceZip(w http.ResponseWriter, r *http.Request) {
 	issue := view.Issue
 	ctx := r.Context()
 
-	if !s.implementationDone(ctx, issue.ProjectID, issue.ID) {
-		writeJSONError(w, http.StatusConflict, "workspace download is only available after implementation is done")
+	steps, err := s.eng.StepsForIssue(issue)
+	if err != nil || len(steps) == 0 {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.workspaceStepDone(ctx, issue, steps[len(steps)-1].Key) {
+		writeJSONError(w, http.StatusConflict, "workspace download is only available after the workspace step is done")
 		return
 	}
 
-	ws := storage.WorkspacePath(issue.ProjectID, issue.ID)
+	// New layout first, legacy fallback for old issues (engine-level resolve).
+	ws, err := s.eng.WorkspaceKey(ctx, issue)
 	exists, err := s.eng.Store().Exists(ctx, ws)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())

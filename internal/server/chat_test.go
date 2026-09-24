@@ -74,27 +74,15 @@ func TestPartialChat_RendersControls(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`id="chat-project"`, `id="chat-agent"`, "acme", "researcher (base)", "No messages yet", "chat-composer", "chat-thread-inner"} {
+	for _, want := range []string{`id="chat-project"`, `id="chat-agent"`, "acme", "researcher", "No messages yet", "chat-composer", "chat-thread-inner"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("drawer chat missing %q: %.600s", want, body)
 		}
 	}
 }
 
-func TestPartialChatOptions_ListsFlavors(t *testing.T) {
-	_, srv := chatTestServer(t, func(cfg *config.Config) {
-		cfg.Projects["acme"] = config.ProjectConfig{
-			Agents: map[string]config.ProjectAgentConfig{
-				"researcher": {
-					Default: "thorough",
-					Flavors: map[string]config.AgentConfig{
-						"thorough": {},
-						"cheap":    {},
-					},
-				},
-			},
-		}
-	})
+func TestPartialChatOptions_ListsAgents(t *testing.T) {
+	_, srv := chatTestServer(t, nil)
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/partials/chat/options?project=acme", nil)
@@ -104,14 +92,18 @@ func TestPartialChatOptions_ListsFlavors(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`value="researcher"`, `value="researcher:thorough"`, `value="researcher:cheap"`, "researcher (base)", "researcher: thorough", "researcher: cheap"} {
+	// One option per configured agent id (sorted), nothing else.
+	for _, want := range []string{`value="implementer"`, `value="planner"`, `value="researcher"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("options missing %q: %s", want, body)
 		}
 	}
-	// Project default flavor is the preselected option.
-	if !strings.Contains(body, `value="researcher:thorough" selected`) {
-		t.Fatalf("expected project default flavor selected: %s", body)
+	if strings.Contains(body, ":") {
+		t.Fatalf("options must not contain flavor-style %q values: %s", ":", body)
+	}
+	// The first configured agent is the preselected option.
+	if !strings.Contains(body, `value="implementer" selected`) {
+		t.Fatalf("expected default agent selected: %s", body)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/partials/chat/options?project=nope", nil)
@@ -134,7 +126,7 @@ func TestPartialChatThread_EmptyStateAndValidation(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"No messages yet", `data-chat-project="acme"`, `data-chat-agent="researcher"`} {
+	for _, want := range []string{"No messages yet", `data-chat-project="acme"`, `data-chat-agent="implementer"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("thread missing %q: %.600s", want, body)
 		}
@@ -152,7 +144,7 @@ func TestPartialChatThread_EmptyStateAndValidation(t *testing.T) {
 		t.Fatalf("unknown project status = %d, want 400", rec.Code)
 	}
 
-	// Unknown agent type → 400.
+	// Unknown agent id → 400.
 	req = httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=writer", nil)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -160,15 +152,16 @@ func TestPartialChatThread_EmptyStateAndValidation(t *testing.T) {
 		t.Fatalf("unknown agent status = %d, want 400", rec.Code)
 	}
 
-	// Unknown flavor → 422.
-	req = httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher&flavor=nope", nil)
+	// Old flavor-shaped identities ("researcher:cheap") are gone: they fail
+	// cleanly instead of silently mapping to a base agent.
+	req = httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&identity=researcher%3Acheap", nil)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unknown flavor status = %d, want 422", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("legacy flavor identity status = %d, want 400", rec.Code)
 	}
 
-	// Combined identity select value is accepted.
+	// Identity select value is accepted.
 	req = httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&identity=planner", nil)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -252,7 +245,6 @@ func TestPartialChatSend_ValidationErrors(t *testing.T) {
 		{"project": {"acme"}, "agent": {"researcher"}, "message": {longMessage}},
 		{"project": {"nope"}, "agent": {"researcher"}, "message": {"hi"}},
 		{"project": {"acme"}, "agent": {"writer"}, "message": {"hi"}},
-		{"project": {"acme"}, "agent": {"researcher"}, "flavor": {"nope"}, "message": {"hi"}},
 	}
 	for i, form := range cases {
 		rec := chatPostForm(t, h, "/partials/chat/send", form)
@@ -267,33 +259,20 @@ func TestPartialChatSend_ValidationErrors(t *testing.T) {
 	}
 }
 
-func TestPartialChatSend_WithFlavor(t *testing.T) {
-	eng, srv := chatTestServer(t, func(cfg *config.Config) {
-		cfg.Projects["acme"] = config.ProjectConfig{
-			Agents: map[string]config.ProjectAgentConfig{
-				"researcher": {
-					Default: "thorough",
-					Flavors: map[string]config.AgentConfig{
-						"thorough": {},
-						"cheap":    {},
-					},
-				},
-			},
-		}
-	})
+func TestPartialChatSend_WithAgent(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
 	h := srv.Handler()
 
 	form := url.Values{}
 	form.Set("project", "acme")
-	form.Set("agent", "researcher")
-	form.Set("flavor", "cheap")
+	form.Set("agent", "planner")
 	form.Set("message", "quick question")
 	rec := chatPostForm(t, h, "/partials/chat/send", form)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `data-chat-flavor="cheap"`) {
-		t.Fatalf("flavor not echoed on thread root: %.600s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `data-chat-agent="planner"`) {
+		t.Fatalf("agent not echoed on thread root: %.600s", rec.Body.String())
 	}
 
 	user, err := eng.Users().GetByEmail("disabled@localhost")
@@ -301,12 +280,9 @@ func TestPartialChatSend_WithFlavor(t *testing.T) {
 		t.Fatalf("expected synthetic user row: %v", err)
 	}
 	projectID := chatProjectID(t, eng, "acme")
-	thread, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "cheap")
+	thread, err := eng.ChatRepo().FindThread(user.ID, projectID, "planner", "")
 	if err != nil || thread == nil {
-		t.Fatalf("expected flavor thread: thread=%v err=%v", thread, err)
-	}
-	if thread.Flavor != "cheap" {
-		t.Fatalf("thread flavor = %q", thread.Flavor)
+		t.Fatalf("expected agent thread: thread=%v err=%v", thread, err)
 	}
 }
 
@@ -399,30 +375,18 @@ func TestPartialChatClear_EmptiesThreadAndKeepsDrawer(t *testing.T) {
 	}
 }
 
-func TestPartialChatClear_OnlyClearsSelectedIdentity(t *testing.T) {
-	eng, srv := chatTestServer(t, func(cfg *config.Config) {
-		cfg.Projects["acme"] = config.ProjectConfig{
-			Agents: map[string]config.ProjectAgentConfig{
-				"researcher": {
-					Flavors: map[string]config.AgentConfig{
-						"thorough": {},
-						"cheap":    {},
-					},
-				},
-			},
-		}
-	})
+func TestPartialChatClear_OnlyClearsSelectedAgent(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
 	h := srv.Handler()
 
-	for _, flavor := range []string{"", "cheap"} {
+	for _, agent := range []string{"researcher", "planner"} {
 		form := url.Values{}
 		form.Set("project", "acme")
-		form.Set("agent", "researcher")
-		form.Set("flavor", flavor)
-		form.Set("message", "question about the "+flavor+" flavor")
+		form.Set("agent", agent)
+		form.Set("message", "question for the "+agent)
 		rec := chatPostForm(t, h, "/partials/chat/send", form)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("send flavor=%q status = %d body=%s", flavor, rec.Code, rec.Body.String())
+			t.Fatalf("send agent=%q status = %d body=%s", agent, rec.Code, rec.Body.String())
 		}
 	}
 	user, err := eng.Users().GetByEmail("disabled@localhost")
@@ -430,43 +394,42 @@ func TestPartialChatClear_OnlyClearsSelectedIdentity(t *testing.T) {
 		t.Fatalf("expected synthetic user row: user=%v err=%v", user, err)
 	}
 	projectID := chatProjectID(t, eng, "acme")
-	base, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "")
-	if err != nil || base == nil {
-		t.Fatalf("expected base thread: %+v err=%v", base, err)
+	researcherThread, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "")
+	if err != nil || researcherThread == nil {
+		t.Fatalf("expected researcher thread: %+v err=%v", researcherThread, err)
 	}
-	cheap, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "cheap")
-	if err != nil || cheap == nil {
-		t.Fatalf("expected cheap thread: %+v err=%v", cheap, err)
+	plannerThread, err := eng.ChatRepo().FindThread(user.ID, projectID, "planner", "")
+	if err != nil || plannerThread == nil {
+		t.Fatalf("expected planner thread: %+v err=%v", plannerThread, err)
 	}
-	waitForChatTurnDone(t, eng, base.ID, 2)
-	waitForChatTurnDone(t, eng, cheap.ID, 2)
+	waitForChatTurnDone(t, eng, researcherThread.ID, 2)
+	waitForChatTurnDone(t, eng, plannerThread.ID, 2)
 
 	clear := url.Values{}
 	clear.Set("project", "acme")
-	clear.Set("agent", "researcher")
-	clear.Set("flavor", "cheap")
-	rec := chatPostForm(t, h, "/partials/chat/clear", clear)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("clear status = %d body=%s", rec.Code, rec.Body.String())
+	clear.Set("agent", "planner")
+	clearRec := chatPostForm(t, h, "/partials/chat/clear", clear)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d body=%s", clearRec.Code, clearRec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "No messages yet.") {
-		t.Fatalf("cheap thread not cleared: %.600s", rec.Body.String())
+	if !strings.Contains(clearRec.Body.String(), "No messages yet.") {
+		t.Fatalf("planner thread not cleared: %.600s", clearRec.Body.String())
 	}
 
-	// The other identity's thread is untouched: retention is per identity.
+	// The other agent's thread is untouched: retention is per identity.
 	req := httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil)
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "question about the  flavor") {
-		t.Fatalf("base thread status=%d body=%.600s, want its message retained", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "question for the researcher") {
+		t.Fatalf("researcher thread status=%d body=%.600s, want its message retained", rec.Code, rec.Body.String())
 	}
-	msgs, err := eng.ChatRepo().ListMessages(base.ID)
+	msgs, err := eng.ChatRepo().ListMessages(researcherThread.ID)
 	if err != nil || len(msgs) != 2 {
-		t.Fatalf("base thread messages = %v err=%v, want 2", msgs, err)
+		t.Fatalf("researcher thread messages = %v err=%v, want 2", msgs, err)
 	}
 }
 
-func TestPartialChatClear_UnknownProjectOrFlavor(t *testing.T) {
+func TestPartialChatClear_UnknownProjectOrAgent(t *testing.T) {
 	_, srv := chatTestServer(t, nil)
 	h := srv.Handler()
 
@@ -474,7 +437,6 @@ func TestPartialChatClear_UnknownProjectOrFlavor(t *testing.T) {
 		{"project": {"nope"}, "agent": {"researcher"}},
 		{"project": {""}, "agent": {"researcher"}},
 		{"project": {"acme"}, "agent": {"writer"}},
-		{"project": {"acme"}, "agent": {"researcher"}, "flavor": {"nope"}},
 	} {
 		rec := chatPostForm(t, h, "/partials/chat/clear", form)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -547,28 +509,22 @@ func TestPartialChatClear_DoesNotAcceptClientThreadID(t *testing.T) {
 	}
 }
 
-func TestChatSplitIdentity(t *testing.T) {
-	agent, flavor, err := splitChatIdentity("researcher:fast")
-	if err != nil || agent != "researcher" || flavor != "fast" {
-		t.Fatalf("split named = %q %q %v", agent, flavor, err)
+func TestChatSelectionFromQuery(t *testing.T) {
+	if got := chatSelectionFromQuery("", "planner"); got != "planner" {
+		t.Fatalf("identity select value = %q", got)
 	}
-	agent, flavor, err = splitChatIdentity("researcher")
-	if err != nil || agent != "researcher" || flavor != "" {
-		t.Fatalf("split base = %q %q %v", agent, flavor, err)
+	if got := chatSelectionFromQuery("researcher", ""); got != "researcher" {
+		t.Fatalf("explicit agent param = %q", got)
 	}
-	if _, _, err := splitChatIdentity(""); err == nil {
-		t.Fatal("empty identity must fail")
+	// The identity select value wins over the explicit agent param.
+	if got := chatSelectionFromQuery("researcher", "planner"); got != "planner" {
+		t.Fatalf("identity select must win = %q", got)
 	}
-	if _, _, err := splitChatIdentity(":fast"); err == nil {
-		t.Fatal("missing agent must fail")
+	if got := chatSelectionFromQuery("", ""); got != "" {
+		t.Fatalf("no selection = %q", got)
 	}
-	a, f := chatSelectionFromQuery("", "", "planner:cheap")
-	if a != "planner" || f != "cheap" {
-		t.Fatalf("from query = %q %q", a, f)
-	}
-	a, f = chatSelectionFromQuery("researcher", "", "planner:cheap")
-	if a != "researcher" || f != "cheap" {
-		t.Fatalf("explicit agent wins = %q %q", a, f)
+	if got := chatSelectionFromQuery("  ", " planner "); got != "planner" {
+		t.Fatalf("trims spaces = %q", got)
 	}
 }
 

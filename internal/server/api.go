@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,13 +15,18 @@ import (
 )
 
 type submitIssueRequest struct {
-	Project      string            `json:"project"`
-	Title        string            `json:"title"`
-	Body         string            `json:"body"`        // optional description (trigger/API name)
-	Description  string            `json:"description"` // alias for body
-	Source       string            `json:"source"`      // rejected if set
-	SourcePath   string            `json:"source_path"` // rejected if set
-	DryRun       bool              `json:"dry_run"`
+	Project     string `json:"project"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`        // optional description (trigger/API name)
+	Description string `json:"description"` // alias for body
+	Source      string `json:"source"`      // rejected if set
+	SourcePath  string `json:"source_path"` // rejected if set
+	DryRun      bool   `json:"dry_run"`
+	// Flow is the ordered list of agent ids for the issue. AgentFlow is an
+	// accepted alias. AgentFlavors is kept only to detect and reject the
+	// removed field with a 422.
+	Flow         []string          `json:"flow"`
+	AgentFlow    []string          `json:"agent_flow"`
 	AgentFlavors map[string]string `json:"agent_flavors"`
 	DependsOn    []int64           `json:"depends_on"`
 }
@@ -52,18 +56,26 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "source/source_path is not accepted; configure projects.<name>.source_path in YAML")
 		return
 	}
+	if req.AgentFlavors != nil {
+		writeJSONError(w, http.StatusUnprocessableEntity, "agent_flavors was removed; send flow: [\"id1\",\"id2\",...]")
+		return
+	}
+	flow := req.Flow
+	if len(flow) == 0 {
+		flow = req.AgentFlow
+	}
 
 	desc := strings.TrimSpace(req.Description)
 	if desc == "" {
 		desc = strings.TrimSpace(req.Body)
 	}
 	issue, err := s.eng.SubmitIssue(r.Context(), orchestrator.RunOptions{
-		ProjectName:  req.Project,
-		IssueTitle:   req.Title,
-		Description:  desc,
-		DryRun:       req.DryRun,
-		AgentFlavors: req.AgentFlavors,
-		DependsOn:    req.DependsOn,
+		ProjectName: req.Project,
+		IssueTitle:  req.Title,
+		Description: desc,
+		DryRun:      req.DryRun,
+		Flow:        flow,
+		DependsOn:   req.DependsOn,
 	})
 	if err != nil {
 		msg := err.Error()
@@ -85,7 +97,7 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 		"title":           req.Title,
 		"has_description": desc != "",
 		"dry_run":         req.DryRun,
-		"agent_flavors":   parseAgentFlavorsJSON(issue.AgentFlavorsJSON),
+		"flow":            pipelineStepObjects(issue.PipelineJSON),
 	})
 
 	view, err := s.eng.GetIssue(r.Context(), issue.ID)
@@ -96,12 +108,17 @@ func (s *Server) handleSubmitIssue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, viewToJSON(view))
 }
 
-func parseAgentFlavorsJSON(raw string) map[string]string {
-	out := map[string]string{}
-	if raw == "" || raw == "{}" {
-		return out
+// pipelineStepObjects renders pipeline_json as the flow array used by the
+// API and audit trail: [{"index":1,"agent":"a","key":"step-1"}, ...].
+func pipelineStepObjects(pipelineJSON string) []map[string]any {
+	steps, err := sqlite.StepsForIssue(&sqlite.Issue{PipelineJSON: pipelineJSON})
+	if err != nil || len(steps) == 0 {
+		return []map[string]any{}
 	}
-	_ = json.Unmarshal([]byte(raw), &out)
+	out := make([]map[string]any, 0, len(steps))
+	for _, s := range steps {
+		out = append(out, map[string]any{"index": s.Index, "agent": s.AgentID, "key": s.Key})
+	}
 	return out
 }
 
@@ -323,19 +340,15 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(registered))
 	for _, rp := range registered {
 		seen[rp.Project.Name] = true
-		agents := map[string]any{}
-		for typ, info := range rp.Agents {
-			agents[typ] = map[string]any{
-				"default": info.Default,
-				"flavors": info.Flavors,
-			}
-		}
 		out = append(out, map[string]any{
 			"id":         rp.Project.ID,
 			"name":       rp.Project.Name,
 			"created_at": rp.Project.CreatedAt,
 			"registered": true,
-			"agents":     agents,
+			"agents": map[string]any{
+				"flow_default": rp.DefaultFlow,
+				"available":    rp.AvailableAgents,
+			},
 		})
 	}
 	all, err := s.eng.ListProjects(r.Context())
@@ -460,7 +473,7 @@ func issueToJSON(i *sqlite.Issue, project string, tokens, attempt int, phaseStat
 		"status":        i.Status,
 		"current_phase": i.CurrentPhase,
 		"dry_run":       i.DryRun,
-		"agent_flavors": parseAgentFlavorsJSON(i.AgentFlavorsJSON),
+		"flow":          pipelineStepObjects(i.PipelineJSON),
 		"created_at":    i.CreatedAt,
 		"updated_at":    i.UpdatedAt,
 		"token_total":   tokens,
@@ -497,13 +510,28 @@ func isSubmitClientError(msg string) bool {
 	return strings.Contains(msg, "unknown project") ||
 		strings.Contains(msg, "not declared") ||
 		strings.Contains(msg, "no projects declared") ||
-		strings.Contains(msg, "flavor") ||
-		strings.Contains(msg, "agent_flavors") ||
+		strings.Contains(msg, "agent flow") ||
+		strings.Contains(msg, "agent_flow") ||
+		strings.Contains(msg, "no agent flow") ||
+		strings.Contains(msg, "is not configured") ||
+		strings.Contains(msg, "appears more than once in the flow") ||
 		strings.Contains(msg, "depends_on") ||
 		strings.Contains(msg, "has no ") ||
 		strings.Contains(msg, "attachment") ||
 		strings.Contains(msg, "description exceeds") ||
 		strings.Contains(msg, "at most ")
+}
+
+// handleAgents lists the configured agent ids for the flow picker.
+// IDs only — system prompts and tool lists are intentionally NOT exposed
+// here (showing them in the web UI is a later feature).
+func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
+	ids := s.eng.Cfg().AgentIDs()
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, map[string]any{"id": id})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": out})
 }
 
 func jsonMarshal(v any) ([]byte, error) {

@@ -79,10 +79,10 @@ func TestBuildPhaseSteps_TransitionResearchToPlan(t *testing.T) {
 	if len(steps) != 3 {
 		t.Fatalf("steps = %d", len(steps))
 	}
-	if steps[0].State != "done" || steps[0].Name != "step-1" {
+	if steps[0].State != "done" || steps[0].Key != "step-1" {
 		t.Fatalf("step-1 = %+v, want done", steps[0])
 	}
-	if steps[1].State != "current" || steps[1].Name != "step-2" || steps[1].Agent != "planner" {
+	if steps[1].State != "current" || steps[1].Key != "step-2" || steps[1].AgentID != "planner" {
 		t.Fatalf("step-2 = %+v, want current planner", steps[1])
 	}
 	if steps[2].State != "pending" {
@@ -136,7 +136,7 @@ func TestBuildPhaseSteps_IssueDone(t *testing.T) {
 	steps := eng.buildPhaseSteps(ctx, project.ID, issue)
 	for _, s := range steps {
 		if s.State != "done" {
-			t.Fatalf("%s state = %q, want done", s.Name, s.State)
+			t.Fatalf("%s state = %q, want done", s.Key, s.State)
 		}
 	}
 }
