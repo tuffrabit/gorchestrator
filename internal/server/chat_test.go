@@ -144,12 +144,17 @@ func TestPartialChatThread_EmptyStateAndValidation(t *testing.T) {
 		t.Fatalf("unknown project status = %d, want 400", rec.Code)
 	}
 
-	// Unknown agent id → 400.
+	// Unknown agent id → 400 listing the configured ids.
 	req = httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=writer", nil)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown agent status = %d, want 400", rec.Code)
+	}
+	for _, want := range []string{"writer", "implementer", "planner", "researcher"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("unknown-agent error should list %q: %s", want, rec.Body.String())
+		}
 	}
 
 	// Old flavor-shaped identities ("researcher:cheap") are gone: they fail

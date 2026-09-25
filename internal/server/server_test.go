@@ -31,9 +31,9 @@ func testConfig(tmp string) *config.Config {
 			ReadFile: config.ReadFileConfig{MaxBytes: 64 * 1024, MaxLines: 2000},
 		},
 		Agents: map[string]config.AgentConfig{
-			"researcher":  {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
-			"planner":     {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
-			"implementer": {Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+			"researcher":  {SystemPrompt: "You are a research agent.", Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+			"planner":     {SystemPrompt: "You are a planning agent.", Adjudicator: "self", MaxAttempts: 1, Loops: 1},
+			"implementer": {SystemPrompt: "You are an implementer agent.", Adjudicator: "self", MaxAttempts: 1, Loops: 1},
 		},
 		Projects: map[string]config.ProjectConfig{
 			"acme": {DefaultFlow: []string{"researcher", "planner", "implementer"}},
@@ -183,7 +183,7 @@ func TestAPI_ArtifactPathTraversalRejected(t *testing.T) {
 func TestAPI_DecideWaitingHuman(t *testing.T) {
 	tmp := t.TempDir()
 	cfg := testConfig(tmp)
-	cfg.Agents["researcher"] = config.AgentConfig{Adjudicator: "human", MaxAttempts: 2, Loops: 1}
+	cfg.Agents["researcher"] = config.AgentConfig{SystemPrompt: "You are a research agent.", Adjudicator: "human", MaxAttempts: 2, Loops: 1}
 	eng, err := orchestrator.NewEngine(cfg)
 	if err != nil {
 		t.Fatalf("engine: %v", err)
@@ -484,6 +484,25 @@ func TestPartialSubmitFlow_Endpoint(t *testing.T) {
 	}
 	if n := strings.Count(body, `name="flow_agent"`); n != 1 {
 		t.Fatalf("flow_agent selects = %d, want 1: %s", n, body)
+	}
+
+	// Project without default_flow: the empty builder must still offer
+	// "+ Add step" (the pre-fix template dead-ended with no way to build a
+	// flow), and the builder must carry the project through interactions.
+	cfg.Projects["beta"] = config.ProjectConfig{}
+	body = get("project=beta")
+	if !strings.Contains(body, "+ Add step") {
+		t.Fatalf("no-default project: add button missing: %s", body)
+	}
+	if !strings.Contains(body, `name="project" value="beta"`) {
+		t.Fatalf("project not carried in builder: %s", body)
+	}
+	body = get("project=beta&flow_add=1")
+	if !strings.Contains(body, "— pick an agent —") {
+		t.Fatalf("expected a blank step after add: %s", body)
+	}
+	if !strings.Contains(body, `name="project" value="beta"`) {
+		t.Fatalf("project lost on add: %s", body)
 	}
 }
 

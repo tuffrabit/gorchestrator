@@ -21,7 +21,7 @@ import (
 type Controller interface {
 	// EnsureLoaded loads model (or confirms it resident). timeout covers the
 	// whole warmup request: llama-swap holds it while loading, and big-model
-	// loads take minutes, so callers pass the phase flavor's model timeout.
+	// loads take minutes, so callers pass the step agent's model timeout.
 	EnsureLoaded(ctx context.Context, model string, timeout time.Duration) error
 	// RunningModels returns the names of models currently resident on the
 	// server. Exclusive-mode acquirers use it to reuse a resident model or to

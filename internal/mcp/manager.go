@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 
@@ -146,6 +147,37 @@ func (m *Manager) ToolsForAgent(allowServers []string) ([]tool.Tool, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// The special allowlist entry "*" means every connected server. Explicit
+	// names keep their order; star-expanded names follow, sorted, de-duplicated.
+	star := false
+	for _, name := range allowServers {
+		if name == "*" {
+			star = true
+			break
+		}
+	}
+	if star {
+		seen := map[string]bool{}
+		expanded := make([]string, 0, len(allowServers)+len(m.sessions))
+		for _, name := range allowServers {
+			if name == "*" {
+				continue
+			}
+			if !seen[name] {
+				seen[name] = true
+				expanded = append(expanded, name)
+			}
+		}
+		starred := make([]string, 0, len(m.sessions))
+		for name := range m.sessions {
+			if !seen[name] {
+				starred = append(starred, name)
+			}
+		}
+		sort.Strings(starred)
+		allowServers = append(expanded, starred...)
+	}
 
 	var out []tool.Tool
 	for _, name := range allowServers {

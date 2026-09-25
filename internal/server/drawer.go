@@ -225,7 +225,7 @@ func (s *Server) workspaceStepDone(ctx context.Context, issue *sqlite.Issue, ste
 	return meta.Status == "done"
 }
 
-// workspaceNode is one entry in the implementer workspace tree.
+// workspaceNode is one entry in the issue workspace tree.
 type workspaceNode struct {
 	Name     string
 	RelPath  string // workspace-relative path for files; empty for dirs

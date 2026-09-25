@@ -732,7 +732,6 @@ func (s *Server) permissionMatrix() []map[string]any {
 	if cfg == nil {
 		return nil
 	}
-	// agent type → server allowlist from global defaults + project flavors
 	// agent id → server allowlist from the global agents: block
 	agentServers := map[string]map[string]struct{}{}
 	for id, ac := range cfg.Agents {

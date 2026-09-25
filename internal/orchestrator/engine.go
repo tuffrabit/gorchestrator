@@ -621,7 +621,12 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 			Phase: phaseName, Status: sqlite.StatusInProgress,
 		})
 
-		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, prevStepKey(steps, phaseName), issue.Title, issue.Description)
+		prevKey := prevStepKey(steps, phaseName)
+		prevAgent := ""
+		if pi := stepIndex(steps, prevKey); pi >= 0 {
+			prevAgent = steps[pi].AgentID
+		}
+		baseInput, err := e.buildBaseInput(ctx, project.ID, issue.ID, phaseName, prevKey, prevAgent, issue.Title, issue.Description)
 		if err != nil {
 			e.failIssuePhaseError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("build input for %s: %w", phaseName, err)
@@ -668,6 +673,16 @@ func (e *Engine) runPipeline(ctx context.Context, project *sqlite.Project, issue
 		// so return before the next phase starts. The persisted result lets
 		// resume/recovery pick the phase up correctly.
 		keep := result.Status == "done" && nextStepKey(steps, phaseName) != ""
+		if keep {
+			// Keeping a resident model only pays off when the next step wants
+			// the same one; otherwise release so the next acquire doesn't have
+			// to unload a foreign model first.
+			if ni := stepIndex(steps, nextStepKey(steps, phaseName)); ni >= 0 {
+				if nextCfg, cerr := e.stepAgentConfig(issue, steps[ni]); cerr != nil || nextCfg.Model.Model != phaseCfg.Model.Model {
+					keep = false
+				}
+			}
+		}
 		if err := releaseModel(keep); err != nil {
 			e.failIssueInferenceError(ctx, project, issue, phaseName, err)
 			return fmt.Errorf("unload model after %s: %w", phaseName, err)
@@ -995,8 +1010,8 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			}
 			input += retryCtx
 		} else if fb := e.humanGateFeedback(ctx, project.ID, issue.ID, phase); fb != "" {
-			// Decide on a cleared scope/effort hold leaves feedback at attempt 1
-			// with no result.json; the held phase never ran, so there is no
+			// Decide on a cleared scope hold leaves feedback at attempt 1
+			// with no result.json; the held step never ran, so there is no
 			// rejected output — inject the feedback alone into the first run.
 			input += "\n\nHuman gate feedback:\n" + fb
 		}
@@ -1044,7 +1059,10 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			if err := e.prepareIssueWorkspaceOnce(ctx, project, issue); err != nil {
 				return nil, fmt.Errorf("prepare workspace: %w", err)
 			}
-			wsKey := storage.WorkspacePath(project.ID, issue.ID)
+			wsKey, werr := e.workspaceKey(ctx, issue)
+			if werr != nil {
+				return nil, fmt.Errorf("resolve workspace: %w", werr)
+			}
 			branchName := ""
 			if gitCfg, gerr := e.projectGitConfig(project); gerr == nil && gitCfg.Enabled() {
 				branchName = gorchgit.IssueBranchName(issue.ID)
@@ -1054,12 +1072,15 @@ func (e *Engine) runPhase(ctx context.Context, project *sqlite.Project, issue *s
 			}
 		}
 
+		// Every step may read the workspace: the workspace is issue-level and a
+		// non-editing step (e.g. a reviewer narrowed to read-only tools) still
+		// needs to see what an earlier step wrote. Which steps can MUTATE it is
+		// governed by tools:, not by this allowlist — the allowlist is path
+		// scoping, not a capability boundary.
 		allowlist := []string{
 			storage.IssueDir(project.ID, issue.ID),
 			storage.SourcePath(project.ID, issue.ID),
-		}
-		if cfg.HasEditingTool() {
-			allowlist = append(allowlist, storage.WorkspacePath(project.ID, issue.ID))
+			storage.WorkspacePath(project.ID, issue.ID),
 		}
 
 		// Agents need explicit path guidance; short names like "source" only
@@ -1259,10 +1280,11 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 		ReadFileMaxLines: e.cfg.Tools.ReadFile.MaxLines,
 		OutputWritten:    &outputWritten,
 	}
-	// Steps whose agent can edit files work on the shared issue-level
-	// workspace: short paths (list ".", read "main.go") resolve there.
+	// Every step's short paths resolve against the shared issue-level
+	// workspace (a non-editing step may still need to read what an earlier
+	// step wrote; mutation is controlled by tools:, not by this binding).
 	issue, issueErr := e.issues.Get(issueID)
-	if issueErr == nil && issue != nil && cfg.HasEditingTool() {
+	if issueErr == nil && issue != nil {
 		if wsKey, werr := e.workspaceKey(ctx, issue); werr == nil {
 			bt.WorkspacePath = wsKey
 			bt.WorkspaceHostPath = storage.Abs(e.cfg.StorageRoot, wsKey)
@@ -1462,7 +1484,13 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 }
 
 // buildAgent constructs the ADK agent for one step of the issue flow.
+// Config validation guarantees a system prompt; an empty one here means the
+// config was built in-process (tests) — fail loudly rather than run an
+// instruction-less agent.
 func (e *Engine) buildAgent(cfg config.AgentConfig, llmModel adkmodel.LLM, tools []tool.Tool) (agent.Agent, error) {
+	if strings.TrimSpace(cfg.SystemPrompt) == "" {
+		return nil, fmt.Errorf("agent %q has no system_prompt", cfg.ID)
+	}
 	return agents.NewTask(cfg.ID, cfg.SystemPrompt).Build(llmModel, tools)
 }
 
@@ -1489,12 +1517,12 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 		return PhaseTask{}, err
 	}
 
+	// Every step may read the workspace; see runPhase for why the allowlist
+	// is path scoping, not a capability boundary.
 	allowlist := []string{
 		storage.IssueDir(projectID, issueID),
 		storage.SourcePath(projectID, issueID),
-	}
-	if cfg.HasEditingTool() {
-		allowlist = append(allowlist, storage.WorkspacePath(projectID, issueID))
+		storage.WorkspacePath(projectID, issueID),
 	}
 
 	inputPaths := []string{storage.IssueMarkdownPath(projectID, issueID)}
@@ -1526,8 +1554,9 @@ func (e *Engine) buildTask(ctx context.Context, projectID, issueID int64, phase 
 }
 
 // buildBaseInput composes the issue (title, description, attachment paths)
-// plus the preceding step's accepted output (prevKey "" for the first step).
-func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, phase, prevKey, issueTitle, description string) (string, error) {
+// plus the preceding step's accepted output (prevKey "" for the first step;
+// prevAgent is that step's agent id, for labeling).
+func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, phase, prevKey, prevAgent, issueTitle, description string) (string, error) {
 	// Prefer SQLite description; fall back to empty if unset (legacy issues).
 	names, _ := e.listAttachmentNames(ctx, projectID, issueID)
 	input := buildIssueUserInput(issueTitle, description, names)
@@ -1545,27 +1574,31 @@ func (e *Engine) buildBaseInput(ctx context.Context, projectID, issueID int64, p
 	if err != nil || len(data) == 0 {
 		return input, nil
 	}
-	input += fmt.Sprintf("\n\nAccepted %s output:\n%s", prevKey, string(data))
+	input += fmt.Sprintf("\n\nAccepted step output (%s agent):\n%s", prevAgent, string(data))
 	return input, nil
 }
 
 // pathGuide tells the agent how tool paths work for this issue. Without it,
 // models guess names like "attempts" or "." against the storage root and
-// loop on "path not allowed". hasWorkspace marks steps whose agent can edit
-// files: they default to the issue workspace as their base.
-func pathGuide(projectID, issueID int64, phase string, hasWorkspace bool, allowlist []string) string {
+// loop on "path not allowed". canEdit marks steps whose agent has editing
+// tools — it only changes the workspace wording, not the allowlist: every
+// step may read the workspace.
+func pathGuide(projectID, issueID int64, phase string, canEdit bool, allowlist []string) string {
 	issueDir := storage.IssueDir(projectID, issueID)
 	source := storage.SourcePath(projectID, issueID)
 	var b strings.Builder
 	b.WriteString("\n\n## Path guide for tools\n")
-	b.WriteString("Tool paths are relative to the issue directory (short names like `source`), ")
+	b.WriteString("Tool paths are relative to the shared workspace (short names like `source`), ")
 	b.WriteString("or full storage keys under the allowlist. Path traversal (`..`) is rejected.\n")
-	b.WriteString(fmt.Sprintf("- Issue root (`list_directory` with path omitted or `.`): `%s`\n", issueDir))
-	b.WriteString(fmt.Sprintf("- Source snapshot (read-only, start here): `%s` or `source`\n", source))
-	if hasWorkspace {
-		ws := storage.WorkspacePath(projectID, issueID)
-		b.WriteString(fmt.Sprintf("- Workspace (default base; edit here): `%s`\n", ws))
+	ws := storage.WorkspacePath(projectID, issueID)
+	b.WriteString(fmt.Sprintf("- Workspace (default base, shared across steps): `%s`\n", ws))
+	if canEdit {
+		b.WriteString("  Mutable: you have file-editing tools — write and modify files here.\n")
+	} else {
+		b.WriteString("  Read-only for you: no editing tools — inspect what earlier steps wrote, do not modify.\n")
 	}
+	b.WriteString(fmt.Sprintf("- Issue root (issue.md, attachments, per-step results): `%s`\n", issueDir))
+	b.WriteString(fmt.Sprintf("- Source snapshot (read-only, start here): `%s` or `source`\n", source))
 	b.WriteString("- Allowlist prefixes:\n")
 	for _, a := range allowlist {
 		b.WriteString(fmt.Sprintf("  - `%s`\n", a))
@@ -1574,7 +1607,7 @@ func pathGuide(projectID, issueID int64, phase string, hasWorkspace bool, allowl
 }
 
 // humanGateFeedback returns feedback a human left when retrying a cleared
-// scope/effort hold: Decide writes attempts/1/feedback.md and removes
+// scope hold: Decide writes attempts/1/feedback.md and removes
 // result.json, so the retry starts at attempt 1 with no rejected output to
 // build retry context from.
 func (e *Engine) humanGateFeedback(ctx context.Context, projectID, issueID int64, phase string) string {
@@ -1711,7 +1744,13 @@ func (e *Engine) prepareIssueWorkspaceOnce(ctx context.Context, project *sqlite.
 	if err != nil {
 		return err
 	}
-	wsKey := storage.WorkspacePath(project.ID, issue.ID)
+	// Resolve through the workspaceKey fallback so a legacy issue resumed
+	// mid-flight keeps working in its existing implementation/workspace
+	// instead of getting a fresh empty tree at the new path.
+	wsKey, err := e.workspaceKey(ctx, issue)
+	if err != nil {
+		return err
+	}
 	if gitCfg.Enabled() {
 		abs := storage.Abs(e.cfg.StorageRoot, wsKey)
 		// A worktree is already checked out at this path when a previous step
@@ -1740,7 +1779,7 @@ func (e *Engine) prepareIssueWorkspaceOnce(ctx context.Context, project *sqlite.
 	if dirNonEmpty(storage.Abs(e.cfg.StorageRoot, wsKey)) {
 		return nil
 	}
-	return e.seedWorkspace(ctx, project.ID, issue.ID, storage.SourcePath(project.ID, issue.ID))
+	return e.seedWorkspace(ctx, project.ID, issue.ID, storage.SourcePath(project.ID, issue.ID), wsKey)
 }
 
 // dirNonEmpty reports whether the directory exists and has at least one entry.
@@ -1760,7 +1799,10 @@ func (e *Engine) commitIssueWorkspace(ctx context.Context, project *sqlite.Proje
 	if !gitCfg.Enabled() {
 		return nil
 	}
-	wsKey := storage.WorkspacePath(project.ID, issue.ID)
+	wsKey, err := e.workspaceKey(ctx, issue)
+	if err != nil {
+		return err
+	}
 	abs := storage.Abs(e.cfg.StorageRoot, wsKey)
 	mgr := &gorchgit.Manager{StorageRoot: e.cfg.StorageRoot}
 	msg := gorchgit.CommitMessage(issue.Title, issue.ID, stepKey)
@@ -1792,10 +1834,10 @@ func (e *Engine) snapshotSource(ctx context.Context, projectID, issueID int64, s
 	return copyDirToStorage(ctx, e.store, sourcePath, dest)
 }
 
-// seedWorkspace copies the source snapshot into the implementation workspace.
+// seedWorkspace copies the source snapshot into the issue workspace.
 // If the source snapshot does not exist (no project source configured), the
 // workspace is left empty.
-func (e *Engine) seedWorkspace(ctx context.Context, projectID, issueID int64, sourceSnapshotPath string) error {
+func (e *Engine) seedWorkspace(ctx context.Context, projectID, issueID int64, sourceSnapshotPath, destPath string) error {
 	exists, err := e.store.Exists(ctx, sourceSnapshotPath)
 	if err != nil {
 		return fmt.Errorf("check source snapshot: %w", err)
@@ -1803,8 +1845,7 @@ func (e *Engine) seedWorkspace(ctx context.Context, projectID, issueID int64, so
 	if !exists {
 		return nil
 	}
-	dest := storage.WorkspacePath(projectID, issueID)
-	return copyStorageDir(ctx, e.store, sourceSnapshotPath, dest)
+	return copyStorageDir(ctx, e.store, sourceSnapshotPath, destPath)
 }
 
 // typedProjectConfig prefers live YAML (cfg.Projects); falls back to config_json

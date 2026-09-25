@@ -1,6 +1,7 @@
 # Phase 5 Implementation Plan — Guardrails
 
 > **Status:** Implementation landed (Parts A–E in tree; suite green) — 2026-07-12.  
+> **Superseded 2026-09-24:** the planner `effort` tag and `projects.<name>.guardrails.effort_gate_min` described below were **removed** in the user-selected agent handoff flows refactor (per-step human adjudication is the replacement gate; see `spec.md` §13.3 and `plan_agent_handoff_flows.md`). This document is kept as a historical record only — do not implement from it.  
 > **Approved plan frozen from session 2026-07-12.**  
 > **Prerequisite:** Phase 4 complete (real workspaces, sandboxed tests, MCP, external triggers) **and** Phase 4 project refactor (YAML project registry + agent flavors) **and** the post–Phase 4 polish landings listed under **Landed foundations** below.  
 > **Scope:** Cheap human gates and hard mid-session stops so unattended volume (external triggers) cannot runaway. **Not** a spend/wallet system — casting chooses cost; provider budgets guard **context-window scale per agent session**.  

@@ -133,7 +133,7 @@ func (s *Server) handlePartialChatThread(w http.ResponseWriter, r *http.Request)
 		identity = s.defaultChatIdentity(project)
 	}
 	if !s.validChatAgent(identity) {
-		http.Error(w, fmt.Sprintf("unknown agent %q", identity), http.StatusBadRequest)
+		http.Error(w, s.unknownChatAgentMessage(identity), http.StatusBadRequest)
 		return
 	}
 	data := s.chatThreadData(r, rp, identity, u)
@@ -177,7 +177,7 @@ func (s *Server) handlePartialChatSend(w http.ResponseWriter, r *http.Request) {
 		identity = s.defaultChatIdentity(project)
 	}
 	if !s.validChatAgent(identity) {
-		http.Error(w, fmt.Sprintf("unknown agent %q", identity), http.StatusUnprocessableEntity)
+		http.Error(w, s.unknownChatAgentMessage(identity), http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -235,7 +235,7 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 		identity = s.defaultChatIdentity(project)
 	}
 	if !s.validChatAgent(identity) {
-		http.Error(w, fmt.Sprintf("unknown agent %q", identity), http.StatusUnprocessableEntity)
+		http.Error(w, s.unknownChatAgentMessage(identity), http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -324,6 +324,12 @@ func (s *Server) validChatAgent(agent string) bool {
 	}
 	_, ok := s.eng.Cfg().Agent(agent)
 	return ok
+}
+
+// unknownChatAgentMessage rejects an unrecognized chat identity, listing the
+// configured agent ids so the user can pick a valid one.
+func (s *Server) unknownChatAgentMessage(identity string) string {
+	return fmt.Sprintf("unknown agent %q; configured agents: %s", identity, strings.Join(s.eng.Cfg().AgentIDs(), ", "))
 }
 
 // defaultChatIdentity is the selection shown when nothing is preselected:

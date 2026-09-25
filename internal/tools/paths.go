@@ -14,11 +14,11 @@ import (
 //   - a full storage key under an allowlist prefix
 //     (e.g. projects/1/issues/1/source/main.go)
 //   - a path relative to preferredBase (typically the issue directory, or the
-//     implementer workspace)
+//     issue-level workspace)
 //   - empty, ".", or a lone slash meaning preferredBase when set
 //
 // Short names that match an allowlist entry's final segment (e.g. "source")
-// resolve to that entry before preferredBase joins, so implementers listing
+// resolve to that entry before preferredBase joins, so agents listing
 // "source" hit the snapshot rather than workspace/source.
 //
 // Paths that already look like storage keys (projects/…) are never re-joined

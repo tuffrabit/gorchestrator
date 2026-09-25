@@ -47,7 +47,7 @@ type IssueView struct {
 	Attempt     int
 	PhaseStatus string // filesystem result status for current phase
 	// HoldReason is result.json error when the issue/phase is waiting_human
-	// (scope / effort / adjudication rationale). Empty otherwise.
+	// (scope hold / adjudication rationale). Empty otherwise.
 	HoldReason string
 	// FailureReason is the (diagnosed) error for a failed issue: the current
 	// phase's result.json error, or the last phase_error event when the phase
@@ -120,7 +120,7 @@ func (e *Engine) SubmitIssue(ctx context.Context, opts RunOptions) (*sqlite.Issu
 		return nil, fmt.Errorf("prepare source: %w", err)
 	}
 
-	// Scope gate: hold before research is queued for workers.
+	// Scope gate: hold on the first step before the issue is queued for workers.
 	if err := e.maybeHoldForScope(ctx, project, issue, opts); err != nil {
 		return nil, err
 	}
@@ -295,11 +295,20 @@ func (e *Engine) applyHumanDecisionWithBy(ctx context.Context, project *sqlite.P
 		log.Printf("failed to record decision: %v", err)
 	}
 
+	// Scope holds only exist on the first step (the pipeline never ran when
+	// the hold was written). A model-written failure on a later step whose
+	// error merely starts with "scope:" must not be cleared-as-hold.
+	steps, serr := e.stepsForIssue(issue)
+	if serr != nil {
+		return fmt.Errorf("resolve issue flow: %w", serr)
+	}
+	firstStepHold := IsScopeHoldError(result.Error) && stepIndex(steps, phase) == 0
+
 	switch decision {
 	case adjudication.Pass:
 		// Scope hold: the first step never ran. Clearing result.json lets the
 		// pipeline start it. Marking it "done" would skip it — forbidden.
-		if IsScopeHoldError(result.Error) {
+		if firstStepHold {
 			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
 				return fmt.Errorf("clear scope hold result: %w", err)
 			}
@@ -317,7 +326,7 @@ func (e *Engine) applyHumanDecisionWithBy(ctx context.Context, project *sqlite.P
 		return writeResult(ctx, e.store, resultPath, result)
 	case adjudication.Retry:
 		// Scope hold retry: clear hold and re-queue the first step with feedback.
-		if IsScopeHoldError(result.Error) {
+		if firstStepHold {
 			if err := e.store.RemoveAll(ctx, resultPath); err != nil {
 				return fmt.Errorf("clear scope hold result: %w", err)
 			}
@@ -799,7 +808,7 @@ func (e *Engine) StopIssue(ctx context.Context, issueID int64) error {
 }
 
 // maybeHoldForScope evaluates scope heuristics after issue context is on disk.
-// When flagged, the issue is held waiting_human on research (not queued).
+// When flagged, the issue is held waiting_human on its first step (not queued).
 func (e *Engine) maybeHoldForScope(ctx context.Context, project *sqlite.Project, issue *sqlite.Issue, opts RunOptions) error {
 	basenames := make([]string, 0, len(opts.Attachments))
 	peeks := make([]ScopeAttachment, 0, len(opts.Attachments))

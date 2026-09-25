@@ -44,7 +44,7 @@ func (r *DecisionRepo) Create(issueID int64, phase string) (*Decision, error) {
 }
 
 // CreateWithFeedback inserts a pending decision with pre-filled feedback
-// (e.g. scope/effort hold reason shown to the human).
+// (e.g. scope hold reason shown to the human).
 func (r *DecisionRepo) CreateWithFeedback(issueID int64, phase, feedback string) (*Decision, error) {
 	res, err := r.db.Exec(
 		`INSERT INTO decisions (issue_id, phase, feedback) VALUES (?, ?, ?)`,

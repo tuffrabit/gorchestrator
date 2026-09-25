@@ -111,6 +111,31 @@ func TestManager_ToolsForAgent(t *testing.T) {
 	if len(tools) != 0 {
 		t.Fatalf("unknown server should yield 0 tools, got %d", len(tools))
 	}
+
+	// "*" expands to every connected server (explicit names stay, de-duplicated).
+	tools, err = m.ToolsForAgent([]string{"*", "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf(`["*", "nope"] tools = %d, want 3 (star expands to fixture, nope skipped)`, len(tools))
+	}
+	names = map[string]bool{}
+	for _, tl := range tools {
+		names[tl.Name()] = true
+	}
+	if !names["fixture__echo"] || !names["fixture__query_database"] || !names["fixture__call_http"] {
+		t.Fatalf("star names = %v", names)
+	}
+
+	// Explicit + star must not duplicate a server named both ways.
+	tools, err = m.ToolsForAgent([]string{"fixture", "*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf(`["fixture", "*"] tools = %d, want 3 (no duplicates)`, len(tools))
+	}
 }
 
 func TestManager_PerToolAllowlist(t *testing.T) {

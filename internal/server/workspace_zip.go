@@ -14,8 +14,8 @@ import (
 	"github.com/tuffrabit/gorchestrator/internal/storage"
 )
 
-// handleWorkspaceZip streams the implementer workspace as a zip archive.
-// Available only after the implementation phase result status is "done".
+// handleWorkspaceZip streams the issue workspace as a zip archive.
+// Available only once the issue is done (or the last step's result is "done").
 // Auth: viewer+ (same as artifact reads).
 func (s *Server) handleWorkspaceZip(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)

@@ -4,6 +4,7 @@
      authoritative ordered flow ("id1,id2,..." with blanks for unpicked
      steps); the handler diff's the changed select against it. */}}
 <div class="flow-builder" id="flow-builder">
+  <input type="hidden" name="project" value="{{.SelectedProject}}">
   <div class="form-row flow-heading">
     <label>Agent flow</label>
     {{if .HasDefaultFlow}}
@@ -11,9 +12,12 @@
     {{end}}
   </div>
   <input type="hidden" name="flow_state" id="flow-state" value="{{.FlowCSV}}">
-  {{if not .FlowSteps}}
+  {{if not .SelectedProject}}
   <p class="card-meta">Pick a project above to choose the agent flow for this issue.</p>
   {{else}}
+  {{if not .FlowSteps}}
+  <p class="card-meta">No steps yet — add the agents for this issue, in order. Without a flow the submit is rejected.</p>
+  {{end}}
   {{range .FlowSteps}}
   <div class="flow-row">
     <span class="flow-index" aria-hidden="true">{{.Index}}</span>

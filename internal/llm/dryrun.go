@@ -213,33 +213,17 @@ func (m *DryRunModel) readFileCall() *model.LLMResponse {
 }
 
 func (m *DryRunModel) finishTaskResponse(rationale string) *model.LLMResponse {
-	// Used by tests that don't have a request context; no effort field.
-	return m.finishTaskArgs(true, rationale, "")
+	return m.finishTaskArgs(true, rationale)
 }
 
 func (m *DryRunModel) finishTaskResponseWithDone(req *model.LLMRequest, done bool, rationale string) *model.LLMResponse {
-	effort := ""
-	// Only include effort when the finish_task declaration accepts it
-	// (planner OutputSchema). Extra fields fail ADK validation and loop forever.
-	if finishTaskHasEffort(req) {
-		effort = "low"
-		prompt := extractPrompt(req)
-		if strings.Contains(prompt, "[effort:high]") {
-			effort = "high"
-		} else if strings.Contains(prompt, "[effort:medium]") {
-			effort = "medium"
-		}
-	}
-	return m.finishTaskArgs(done, rationale, effort)
+	return m.finishTaskArgs(done, rationale)
 }
 
-func (m *DryRunModel) finishTaskArgs(done bool, rationale, effort string) *model.LLMResponse {
+func (m *DryRunModel) finishTaskArgs(done bool, rationale string) *model.LLMResponse {
 	args := map[string]any{
 		"done":      done,
 		"rationale": rationale,
-	}
-	if effort != "" {
-		args["effort"] = effort
 	}
 	return &model.LLMResponse{
 		Content: &genai.Content{
@@ -259,34 +243,6 @@ func (m *DryRunModel) finishTaskArgs(done bool, rationale, effort string) *model
 			TotalTokenCount:      15,
 		},
 	}
-}
-
-// finishTaskHasEffort reports whether the request's finish_task tool schema
-// includes an effort property (planner).
-func finishTaskHasEffort(req *model.LLMRequest) bool {
-	if req == nil {
-		return false
-	}
-	for _, d := range functionDeclarations(req.Config) {
-		if d == nil || d.Name != "finish_task" {
-			continue
-		}
-		// Parameters (genai.Schema) path used by hand-built finish_task.
-		if d.Parameters != nil && d.Parameters.Properties != nil {
-			if _, ok := d.Parameters.Properties["effort"]; ok {
-				return true
-			}
-		}
-		// ParametersJsonSchema map path.
-		if m, ok := d.ParametersJsonSchema.(map[string]any); ok {
-			if props, ok := m["properties"].(map[string]any); ok {
-				if _, ok := props["effort"]; ok {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func truncate(s string, n int) string {

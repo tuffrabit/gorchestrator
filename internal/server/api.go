@@ -329,8 +329,8 @@ func (s *Server) handleDecide(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	// Prefer YAML-registered projects with flavor catalogs for the submit UI.
-	// Include any orphan DB-only rows (historical) without agents catalog.
+	// Prefer YAML-registered projects (they carry default_flow + the agents
+	// catalog) for the submit UI. Include any orphan DB-only rows (historical).
 	registered, err := s.eng.ListRegisteredProjects(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())

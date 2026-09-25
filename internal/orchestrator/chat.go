@@ -270,8 +270,8 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 
 	stage("Preparing…")
 
-	// Resolve the project and the merged agent config (global identity +
-	// project flavor overlay), mirroring agentConfigForIssue.
+	// Resolve the project and the merged agent config (global agents: entry),
+	// mirroring stepAgentConfig.
 	project, err := eng.projects.Get(thread.ProjectID)
 	if err != nil {
 		fail(fmt.Errorf("resolve project %d: %w", thread.ProjectID, err))
