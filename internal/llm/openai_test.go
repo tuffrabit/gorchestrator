@@ -313,6 +313,101 @@ func TestOpenAIModel_convertContents_ToolRoundTripNoEmptyUser(t *testing.T) {
 	}
 }
 
+func TestOpenAIModel_ReasoningContentSurfacesAsThought(t *testing.T) {
+	// Servers like llama-swap (reasoning parsers), DeepSeek, and OpenRouter
+	// return chain-of-thought as reasoning_content (or reasoning). It must
+	// surface as a Thought part — never as answer text — and must not be
+	// echoed back into later requests.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(openAIChatResponse{
+			Choices: []choice{{
+				Message: message{
+					Role:      "assistant",
+					Reasoning: "the user wants a file listing, so I will call list_directory",
+					Content:   "Here is the listing.",
+					ToolCalls: []toolCall{{
+						ID:       "call_1",
+						Type:     "function",
+						Function: function{Name: "list_directory", Arguments: `{"path":"."}`},
+					}},
+				},
+			}},
+			Usage: usage{TotalTokens: 12},
+		})
+	}))
+	defer server.Close()
+
+	m := NewOpenAIModel("gpt-4o-mini", "", server.URL, 0)
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("list it", genai.RoleUser)}}
+
+	var resp *model.LLMResponse
+	for r, err := range m.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp = r
+	}
+
+	if resp == nil || len(resp.Content.Parts) != 3 {
+		t.Fatalf("parts = %+v, want thought, text, and tool call", resp)
+	}
+	thought := resp.Content.Parts[0]
+	if !thought.Thought || thought.Text != "the user wants a file listing, so I will call list_directory" {
+		t.Fatalf("part 0 = %+v, want a Thought part holding the reasoning", thought)
+	}
+	if resp.Content.Parts[1].Thought || resp.Content.Parts[1].Text != "Here is the listing." {
+		t.Fatalf("part 1 = %+v, want the plain answer text", resp.Content.Parts[1])
+	}
+	if resp.Content.Parts[2].FunctionCall == nil {
+		t.Fatalf("part 2 = %+v, want the tool call", resp.Content.Parts[2])
+	}
+
+	// The round trip: a history carrying the model's previous turn (thought +
+	// answer + call) must re-send the answer and the call, but not the thought.
+	om, ok := m.(*OpenAIModel)
+	if !ok {
+		t.Fatalf("model = %T, want *OpenAIModel", m)
+	}
+	msgs, err := om.convertContents([]*genai.Content{resp.Content}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistantMsg map[string]any
+	for _, msg := range msgs {
+		if msg["role"] == "assistant" {
+			assistantMsg = msg
+		}
+	}
+	if assistantMsg == nil {
+		t.Fatalf("messages = %+v, want an assistant message", msgs)
+	}
+	content, _ := assistantMsg["content"].(string)
+	if content != "Here is the listing." {
+		t.Fatalf("assistant content = %q, want only the answer (no reasoning echoed)", content)
+	}
+	if _, ok := assistantMsg["tool_calls"]; !ok {
+		t.Fatalf("assistant message lost its tool_calls: %+v", assistantMsg)
+	}
+}
+
+// TestOpenAIModel_ThoughtOnlyContentSendsNoAssistantMessage covers the edge
+// where a history content carried only thought parts: nothing is sent at
+// all (an assistant message with neither text nor tool_calls would be
+// noise for strict OpenAI-compatible servers).
+func TestOpenAIModel_ThoughtOnlyContentSendsNoAssistantMessage(t *testing.T) {
+	m := &OpenAIModel{model: "local"}
+	msgs, err := m.convertContents([]*genai.Content{{
+		Role:  genai.RoleModel,
+		Parts: []*genai.Part{{Text: "private reasoning", Thought: true}},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages = %+v, want none (thoughts are never echoed)", msgs)
+	}
+}
+
 func TestOpenAIModel_GenerateContent_RetryAfter429(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

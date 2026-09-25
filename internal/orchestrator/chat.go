@@ -33,6 +33,11 @@ const (
 	// several queued turns) so a wedged model call cannot pin a thread
 	// forever.
 	chatTurnTimeout = 30 * time.Minute
+	// chatStreamPublishEvery throttles the chat_message republishes that
+	// streamed reply text triggers. Tool rows publish immediately (they are
+	// discrete and few); text parts can arrive many times a second, and the
+	// drawer re-reads the whole thread anyway.
+	chatStreamPublishEvery = 300 * time.Millisecond
 )
 
 // ErrChatThreadBusy reports that a turn is currently running for this thread;
@@ -43,11 +48,13 @@ var ErrChatThreadBusy = fmt.Errorf("chat thread has a turn in progress")
 // ChatService runs dashboard chat conversations against agent identities.
 // Each SendMessage persists a user row plus a pending assistant placeholder,
 // then processes the turn asynchronously: the placeholder's content is
-// updated with stage text as the turn progresses and tool calls/responses
-// land as tool rows. When the turn finishes with tool rows, the placeholder
-// is replaced by a fresh assistant row so the final reply (or error) sorts
-// after the tool rows of that turn; tool-less turns update it in place.
-// Turns for one thread are serialized and every turn
+// updated with stage text as the turn progresses, tool calls/responses land
+// as tool rows, and model text is streamed into the open assistant row as it
+// is produced — each of which republishes, so an open drawer renders the turn
+// in real time instead of dumping it at the end. A text segment that starts
+// after this turn's tool rows get a fresh assistant row of their own (so it
+// sorts after them); a placeholder that only ever carried stage text is
+// dropped at finalize. Turns for one thread are serialized and every turn
 // reseeds the ADK session from the DB, so processing is stateless and a
 // reopened drawer always renders truth.
 type ChatService struct {
@@ -228,44 +235,131 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		s.publish(thread.ID, thread.ProjectID)
 	}
 	finished := false
-	var toolRows int
-	// finalize lands the turn's final assistant row. When the turn produced
-	// tool rows, a fresh assistant row is inserted rather than updating the
-	// pending one in place, so the reply sorts after the tool calls/
-	// responses of this turn (the pending row was created up front so stage
-	// updates have somewhere to live). Without tool rows the pending row is
-	// updated in place, keeping the plain user/reply interleaving stable even
-	// when a later message is sent while this turn is still running.
-	finalize := func(text, status string) {
-		if toolRows == 0 {
-			if err := eng.chatRepo.SetMessageResult(assistantMsg.ID, text, status); err != nil {
-				log.Printf("chat thread %d: save assistant reply: %v", thread.ID, err)
-			}
+	// A turn's assistant rows are segments: the placeholder created up front
+	// (so stage updates have somewhere to live) plus one more row per text
+	// segment that begins after this turn's tool rows. Each segment is written
+	// as its text arrives and republishes, so an open drawer renders the reply
+	// and the tool calls in real time and in the order the model produced them.
+	type chatSegment struct {
+		id   int64
+		text []string
+	}
+	segments := []*chatSegment{{id: assistantMsg.ID}}
+	cur := segments[0]
+	var lastToolID int64
+
+	// openSegment returns the segment the next model text part belongs to: the
+	// current one while nothing has been inserted after it, otherwise a fresh
+	// pending assistant row placed after this turn's tool rows.
+	openSegment := func() *chatSegment {
+		if cur.id > lastToolID {
+			return cur
+		}
+		id, err := eng.chatRepo.AddMessage(thread.ID, "assistant", "", "", "pending")
+		if err != nil {
+			log.Printf("chat thread %d: open reply segment: %v", thread.ID, err)
+			return cur
+		}
+		cur = &chatSegment{id: id}
+		segments = append(segments, cur)
+		return cur
+	}
+
+	// streamText appends one model text part to the open segment, persists it
+	// on the pending row, and republishes (throttled) so the reply shows up
+	// while the turn is still running instead of at its end.
+	var lastPublish time.Time
+	streamText := func(text string) {
+		if text == "" {
 			return
 		}
-		if _, err := eng.chatRepo.AddMessage(thread.ID, "assistant", text, "", status); err != nil {
-			log.Printf("chat thread %d: insert final message: %v", thread.ID, err)
-			_ = eng.chatRepo.SetMessageResult(assistantMsg.ID, text, status)
-		} else if err := eng.chatRepo.DeleteMessage(assistantMsg.ID); err != nil {
-			log.Printf("chat thread %d: delete pending message: %v", thread.ID, err)
+		seg := openSegment()
+		seg.text = append(seg.text, text)
+		if err := eng.chatRepo.SetMessageResult(seg.id, strings.Join(seg.text, "\n"), "pending"); err != nil {
+			log.Printf("chat thread %d: stream reply text: %v", thread.ID, err)
+			return
 		}
+		if time.Since(lastPublish) >= chatStreamPublishEvery {
+			lastPublish = time.Now()
+			s.publish(thread.ID, thread.ProjectID)
+		}
+	}
+
+	// recordTool notes the newest agent-event row (tool call, tool response,
+	// or thought) so a text segment that follows it opens a row that sorts
+	// after this turn's event rows.
+	recordTool := func(id int64) {
+		if id > lastToolID {
+			lastToolID = id
+		}
+	}
+
+	// thoughtBuf accumulates the model's chain-of-thought parts since the
+	// last flush. They are shown as their own chronological "thought" rows in
+	// the drawer (response → call → thought → call → response), but kept out
+	// of the model context: they are never streamed into assistant rows.
+	var thoughtBuf []string
+
+	// flushThoughts persists the buffered thoughts as one thought row and
+	// republishes. It runs before every tool call row of the turn and at
+	// event end, so the drawer shows the reasoning in the order it happened.
+	flushThoughts := func() {
+		if len(thoughtBuf) == 0 {
+			return
+		}
+		text := strings.Join(thoughtBuf, "\n")
+		thoughtBuf = nil
+		id, err := eng.chatRepo.AddMessage(thread.ID, "thought", text, "", "done")
+		if err != nil {
+			log.Printf("chat thread %d: save thought: %v", thread.ID, err)
+			return
+		}
+		s.publish(thread.ID, thread.ProjectID)
+		recordTool(id)
+	}
+
+	// finalize lands the turn's final text on the open segment and closes the
+	// earlier ones: segments that carry streamed text are completed in place
+	// (they are real replies in the interleaving), and a segment that only ever
+	// held stage text is deleted, so a tool turn leaves user → call → response →
+	// reply rather than a stray placeholder plus a lumped reply. Any thoughts
+	// still buffered are flushed first so no reasoning is dropped on an
+	// early-exit path (fail, panic, or a clean end).
+	finalize := func(text, status string) {
+		flushThoughts()
+		for _, seg := range segments {
+			if seg == cur {
+				if err := eng.chatRepo.SetMessageResult(seg.id, text, status); err != nil {
+					log.Printf("chat thread %d: save assistant reply: %v", thread.ID, err)
+				}
+				continue
+			}
+			content := strings.Join(seg.text, "\n")
+			if content == "" {
+				if err := eng.chatRepo.DeleteMessage(seg.id); err != nil {
+					log.Printf("chat thread %d: delete placeholder message: %v", thread.ID, err)
+				}
+				continue
+			}
+			if err := eng.chatRepo.SetMessageResult(seg.id, content, "done"); err != nil {
+				log.Printf("chat thread %d: save reply segment: %v", thread.ID, err)
+			}
+		}
+		_ = eng.chatRepo.TouchThread(thread.ID)
+		s.publish(thread.ID, thread.ProjectID)
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("chat thread %d: turn panic: %v", thread.ID, r)
 		}
 		if !finished {
-			// Safety net: a turn must never exit with the row still pending.
+			// Safety net: a turn must never exit with a row still pending.
 			finalize("Error: turn failed unexpectedly", "error")
-			_ = eng.chatRepo.TouchThread(thread.ID)
-			s.publish(thread.ID, thread.ProjectID)
 		}
 	}()
 	fail := func(cause error) {
 		finished = true
 		finalize("Error: "+cause.Error(), "error")
-		_ = eng.chatRepo.TouchThread(thread.ID)
-		s.publish(thread.ID, thread.ProjectID)
 	}
 
 	stage("Preparing…")
@@ -429,7 +523,6 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		}
 	}
 
-	var texts []string
 	for ev, err := range r.Run(ctx, userID, sessionID, genai.NewContentFromText(userMsg.Content, genai.RoleUser), agent.RunConfig{}) {
 		if err != nil {
 			fail(fmt.Errorf("chat turn: %w", err))
@@ -443,33 +536,43 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 				if p == nil {
 					continue
 				}
+				// Parts land in emission order: narration that comes with a call
+				// stays above the call it explains.
+				if p.Text != "" && p.Thought {
+					// Chain of thought: buffered for its own thought row, never
+					// mixed into the assistant reply text.
+					thoughtBuf = append(thoughtBuf, p.Text)
+					continue
+				}
 				if p.Text != "" {
-					texts = append(texts, p.Text)
+					streamText(p.Text)
 				}
 				if p.FunctionCall != nil {
-					s.addToolMessage(thread.ID, p.FunctionCall.Name, p.FunctionCall.Args)
-					toolRows++
+					flushThoughts()
+					recordTool(s.addToolMessage(thread, p.FunctionCall.Name, p.FunctionCall.Args))
 				}
 			}
+			// Event end: thoughts that were not followed by a call in this
+			// event still get their row before the turn moves on.
+			flushThoughts()
 		} else if ev.Content.Role == genai.RoleUser {
 			for _, p := range ev.Content.Parts {
 				if p == nil || p.FunctionResponse == nil {
 					continue
 				}
-				s.addToolMessage(thread.ID, p.FunctionResponse.Name, p.FunctionResponse.Response)
-				toolRows++
+				recordTool(s.addToolMessage(thread, p.FunctionResponse.Name, p.FunctionResponse.Response))
 			}
 		}
 	}
 
-	finalText := strings.Join(texts, "\n")
+	// The open segment holds this turn's closing text; earlier segments were
+	// already persisted as they streamed.
+	finalText := strings.Join(cur.text, "\n")
 	if finalText == "" {
 		finalText = "(no response)"
 	}
-	finalize(finalText, "done")
-	_ = eng.chatRepo.TouchThread(thread.ID)
 	finished = true
-	s.publish(thread.ID, thread.ProjectID)
+	finalize(finalText, "done")
 }
 
 // acquireChatModel mirrors Engine.acquirePhaseModel residency semantics for a
@@ -552,16 +655,24 @@ func (s *ChatService) acquireChatModel(ctx context.Context, thread *sqlite.ChatT
 	return release, nil
 }
 
-// addToolMessage persists one tool call/response row for the drawer.
-func (s *ChatService) addToolMessage(threadID int64, name string, payload any) {
+// addToolMessage persists one tool call/response row for the drawer and
+// republishes immediately: tool blocks are what a user waits on during a turn,
+// so they render as they happen instead of arriving in a batch at the end. It
+// returns the new row id (0 on failure) so the turn can keep a following text
+// segment sorted after this turn's tool rows.
+func (s *ChatService) addToolMessage(thread *sqlite.ChatThread, name string, payload any) int64 {
 	data, err := json.Marshal(payload)
 	content := fmt.Sprintf("%v", payload)
 	if err == nil {
 		content = cappedText(string(data))
 	}
-	if _, err := s.eng.chatRepo.AddMessage(threadID, "tool", content, name, "done"); err != nil {
-		log.Printf("chat thread %d: save tool message: %v", threadID, err)
+	id, err := s.eng.chatRepo.AddMessage(thread.ID, "tool", content, name, "done")
+	if err != nil {
+		log.Printf("chat thread %d: save tool message: %v", thread.ID, err)
+		return 0
 	}
+	s.publish(thread.ID, thread.ProjectID)
+	return id
 }
 
 func (s *ChatService) publish(threadID, projectID int64) {

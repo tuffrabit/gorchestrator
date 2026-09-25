@@ -703,6 +703,24 @@ button, input, select, textarea {
   0%, 80%, 100% { opacity: 0.25; }
   40% { opacity: 1; }
 }
+.chat-msg-thought {
+  align-self: stretch;
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-subtle);
+  border-radius: 8px;
+  padding: 0.35rem 0.6rem;
+  background: var(--bg-app);
+}
+.chat-msg-thought .chat-bubble {
+  background: none;
+  border: none;
+  padding: 0;
+  white-space: pre-wrap;
+}
 .chat-msg-tool {
   align-self: stretch;
   max-width: 100%;

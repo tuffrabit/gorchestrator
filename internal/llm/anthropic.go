@@ -189,7 +189,10 @@ func (m *AnthropicModel) convertContents(contents []*genai.Content, cfg *genai.G
 			if p == nil {
 				continue
 			}
-			if p.Text != "" {
+			// Thought parts are the model's private reasoning from a prior
+			// turn: echoing them back as text blocks wastes context and some
+			// servers reject thinking blocks in requests.
+			if p.Text != "" && !p.Thought {
 				contentBlocks = append(contentBlocks, map[string]any{
 					"type": "text",
 					"text": p.Text,
@@ -248,6 +251,13 @@ func (m *AnthropicModel) convertResponse(apiResp *anthropicMessagesResponse) *mo
 
 	for _, block := range apiResp.Content {
 		switch block.Type {
+		case "thinking":
+			if block.Thinking != "" {
+				// Marked as a thought part so downstream consumers can show it
+				// as the agent's reasoning, and so it is never echoed back as
+				// answer text.
+				content.Parts = append(content.Parts, &genai.Part{Text: block.Thinking, Thought: true})
+			}
 		case "text":
 			content.Parts = append(content.Parts, &genai.Part{Text: block.Text})
 		case "tool_use":
@@ -278,11 +288,12 @@ type anthropicMessagesResponse struct {
 }
 
 type anthropicContentBlock struct {
-	Type  string         `json:"type"`
-	Text  string         `json:"text,omitempty"`
-	ID    string         `json:"id,omitempty"`
-	Name  string         `json:"name,omitempty"`
-	Input map[string]any `json:"input,omitempty"`
+	Type     string         `json:"type"`
+	Text     string         `json:"text,omitempty"`
+	Thinking string         `json:"thinking,omitempty"`
+	ID       string         `json:"id,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	Input    map[string]any `json:"input,omitempty"`
 }
 
 type anthropicUsage struct {

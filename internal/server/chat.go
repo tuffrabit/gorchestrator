@@ -444,6 +444,9 @@ func newChatMessageView(m *sqlite.ChatMessage) *chatMessageView {
 		ToolName: m.ToolName,
 		Content:  m.Content,
 	}
+	// "thought" rows (the model's chain of thought) deliberately fall through
+	// to plain text: no markdown rendering, no pending/error styling — the
+	// drawer's thought branch renders {{.Content}} escaped as-is.
 	switch {
 	case m.Role == "assistant" && m.Status == "pending":
 		v.Pending = true

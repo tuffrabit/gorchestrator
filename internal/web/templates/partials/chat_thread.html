@@ -29,6 +29,10 @@
         <div class="chat-msg chat-msg-user">
           <div class="chat-bubble">{{.Content}}</div>
         </div>
+        {{else if eq .Role "thought"}}
+        <div class="chat-msg chat-msg-thought">
+          <div class="chat-bubble">{{.Content}}</div>
+        </div>
         {{else if .Pending}}
         <div class="chat-msg chat-msg-assistant chat-msg-pending">
           <div class="chat-bubble">

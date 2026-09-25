@@ -239,6 +239,53 @@ func TestPartialChatSend_CreatesThreadAndRendersMessages(t *testing.T) {
 	}
 }
 
+func TestPartialChatThread_RendersThoughtRows(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	form.Set("message", "hello agent")
+	if rec := chatPostForm(t, h, "/partials/chat/send", form); rec.Code != http.StatusOK {
+		t.Fatalf("send status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	user, err := eng.Users().GetByEmail("disabled@localhost")
+	if err != nil || user == nil {
+		t.Fatalf("expected synthetic user row: %v", err)
+	}
+	projectID := chatProjectID(t, eng, "acme")
+	thread, err := eng.ChatRepo().FindThread(user.ID, projectID, "researcher", "")
+	if err != nil || thread == nil {
+		t.Fatalf("expected thread: thread=%v err=%v", thread, err)
+	}
+	waitForChatTurnDone(t, eng, thread.ID, 2)
+
+	// A thought row holds the model's chain of thought as its own row.
+	if _, err := eng.ChatRepo().AddMessage(thread.ID, "thought", "## private reasoning", "", "done"); err != nil {
+		t.Fatalf("add thought row: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%.600s", rec.Code, body)
+	}
+	if !strings.Contains(body, `chat-msg-thought`) {
+		t.Fatalf("thread missing the thought row: %.800s", body)
+	}
+	if !strings.Contains(body, "## private reasoning") {
+		t.Fatalf("thread missing the thought text (escaped, plain): %.800s", body)
+	}
+	// The thought must render as plain text: its markdown marker is not
+	// turned into a heading.
+	if strings.Contains(body, "<h2") {
+		t.Fatalf("thought row rendered as markdown: %.800s", body)
+	}
+}
+
 func TestPartialChatSend_ValidationErrors(t *testing.T) {
 	eng, srv := chatTestServer(t, nil)
 	h := srv.Handler()
@@ -554,5 +601,13 @@ func TestChatMessageView_Rendering(t *testing.T) {
 	tool := newChatMessageView(&sqlite.ChatMessage{Role: "tool", Status: "done", ToolName: "read_file", Content: "{}"})
 	if tool.ToolName != "read_file" {
 		t.Fatalf("tool view: %+v", tool)
+	}
+	// Thought rows are plain text: no markdown HTML, no pending/error flags.
+	thought := newChatMessageView(&sqlite.ChatMessage{Role: "thought", Status: "done", Content: "<script>alert(1)</script> the tree has one file"})
+	if thought.Pending || thought.Error || thought.ContentHTML != "" {
+		t.Fatalf("thought view: %+v, want plain text only", thought)
+	}
+	if thought.Content != "<script>alert(1)</script> the tree has one file" {
+		t.Fatalf("thought content: %+v", thought)
 	}
 }

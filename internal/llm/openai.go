@@ -229,7 +229,9 @@ func (m *OpenAIModel) convertContents(contents []*genai.Content, cfg *genai.Gene
 			if p == nil {
 				continue
 			}
-			if p.Text != "" {
+			// Thought parts are the model's private reasoning: echoing them back
+			// as assistant text wastes context and confuses some servers.
+			if p.Text != "" && !p.Thought {
 				textParts = append(textParts, p.Text)
 			}
 			if p.FunctionCall != nil {
@@ -333,6 +335,12 @@ func (m *OpenAIModel) convertResponse(apiResp *openAIChatResponse) *model.LLMRes
 		Parts: []*genai.Part{},
 	}
 
+	if reasoning := firstNonEmpty(msg.Reasoning, msg.ReasoningAlt); reasoning != "" {
+		// Marked as a thought part so downstream consumers can show it as the
+		// agent's reasoning, and so it is never echoed back as answer text.
+		content.Parts = append(content.Parts, &genai.Part{Text: reasoning, Thought: true})
+	}
+
 	if msg.Content != "" {
 		content.Parts = append(content.Parts, &genai.Part{Text: msg.Content})
 	}
@@ -373,6 +381,15 @@ func textFromContent(c *genai.Content) string {
 	return joinStrings(parts, "\n")
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func argsJSON(args map[string]any) string {
 	b, _ := json.Marshal(args)
 	return string(b)
@@ -399,9 +416,14 @@ type choice struct {
 }
 
 type message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []toolCall `json:"tool_calls"`
+	Role    string `json:"role"`
+	Content string `json:"content"`
+	// Reasoning carries the model's chain of thought. OpenAI-compatible
+	// servers disagree on the field name: llama-swap's reasoning parsers,
+	// DeepSeek and OpenRouter use reasoning_content, others use reasoning.
+	Reasoning    string     `json:"reasoning_content"`
+	ReasoningAlt string     `json:"reasoning"`
+	ToolCalls    []toolCall `json:"tool_calls"`
 }
 
 type toolCall struct {

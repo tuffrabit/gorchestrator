@@ -2,9 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +41,19 @@ type fakeChatModel struct {
 	declarations [][]string
 	callTurns    int
 	callDone     bool
+	// narrate prefixes the tool-calling turn with model text, the way a real
+	// model narrates before it calls.
+	narrate string
+	// onRequest fires after a request is recorded, with the 1-based count of
+	// requests so far. Tests use it to read the thread *mid-turn*: that shows
+	// what an open drawer would swap in between the model's calls, which is
+	// how real-time rendering gets asserted.
+	onRequest func(n int)
+	// script is an optional per-request plan for a multi-round turn: request i
+	// answers with script[i-1], where "text:..." is a model text part and any
+	// other entry is a list_directory call. Entries are emitted in order, like
+	// a real model that narrates, calls, reads the result, and narrates again.
+	script [][]string
 }
 
 type capturedContent struct {
@@ -75,10 +91,45 @@ func (f *fakeChatModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRe
 	}
 	f.requests = append(f.requests, contents)
 	f.declarations = append(f.declarations, decls)
+	n := len(f.requests)
+	hook := f.onRequest
 	f.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
 
 	return func(yield func(*adkmodel.LLMResponse, error) bool) {
 		f.mu.Lock()
+		if n <= len(f.script) {
+			script := f.script[n-1]
+			f.mu.Unlock()
+			parts := make([]*genai.Part, 0, len(script))
+			for _, entry := range script {
+				if entry == "" {
+					continue
+				}
+				if strings.HasPrefix(entry, "thought:") {
+					parts = append(parts, &genai.Part{Text: strings.TrimPrefix(entry, "thought:"), Thought: true})
+					continue
+				}
+				if strings.HasPrefix(entry, "text:") {
+					parts = append(parts, &genai.Part{Text: strings.TrimPrefix(entry, "text:")})
+					continue
+				}
+				parts = append(parts, &genai.Part{
+					FunctionCall: &genai.FunctionCall{
+						ID:   fmt.Sprintf("call_round_%d", n),
+						Name: "list_directory",
+						Args: map[string]any{"path": "."},
+					},
+				})
+			}
+			yield(&adkmodel.LLMResponse{
+				Content:      &genai.Content{Role: genai.RoleModel, Parts: parts},
+				TurnComplete: true,
+			}, nil)
+			return
+		}
 		call := f.callTurns > 0 && !f.callDone
 		if call {
 			f.callDone = true
@@ -88,17 +139,19 @@ func (f *fakeChatModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRe
 		}
 		f.mu.Unlock()
 		if call {
-			yield(&adkmodel.LLMResponse{
-				Content: &genai.Content{
-					Role: genai.RoleModel,
-					Parts: []*genai.Part{{
-						FunctionCall: &genai.FunctionCall{
-							ID:   "call_list_directory",
-							Name: "list_directory",
-							Args: map[string]any{"path": "."},
-						},
-					}},
+			var parts []*genai.Part
+			if f.narrate != "" {
+				parts = append(parts, &genai.Part{Text: f.narrate})
+			}
+			parts = append(parts, &genai.Part{
+				FunctionCall: &genai.FunctionCall{
+					ID:   "call_list_directory",
+					Name: "list_directory",
+					Args: map[string]any{"path": "."},
 				},
+			})
+			yield(&adkmodel.LLMResponse{
+				Content:      &genai.Content{Role: genai.RoleModel, Parts: parts},
 				TurnComplete: true,
 			}, nil)
 			return
@@ -568,6 +621,348 @@ func TestChat_SnapshotModeUnchanged(t *testing.T) {
 	msgs := waitForChatMessages(t, eng, thread.ID, 4)
 	assertChatToolTurn(t, msgs)
 	assertHostToolDeclarations(t, fake)
+}
+
+// TestChat_TurnRendersInRealTime is the drawer bug: tool blocks and the
+// model's own narration used to arrive as two lumped blocks when the turn
+// ended, instead of being persisted (and republished) as they happened.
+func TestChat_TurnRendersInRealTime(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	fake.callTurns = 1
+	fake.narrate = "let me list the tree"
+
+	// Snapshot the thread at the second model request — the moment an open
+	// drawer would be re-rendering between the call and the reply.
+	mid := make(chan []*sqlite.ChatMessage, 1)
+	fake.onRequest = func(n int) {
+		if n != 2 {
+			return
+		}
+		msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+		if err != nil {
+			mid <- nil
+			return
+		}
+		mid <- msgs
+	}
+
+	subCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := eng.Subscribe(subCtx, EventFilter{})
+
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what files are here"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 5)
+
+	snap := <-mid
+	if snap == nil {
+		t.Fatal("no mid-turn snapshot captured")
+	}
+	if len(snap) != 4 {
+		t.Fatalf("mid-turn rows = %+v, want user, narrating assistant, tool call, tool response", snap)
+	}
+	if snap[1].Role != "assistant" || snap[1].Status != "pending" || snap[1].Content != "let me list the tree" {
+		t.Fatalf("mid-turn assistant row = %+v, want a pending row holding the streamed narration", snap[1])
+	}
+	if snap[2].Role != "tool" || snap[2].ToolName != "list_directory" || snap[3].Role != "tool" {
+		t.Fatalf("mid-turn rows = %+v, want both tool rows present before the reply", snap)
+	}
+
+	// The finished turn keeps that order: narration above the tool blocks,
+	// closing reply after them, no leftover placeholder row.
+	want := []struct{ role, content, status string }{
+		{"user", "what files are here", "done"},
+		{"assistant", "let me list the tree", "done"},
+		{"tool", "", "done"},
+		{"tool", "", "done"},
+		{"assistant", "chat reply", "done"},
+	}
+	for i, w := range want {
+		if msgs[i].Role != w.role || msgs[i].Status != w.status {
+			t.Fatalf("row %d = %+v, want role=%s status=%s", i, msgs[i], w.role, w.status)
+		}
+		if w.content != "" && msgs[i].Content != w.content {
+			t.Fatalf("row %d content = %q, want %q", i, msgs[i].Content, w.content)
+		}
+	}
+
+	// Every visible step republished: pair, stage, tool call, tool response,
+	// streamed text, and the final reply.
+	saw := 0
+	for _, ev := range drainEvents(events) {
+		if ev.Type != EventChatMessage || ev.ProjectID != project.ID {
+			continue
+		}
+		if tid, ok := ev.Data["thread_id"].(int64); ok && tid == thread.ID {
+			saw++
+		}
+	}
+	if saw < 6 {
+		t.Fatalf("chat_message events = %d, want one per visible step of the turn", saw)
+	}
+}
+
+// TestChat_TurnIsARunningListOfAgentEvents is the shape the drawer is for:
+// one row per agent event, in the order the model produced them — say,
+// call, read the result, say more, call again, answer — each visible while the
+// turn is still running rather than queued into one reply block at the end.
+func TestChat_TurnIsARunningListOfAgentEvents(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	fake.script = [][]string{
+		{"text:i will list the tree", "call"},
+		{"text:that was shallow, let me look again", "call"},
+		{"text:there is one file here", ""},
+	}
+
+	var mu sync.Mutex
+	snaps := map[int][]*sqlite.ChatMessage{}
+	fake.onRequest = func(n int) {
+		msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		snaps[n] = msgs
+		mu.Unlock()
+	}
+
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what is in this project"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 8)
+	want := []struct{ role, content, status string }{
+		{"user", "what is in this project", "done"},
+		{"assistant", "i will list the tree", "done"},
+		{"tool", "", "done"},
+		{"tool", "", "done"},
+		{"assistant", "that was shallow, let me look again", "done"},
+		{"tool", "", "done"},
+		{"tool", "", "done"},
+		{"assistant", "there is one file here", "done"},
+	}
+	for i, w := range want {
+		if msgs[i].Role != w.role || msgs[i].Status != w.status {
+			t.Fatalf("row %d = %+v, want role=%s status=%s", i, msgs[i], w.role, w.status)
+		}
+		if w.content != "" && msgs[i].Content != w.content {
+			t.Fatalf("row %d content = %q, want %q", i, msgs[i].Content, w.content)
+		}
+	}
+
+	// Mid-turn the same shape was already there: at the second model request
+	// the first thought and both of its tool rows were persisted, and at the
+	// third request the second thought was its own row after them.
+	mu.Lock()
+	defer mu.Unlock()
+	second, third := snaps[2], snaps[3]
+	if len(second) != 4 {
+		t.Fatalf("rows at request 2 = %+v, want user, thought, tool call, tool response", second)
+	}
+	if second[1].Role != "assistant" || second[1].Status != "pending" || second[1].Content != "i will list the tree" {
+		t.Fatalf("request 2 thought row = %+v, want a pending row holding the first thought", second[1])
+	}
+	if second[2].Role != "tool" || second[3].Role != "tool" {
+		t.Fatalf("request 2 rows = %+v, want the tool call/response rows already present", second)
+	}
+	if len(third) != 7 {
+		t.Fatalf("rows at request 3 = %+v, want the running list through the second tool response", third)
+	}
+	if third[4].Role != "assistant" || third[4].Status != "pending" || third[4].Content != "that was shallow, let me look again" {
+		t.Fatalf("request 3 second thought row = %+v, want its own pending row after the first tool pair", third[4])
+	}
+	if third[5].Role != "tool" || third[6].Role != "tool" {
+		t.Fatalf("request 3 rows = %+v, want the second tool call/response pair present", third)
+	}
+}
+
+// TestChat_OpenAIProviderRendersRunningList runs a chat turn through the real
+// OpenAI-compatible transport (what llama-swap serves) with a scripted
+// narrate → call → narrate → call → answer model, and snapshots the thread at
+// every model request. It is the production-shaped check that the drawer's
+// running list really grows one agent event at a time.
+func TestChat_OpenAIProviderRendersRunningList(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.go"), []byte("package hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, user, project, _ := chatTestEngine(t, func(cfg *config.Config) {
+		pc := cfg.Projects["foo"]
+		pc.SourcePath = src
+		cfg.Projects["foo"] = pc
+	})
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	var mu sync.Mutex
+	requests := 0
+	snaps := map[int][]*sqlite.ChatMessage{}
+	toolCall := func(id, name, args string) map[string]any {
+		return map[string]any{
+			"id":       id,
+			"type":     "function",
+			"function": map[string]any{"name": name, "arguments": args},
+		}
+	}
+	rounds := []map[string]any{
+		{"content": "i will list the tree", "tool_calls": []map[string]any{toolCall("c1", "list_directory", `{"path":"."}`)}},
+		{"content": "now let me read hello.go", "tool_calls": []map[string]any{toolCall("c2", "read_file", `{"path":"hello.go"}`)}},
+		{"content": "there is one file here: hello.go"},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		n := requests
+		msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+		if err == nil {
+			snaps[n] = msgs
+		}
+		mu.Unlock()
+		choice := rounds[n-1]
+		if n > len(rounds) {
+			choice = map[string]any{"content": "(script exhausted)"}
+		}
+		resp := map[string]any{"choices": []map[string]any{{"message": choice}},
+			"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	eng.chatSvc.newModel = func(ctx context.Context, cfg llm.Config) (adkmodel.LLM, error) {
+		return llm.NewOpenAIModel("gpt-test", "", srv.URL, 5*time.Second), nil
+	}
+
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what is in this project"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 8)
+	want := []struct{ role, content string }{
+		{"user", "what is in this project"},
+		{"assistant", "i will list the tree"},
+		{"tool", ""},
+		{"tool", ""},
+		{"assistant", "now let me read hello.go"},
+		{"tool", ""},
+		{"tool", ""},
+		{"assistant", "there is one file here: hello.go"},
+	}
+	for i, w := range want {
+		if msgs[i].Role != w.role {
+			t.Fatalf("row %d = %+v, want role %s", i, msgs[i], w.role)
+		}
+		if w.content != "" && msgs[i].Content != w.content {
+			t.Fatalf("row %d content = %q, want %q", i, msgs[i].Content, w.content)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != len(rounds) {
+		t.Fatalf("model requests = %d, want %d", requests, len(rounds))
+	}
+	for n, wantRows := range map[int]int{2: 4, 3: 7} {
+		got := snaps[n]
+		if len(got) != wantRows {
+			t.Fatalf("rows visible at request %d = %d, want %d (%v)",
+				n, len(got), wantRows, chatRowSummary(got))
+		}
+	}
+	if got := snaps[2][1]; got.Role != "assistant" || got.Status != "pending" || got.Content != "i will list the tree" {
+		t.Fatalf("request 2 agent text row = %+v, want the first narration already persisted", got)
+	}
+	if got := snaps[3][4]; got.Role != "assistant" || got.Status != "pending" || got.Content != "now let me read hello.go" {
+		t.Fatalf("request 3 agent text row = %+v, want the second narration in its own row after the first tool pair", got)
+	}
+}
+
+// TestChat_ThoughtsAreTheirOwnRows checks that a turn whose model thinks
+// between tool calls shows the reasoning as its own chronological row —
+// user → thought → call → response → reply — and that the thought never
+// leaks into the assistant reply text or gets reseeded into the next turn's
+// model context.
+func TestChat_ThoughtsAreTheirOwnRows(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	fake.script = [][]string{
+		{"thought:hmm, the user wants files, so list_directory on the root", "call"},
+		{"text:there is one file here", ""},
+		{"text:second answer", ""}, // turn 2's (third overall) request
+	}
+
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what is in this project"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 5)
+	want := []struct{ role, content string }{
+		{"user", "what is in this project"},
+		{"thought", "hmm, the user wants files, so list_directory on the root"},
+		{"tool", ""},
+		{"tool", ""},
+		{"assistant", "there is one file here"},
+	}
+	for i, w := range want {
+		if msgs[i].Role != w.role || msgs[i].Status != "done" {
+			t.Fatalf("row %d = %+v, want %s done (%s)", i, msgs[i], w.role, chatRowSummary(msgs))
+		}
+		if w.content != "" && msgs[i].Content != w.content {
+			t.Fatalf("row %d content = %q, want %q (%s)", i, msgs[i].Content, w.content, chatRowSummary(msgs))
+		}
+	}
+
+	// The thought must not have leaked into the assistant reply text.
+	for _, m := range msgs {
+		if m.Role == "assistant" && strings.Contains(m.Content, "list_directory on the root") {
+			t.Fatalf("thought leaked into assistant row: %+v", m)
+		}
+	}
+
+	// The next turn reseeds only user + assistant-done rows: the thought row
+	// stays out of the model's context.
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "second question"); err != nil {
+		t.Fatalf("second SendMessage: %v", err)
+	}
+	waitForChatMessages(t, eng, thread.ID, 7)
+	reqs := fake.capturedRequests()
+	if len(reqs) != 3 {
+		t.Fatalf("model requests = %d, want 3 (2 for turn 1, 1 for turn 2)", len(reqs))
+	}
+	for _, c := range reqs[2] {
+		if strings.Contains(c.text, "list_directory on the root") {
+			t.Fatalf("turn 2 contents reseeded the thought row: %+v", reqs[2])
+		}
+	}
+}
+
+// chatRowSummary renders rows as role/status/content snippets for test
+// failure messages.
+func chatRowSummary(msgs []*sqlite.ChatMessage) string {
+	parts := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		c := m.Content
+		if len(c) > 24 {
+			c = c[:24] + "…"
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s:%q", m.Role, m.Status, c))
+	}
+	return strings.Join(parts, " | ")
 }
 
 func TestChat_NoSourceFailsLoudly(t *testing.T) {

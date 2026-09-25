@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/adk/v2/model"
@@ -115,6 +116,131 @@ func TestAnthropicModel_Translation(t *testing.T) {
 	}
 	if resp.UsageMetadata.TotalTokenCount != 15 {
 		t.Fatalf("total tokens = %d, want 15", resp.UsageMetadata.TotalTokenCount)
+	}
+}
+
+func TestAnthropicModel_ThinkingBlocksRoundTrip(t *testing.T) {
+	// Extended-thinking responses carry "thinking" blocks. They must surface
+	// as Thought parts (never as answer text) and must not be echoed back as
+	// text blocks in later requests.
+	var echoedThought atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		_ = json.Unmarshal(body, &req)
+
+		// No text block may carry the private reasoning on the wire.
+		if msgs, ok := req["messages"].([]any); ok {
+			for _, m := range msgs {
+				blocks, _ := m.(map[string]any)["content"].([]any)
+				for _, b := range blocks {
+					if b.(map[string]any)["type"] == "text" &&
+						b.(map[string]any)["text"] == "the user wants a listing, so call list_directory" {
+						echoedThought.Store(true)
+					}
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{
+				{"type": "thinking", "thinking": "the user wants a listing, so call list_directory", "signature": "sig"},
+				{"type": "text", "text": "Here is the listing."},
+				{"type": "tool_use", "id": "tu_1", "name": "list_directory", "input": map[string]any{"path": "."}},
+			},
+			"usage": map[string]any{"input_tokens": 10, "output_tokens": 6},
+		})
+	}))
+	defer server.Close()
+
+	newModel := NewAnthropicModel("claude", "", server.URL+"/", 0)
+	am, ok := newModel.(*AnthropicModel)
+	if !ok {
+		t.Fatalf("model = %T, want *AnthropicModel", newModel)
+	}
+	am.apiKey = "test"
+
+	// Round 1: a fresh request — the response must surface the thinking.
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("list it", genai.RoleUser)}}
+	var resp *model.LLMResponse
+	for r, err := range am.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp = r
+	}
+	if resp == nil || len(resp.Content.Parts) != 3 {
+		t.Fatalf("parts = %+v, want thought, text, and tool call", resp)
+	}
+	if !resp.Content.Parts[0].Thought || resp.Content.Parts[0].Text != "the user wants a listing, so call list_directory" {
+		t.Fatalf("part 0 = %+v, want a Thought part holding the thinking", resp.Content.Parts[0])
+	}
+	if resp.Content.Parts[1].Thought || resp.Content.Parts[1].Text != "Here is the listing." {
+		t.Fatalf("part 1 = %+v, want the plain answer text", resp.Content.Parts[1])
+	}
+	if resp.Content.Parts[2].FunctionCall == nil {
+		t.Fatalf("part 2 = %+v, want the tool call", resp.Content.Parts[2])
+	}
+
+	// Round 2: resend the previous turn as history over the wire. The handler
+	// flags it if the private reasoning ever comes back as a text block.
+	req2 := &model.LLMRequest{Contents: []*genai.Content{resp.Content, genai.NewContentFromText("thanks", genai.RoleUser)}}
+	for _, err := range am.GenerateContent(context.Background(), req2, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The echo check runs in the handler goroutine, so assert the flag here,
+	// on the test goroutine.
+	if echoedThought.Load() {
+		t.Fatal("thought was echoed back as a text block in a later request")
+	}
+
+	// The same history, built offline: thought stays out, the answer and the
+	// tool_use stay in.
+	got, _, err := am.convertContents(req2.Contents, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistantMsg map[string]any
+	for _, m := range got {
+		if m["role"] == "assistant" {
+			assistantMsg = m
+		}
+	}
+	if assistantMsg == nil {
+		t.Fatalf("messages = %+v, want an assistant message", got)
+	}
+	var blocks []map[string]any
+	switch c := assistantMsg["content"].(type) {
+	case []any: // wire shape after a JSON round trip
+		for _, b := range c {
+			blocks = append(blocks, b.(map[string]any))
+		}
+	case []map[string]any: // built offline, straight from convertContents
+		blocks = c
+	}
+	var sawText, sawToolUse, sawThought bool
+	for _, block := range blocks {
+		switch block["type"] {
+		case "text":
+			sawText = block["text"] == "Here is the listing."
+		case "tool_use":
+			sawToolUse = true
+		case "thinking":
+			sawThought = true
+		}
+	}
+	if !sawText {
+		t.Fatalf("assistant blocks lost the answer: %+v", assistantMsg)
+	}
+	if !sawToolUse {
+		t.Fatalf("assistant blocks lost the tool_use: %+v", assistantMsg)
+	}
+	if sawThought {
+		t.Fatalf("assistant blocks echoed the thinking: %+v", assistantMsg)
 	}
 }
 
