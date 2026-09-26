@@ -21,9 +21,16 @@
     {{if .Messages}}
       {{range .Messages}}
         {{if eq .Role "tool"}}
-        <details class="chat-msg chat-msg-tool">
-          <summary>tool: {{.ToolName}}</summary>
-          <pre>{{.Content}}</pre>
+        {{/* One tool call is one row: its arguments and its result are two
+             parts of the same box, not two boxes. Each part carries its own
+             .json-tree-scope so Expand/Raw only touch that payload. */}}
+        <details class="chat-msg chat-msg-tool{{if .Running}} chat-msg-tool-running{{end}}{{if .Error}} chat-msg-tool-error{{end}}">
+          <summary>tool: {{.ToolName}}{{if .Running}} <span class="chat-tool-status">running…</span>{{end}}</summary>
+          {{if .Running}}
+          <div class="chat-tool-pending">Waiting for the result…</div>
+          {{end}}
+          {{if .CallPart.Present}}{{template "chat_tool_part" .CallPart}}{{end}}
+          {{if .ResultPart.Present}}{{template "chat_tool_part" .ResultPart}}{{end}}
         </details>
         {{else if eq .Role "user"}}
         <div class="chat-msg chat-msg-user">
@@ -73,5 +80,28 @@
       if (root && typeof chatInitThread === 'function') chatInitThread(root);
     })();
   </script>
+</div>
+{{end}}
+
+{{/* chat_tool_part renders one side of a tool call box (its Call arguments or
+     its Result). Tool payloads are JSON whenever the orchestrator could marshal
+     them: the same hidden-data + JS tree viewer the artifact drawer's activity
+     tab uses, scoped to THIS part so Expand/Raw only touch this payload. A
+     non-JSON payload keeps the raw <pre>. */}}
+{{define "chat_tool_part"}}
+<div class="chat-tool-part{{if .JSON}} json-tree-scope{{end}}">
+  <div class="chat-tool-part-head">{{.Label}}{{if .Truncated}} <span class="card-meta">truncated</span>{{end}}</div>
+  {{if .JSON}}
+  <div class="json-tree-toolbar chat-tool-toolbar">
+    <button class="btn" type="button" onclick="jsonTreeAll(this, true)">Expand all</button>
+    <button class="btn" type="button" onclick="jsonTreeAll(this, false)">Collapse all</button>
+    <button class="btn" type="button" onclick="jsonTreeToggleRaw(this)">Raw</button>
+  </div>
+  <pre class="js-events-data" hidden>{{.JSON}}</pre>
+  <div class="json-tree chat-tool-tree" role="tree" aria-label="{{.Label}} payload"></div>
+  <pre class="json-raw" hidden><code class="language-json">{{.Text}}</code></pre>
+  {{else}}
+  <pre>{{.Text}}</pre>
+  {{end}}
 </div>
 {{end}}

@@ -262,23 +262,27 @@ func chatTestEngineFor(t *testing.T, projectName string, mutate func(*config.Con
 }
 
 // assertChatToolTurn checks the message layout of a turn that made one
-// list_directory call: user, tool call, tool response, assistant.
+// list_directory call: user, tool call (arguments AND result on that one row),
+// assistant. Two rows for one call is the bug this layout guards against.
 func assertChatToolTurn(t *testing.T, msgs []*sqlite.ChatMessage) {
 	t.Helper()
-	if len(msgs) != 4 {
-		t.Fatalf("messages = %+v, want 4 rows (user, tool, tool, assistant)", msgs)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %s, want 3 rows (user, tool call+result, assistant)", chatRowSummary(msgs))
 	}
 	if msgs[0].Role != "user" || msgs[0].Status != "done" {
 		t.Fatalf("row 0 = %+v, want done user message", msgs[0])
 	}
 	if msgs[1].Role != "tool" || msgs[1].ToolName != "list_directory" || msgs[1].Status != "done" {
-		t.Fatalf("row 1 = %+v, want done list_directory tool call", msgs[1])
+		t.Fatalf("row 1 = %+v, want one done list_directory tool row", msgs[1])
 	}
-	if msgs[2].Role != "tool" || msgs[2].ToolName != "list_directory" || !strings.Contains(msgs[2].Content, "hello.go") {
-		t.Fatalf("row 2 = %+v, want tool response listing hello.go", msgs[2])
+	if !strings.Contains(msgs[1].ToolArgs, `"path":"."`) {
+		t.Fatalf("row 1 tool_args = %q, want the call arguments", msgs[1].ToolArgs)
 	}
-	if msgs[3].Role != "assistant" || msgs[3].Status != "done" || msgs[3].Content != "chat reply" {
-		t.Fatalf("row 3 = %+v, want done assistant reply", msgs[3])
+	if !strings.Contains(msgs[1].Content, "hello.go") {
+		t.Fatalf("row 1 content = %q, want the tool result listing hello.go", msgs[1].Content)
+	}
+	if msgs[2].Role != "assistant" || msgs[2].Status != "done" || msgs[2].Content != "chat reply" {
+		t.Fatalf("row 2 = %+v, want done assistant reply", msgs[2])
 	}
 }
 
@@ -315,6 +319,9 @@ func waitForChatMessages(t *testing.T, eng *Engine, threadID int64, want int) []
 			pending := false
 			for _, m := range msgs {
 				if m.Role == "assistant" && m.Status == "pending" {
+					pending = true
+				}
+				if m.Role == "tool" && m.Status == "running" {
 					pending = true
 				}
 			}
@@ -580,7 +587,7 @@ func TestChat_GitProjectGetsRealTools(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	msgs := waitForChatMessages(t, eng, thread.ID, 3)
 	assertChatToolTurn(t, msgs)
 
 	// The chat LLM request carried the host tool declarations — this is the
@@ -618,7 +625,7 @@ func TestChat_SnapshotModeUnchanged(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	msgs := waitForChatMessages(t, eng, thread.ID, 3)
 	assertChatToolTurn(t, msgs)
 	assertHostToolDeclarations(t, fake)
 }
@@ -658,28 +665,27 @@ func TestChat_TurnRendersInRealTime(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	msgs := waitForChatMessages(t, eng, thread.ID, 5)
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
 
 	snap := <-mid
 	if snap == nil {
 		t.Fatal("no mid-turn snapshot captured")
 	}
-	if len(snap) != 4 {
-		t.Fatalf("mid-turn rows = %+v, want user, narrating assistant, tool call, tool response", snap)
+	if len(snap) != 3 {
+		t.Fatalf("mid-turn rows = %s, want user, narrating assistant, and one tool row (call + result)", chatRowSummary(snap))
 	}
 	if snap[1].Role != "assistant" || snap[1].Status != "pending" || snap[1].Content != "let me list the tree" {
 		t.Fatalf("mid-turn assistant row = %+v, want a pending row holding the streamed narration", snap[1])
 	}
-	if snap[2].Role != "tool" || snap[2].ToolName != "list_directory" || snap[3].Role != "tool" {
-		t.Fatalf("mid-turn rows = %+v, want both tool rows present before the reply", snap)
+	if snap[2].Role != "tool" || snap[2].ToolName != "list_directory" {
+		t.Fatalf("mid-turn tool row = %s, want the tool call row present before the reply", chatRowSummary(snap))
 	}
 
-	// The finished turn keeps that order: narration above the tool blocks,
-	// closing reply after them, no leftover placeholder row.
+	// The finished turn keeps that order: narration above the tool box,
+	// closing reply after it, no leftover placeholder row.
 	want := []struct{ role, content, status string }{
 		{"user", "what files are here", "done"},
 		{"assistant", "let me list the tree", "done"},
-		{"tool", "", "done"},
 		{"tool", "", "done"},
 		{"assistant", "chat reply", "done"},
 	}
@@ -692,8 +698,8 @@ func TestChat_TurnRendersInRealTime(t *testing.T) {
 		}
 	}
 
-	// Every visible step republished: pair, stage, tool call, tool response,
-	// streamed text, and the final reply.
+	// Every visible step republished: pair, stage, tool call, tool result on
+	// that same row, streamed text, and the final reply.
 	saw := 0
 	for _, ev := range drainEvents(events) {
 		if ev.Type != EventChatMessage || ev.ProjectID != project.ID {
@@ -740,14 +746,12 @@ func TestChat_TurnIsARunningListOfAgentEvents(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	msgs := waitForChatMessages(t, eng, thread.ID, 8)
+	msgs := waitForChatMessages(t, eng, thread.ID, 6)
 	want := []struct{ role, content, status string }{
 		{"user", "what is in this project", "done"},
 		{"assistant", "i will list the tree", "done"},
 		{"tool", "", "done"},
-		{"tool", "", "done"},
 		{"assistant", "that was shallow, let me look again", "done"},
-		{"tool", "", "done"},
 		{"tool", "", "done"},
 		{"assistant", "there is one file here", "done"},
 	}
@@ -761,28 +765,68 @@ func TestChat_TurnIsARunningListOfAgentEvents(t *testing.T) {
 	}
 
 	// Mid-turn the same shape was already there: at the second model request
-	// the first thought and both of its tool rows were persisted, and at the
-	// third request the second thought was its own row after them.
+	// the first thought and its tool row (call + result) were persisted, and at
+	// the third request the second thought was its own row after them.
 	mu.Lock()
 	defer mu.Unlock()
 	second, third := snaps[2], snaps[3]
-	if len(second) != 4 {
-		t.Fatalf("rows at request 2 = %+v, want user, thought, tool call, tool response", second)
+	if len(second) != 3 {
+		t.Fatalf("rows at request 2 = %s, want user, thought, tool call+result", chatRowSummary(second))
 	}
 	if second[1].Role != "assistant" || second[1].Status != "pending" || second[1].Content != "i will list the tree" {
 		t.Fatalf("request 2 thought row = %+v, want a pending row holding the first thought", second[1])
 	}
-	if second[2].Role != "tool" || second[3].Role != "tool" {
-		t.Fatalf("request 2 rows = %+v, want the tool call/response rows already present", second)
+	if second[2].Role != "tool" {
+		t.Fatalf("request 2 rows = %s, want the tool call row already present", chatRowSummary(second))
 	}
-	if len(third) != 7 {
-		t.Fatalf("rows at request 3 = %+v, want the running list through the second tool response", third)
+	if len(third) != 5 {
+		t.Fatalf("rows at request 3 = %s, want the running list through the second tool result", chatRowSummary(third))
 	}
-	if third[4].Role != "assistant" || third[4].Status != "pending" || third[4].Content != "that was shallow, let me look again" {
-		t.Fatalf("request 3 second thought row = %+v, want its own pending row after the first tool pair", third[4])
+	if third[3].Role != "assistant" || third[3].Status != "pending" || third[3].Content != "that was shallow, let me look again" {
+		t.Fatalf("request 3 second thought row = %s, want its own pending row after the first tool box", chatRowSummary(third))
 	}
-	if third[5].Role != "tool" || third[6].Role != "tool" {
-		t.Fatalf("request 3 rows = %+v, want the second tool call/response pair present", third)
+	if third[4].Role != "tool" {
+		t.Fatalf("request 3 rows = %s, want the second tool call box present", chatRowSummary(third))
+	}
+}
+
+// TestChat_EachToolCallGetsOneRow runs two calls of the same tool in a single
+// model event and asserts each call's result lands on its OWN row: pairing the
+// responses wrongly (last-call-wins, or a result written twice) is exactly how
+// a tool call ends up split across two boxes.
+func TestChat_EachToolCallGetsOneRow(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	fake.script = [][]string{
+		{"call", "call"},
+		{"text:two listings, one answer", ""},
+	}
+
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "list it twice"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	if msgs[0].Role != "user" {
+		t.Fatalf("row 0 = %s, want the user message", chatRowSummary(msgs))
+	}
+	for i := 1; i <= 2; i++ {
+		m := msgs[i]
+		if m.Role != "tool" || m.Status != "done" {
+			t.Fatalf("row %d = %s, want a done tool row", i, chatRowSummary(msgs))
+		}
+		if !strings.Contains(m.ToolArgs, `"path":"."`) {
+			t.Fatalf("row %d args = %q, want this call's own arguments", i, m.ToolArgs)
+		}
+		if m.Content == "" || !strings.HasPrefix(m.Content, "{") {
+			t.Fatalf("row %d result = %q, want this call's own result written onto the call row", i, m.Content)
+		}
+	}
+	if msgs[3].Role != "assistant" || msgs[3].Content != "two listings, one answer" {
+		t.Fatalf("row 3 = %s, want the closing reply after the tool rows", chatRowSummary(msgs))
 	}
 }
 
@@ -849,14 +893,12 @@ func TestChat_OpenAIProviderRendersRunningList(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	msgs := waitForChatMessages(t, eng, thread.ID, 8)
+	msgs := waitForChatMessages(t, eng, thread.ID, 6)
 	want := []struct{ role, content string }{
 		{"user", "what is in this project"},
 		{"assistant", "i will list the tree"},
 		{"tool", ""},
-		{"tool", ""},
 		{"assistant", "now let me read hello.go"},
-		{"tool", ""},
 		{"tool", ""},
 		{"assistant", "there is one file here: hello.go"},
 	}
@@ -874,7 +916,7 @@ func TestChat_OpenAIProviderRendersRunningList(t *testing.T) {
 	if requests != len(rounds) {
 		t.Fatalf("model requests = %d, want %d", requests, len(rounds))
 	}
-	for n, wantRows := range map[int]int{2: 4, 3: 7} {
+	for n, wantRows := range map[int]int{2: 3, 3: 5} {
 		got := snaps[n]
 		if len(got) != wantRows {
 			t.Fatalf("rows visible at request %d = %d, want %d (%v)",
@@ -884,8 +926,8 @@ func TestChat_OpenAIProviderRendersRunningList(t *testing.T) {
 	if got := snaps[2][1]; got.Role != "assistant" || got.Status != "pending" || got.Content != "i will list the tree" {
 		t.Fatalf("request 2 agent text row = %+v, want the first narration already persisted", got)
 	}
-	if got := snaps[3][4]; got.Role != "assistant" || got.Status != "pending" || got.Content != "now let me read hello.go" {
-		t.Fatalf("request 3 agent text row = %+v, want the second narration in its own row after the first tool pair", got)
+	if got := snaps[3][3]; got.Role != "assistant" || got.Status != "pending" || got.Content != "now let me read hello.go" {
+		t.Fatalf("request 3 agent text row = %+v, want the second narration in its own row after the first tool box", got)
 	}
 }
 
@@ -910,11 +952,10 @@ func TestChat_ThoughtsAreTheirOwnRows(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	msgs := waitForChatMessages(t, eng, thread.ID, 5)
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
 	want := []struct{ role, content string }{
 		{"user", "what is in this project"},
 		{"thought", "hmm, the user wants files, so list_directory on the root"},
-		{"tool", ""},
 		{"tool", ""},
 		{"assistant", "there is one file here"},
 	}
@@ -939,7 +980,7 @@ func TestChat_ThoughtsAreTheirOwnRows(t *testing.T) {
 	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "second question"); err != nil {
 		t.Fatalf("second SendMessage: %v", err)
 	}
-	waitForChatMessages(t, eng, thread.ID, 7)
+	waitForChatMessages(t, eng, thread.ID, 6)
 	reqs := fake.capturedRequests()
 	if len(reqs) != 3 {
 		t.Fatalf("model requests = %d, want 3 (2 for turn 1, 1 for turn 2)", len(reqs))
@@ -959,6 +1000,14 @@ func chatRowSummary(msgs []*sqlite.ChatMessage) string {
 		c := m.Content
 		if len(c) > 24 {
 			c = c[:24] + "…"
+		}
+		if m.Role == "tool" {
+			a := m.ToolArgs
+			if len(a) > 24 {
+				a = a[:24] + "…"
+			}
+			parts = append(parts, fmt.Sprintf("%s/%s args=%q result=%q", m.Role, m.Status, a, c))
+			continue
 		}
 		parts = append(parts, fmt.Sprintf("%s/%s:%q", m.Role, m.Status, c))
 	}
@@ -1012,7 +1061,7 @@ func TestChat_GitTwoTurnsReuseWorktree(t *testing.T) {
 	if err := eng.ChatService().SendMessage(ctx, thread.ID, "first question"); err != nil {
 		t.Fatalf("first SendMessage: %v", err)
 	}
-	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	msgs := waitForChatMessages(t, eng, thread.ID, 3)
 	assertChatToolTurn(t, msgs)
 
 	abs := storage.Abs(eng.cfg.StorageRoot, storage.ChatSourcePath(project.ID))
@@ -1024,8 +1073,8 @@ func TestChat_GitTwoTurnsReuseWorktree(t *testing.T) {
 	if err := eng.ChatService().SendMessage(ctx, thread.ID, "second question"); err != nil {
 		t.Fatalf("second SendMessage: %v", err)
 	}
-	msgs = waitForChatMessages(t, eng, thread.ID, 8)
-	assertChatToolTurn(t, msgs[4:])
+	msgs = waitForChatMessages(t, eng, thread.ID, 6)
+	assertChatToolTurn(t, msgs[3:])
 
 	// Fresh (within the TTL) worktree is reused, not re-created: the
 	// directory mtime is unchanged and the tree is still intact.

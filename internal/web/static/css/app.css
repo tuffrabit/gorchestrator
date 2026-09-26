@@ -683,6 +683,14 @@ button, input, select, textarea {
 .chat-stage {
   margin-right: 0.35rem;
 }
+/* Only the thread's newest bubble is still working. A pending assistant row
+   stops being the newest as soon as the turn appends thought/tool rows or a
+   later reply segment after it, so its ellipsis must go static: the chat has
+   progressed past it even though the row is still status="pending". */
+.chat-msg-pending:not(:last-child) .chat-typing i {
+  animation: none;
+  background: var(--text-muted);
+}
 .chat-typing {
   display: inline-flex;
   align-items: center;
@@ -734,10 +742,58 @@ button, input, select, textarea {
 .chat-msg-tool summary {
   cursor: pointer;
 }
+/* A call whose result has not landed yet keeps its border live; a call closed
+   out without a result reads as a failed box. */
+.chat-msg-tool-running {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--bar-in-progress) 55%, var(--border-subtle));
+}
+.chat-msg-tool-error {
+  border-color: color-mix(in srgb, var(--bar-failed) 55%, var(--border-subtle));
+  background: var(--wash-failed);
+}
+.chat-tool-status {
+  font-style: italic;
+}
+.chat-tool-pending {
+  margin-top: 0.4rem;
+  font-style: italic;
+  color: var(--text-muted);
+}
+/* The two halves of one tool call box: the call arguments, then its result. */
+.chat-tool-part {
+  margin-top: 0.5rem;
+}
+.chat-tool-part + .chat-tool-part {
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border-subtle);
+}
+.chat-tool-part-head {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
 .chat-msg-tool pre {
   margin: 0.5rem 0 0.2rem;
   white-space: pre-wrap;
   word-break: break-word;
+  font-size: 0.78rem;
+}
+/* JSON tool payloads reuse the activity tab's collapsible tree, scaled down
+   for the narrow drawer thread. */
+.chat-msg-tool .chat-tool-toolbar {
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.35rem;
+}
+.chat-msg-tool .chat-tool-toolbar .btn {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+}
+.chat-msg-tool .json-tree {
+  margin-top: 0.4rem;
   font-size: 0.78rem;
 }
 .chat-empty {

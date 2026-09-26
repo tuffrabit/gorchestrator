@@ -19,11 +19,16 @@ type ChatThread struct {
 }
 
 // ChatMessage represents a chat_messages row.
+//
+// A tool row is ONE row per tool call: ToolArgs holds the call arguments as
+// written, Content holds that call's result. While the call is still running
+// Status is "running" and Content is empty.
 type ChatMessage struct {
 	ID        int64
 	ThreadID  int64
 	Role      string
 	Content   string
+	ToolArgs  string
 	ToolName  string
 	Status    string
 	CreatedAt time.Time
@@ -43,7 +48,7 @@ func NewChatRepo(db *sql.DB) *ChatRepo {
 const chatThreadColumns = `id, user_id, project_id, agent_type, flavor, created_at, updated_at`
 
 // chatMessageColumns is the canonical SELECT list for a chat_messages row.
-const chatMessageColumns = `id, thread_id, role, content, tool_name, status, created_at`
+const chatMessageColumns = `id, thread_id, role, content, tool_args, tool_name, status, created_at`
 
 // GetOrCreateThread returns the thread for the given (user, project, agent_type,
 // flavor), inserting it on first use.
@@ -110,6 +115,45 @@ func (r *ChatRepo) AddMessage(threadID int64, role, content, toolName, status st
 	return id, nil
 }
 
+// AddToolCall inserts a tool row for a call that has not been answered yet:
+// the arguments are durable immediately (so an open drawer shows the call the
+// moment the model makes it) and the result lands later via SetMessageResult,
+// which flips the same row from "running" to "done". Keeping call and result
+// on one row is what makes the drawer render a single box per tool call.
+func (r *ChatRepo) AddToolCall(threadID int64, toolName, args string) (int64, error) {
+	res, err := r.db.Exec(`
+		INSERT INTO chat_messages (thread_id, role, content, tool_args, tool_name, status)
+		VALUES (?, 'tool', '', ?, ?, 'running')`,
+		threadID, args, toolName)
+	if err != nil {
+		return 0, fmt.Errorf("insert chat tool call: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("last insert id: %w", err)
+	}
+	return id, nil
+}
+
+// CloseRunningToolMessages closes out a thread's tool rows that are still
+// marked "running" (a call whose result never landed, e.g. after a crash) so
+// the drawer never shows a tool box stuck waiting forever. It returns the
+// number of rows closed.
+func (r *ChatRepo) CloseRunningToolMessages(threadID int64, note string) (int, error) {
+	res, err := r.db.Exec(`
+		UPDATE chat_messages SET content = ?, status = 'error'
+		WHERE thread_id = ? AND role = 'tool' AND status = 'running'`,
+		note, threadID)
+	if err != nil {
+		return 0, fmt.Errorf("close running chat tool rows: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("close running chat tool rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
 // DeleteMessage removes a message by id.
 func (r *ChatRepo) DeleteMessage(id int64) error {
 	_, err := r.db.Exec(`DELETE FROM chat_messages WHERE id = ?`, id)
@@ -174,7 +218,7 @@ func scanChatMessages(rows *sql.Rows) ([]*ChatMessage, error) {
 	var out []*ChatMessage
 	for rows.Next() {
 		m := &ChatMessage{}
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Role, &m.Content, &m.ToolName, &m.Status, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.Role, &m.Content, &m.ToolArgs, &m.ToolName, &m.Status, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

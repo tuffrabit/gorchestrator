@@ -286,6 +286,123 @@ func TestPartialChatThread_RendersThoughtRows(t *testing.T) {
 	}
 }
 
+// A JSON tool payload renders with the collapsible tree viewer (hidden data
+// element + JS target); non-JSON tool output keeps the plain <pre> fallback.
+func TestPartialChatThread_RendersToolRowsAsJSONTree(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	form.Set("message", "hello agent")
+	if rec := chatPostForm(t, h, "/partials/chat/send", form); rec.Code != http.StatusOK {
+		t.Fatalf("send status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	user, err := eng.Users().GetByEmail("disabled@localhost")
+	if err != nil || user == nil {
+		t.Fatalf("expected synthetic user row: %v", err)
+	}
+	thread, err := eng.ChatRepo().FindThread(user.ID, chatProjectID(t, eng, "acme"), "researcher", "")
+	if err != nil || thread == nil {
+		t.Fatalf("expected thread: thread=%v err=%v", err, thread)
+	}
+	// One tool call is one row: the arguments land first, the result lands on
+	// the same row.
+	callID, err := eng.ChatRepo().AddToolCall(thread.ID, "read_file", `{"path":"src/main.go","limit":40}`)
+	if err != nil {
+		t.Fatalf("add tool call: %v", err)
+	}
+	if err := eng.ChatRepo().SetMessageResult(callID, `{"content":"package main"}`, "done"); err != nil {
+		t.Fatalf("complete tool call: %v", err)
+	}
+	// A call whose result is plain text still gets one row/box: only its
+	// Result part falls back to the raw <pre>.
+	plainID, err := eng.ChatRepo().AddToolCall(thread.ID, "read_file", `{"path":"missing.go"}`)
+	if err != nil {
+		t.Fatalf("add plain-result tool call: %v", err)
+	}
+	if err := eng.ChatRepo().SetMessageResult(plainID, "404 Not Found", "done"); err != nil {
+		t.Fatalf("complete plain tool call: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%.600s", rec.Code, body)
+	}
+	// Two calls, two boxes — the bug this guards against is a box per event.
+	if got := strings.Count(body, `class="chat-msg chat-msg-tool`); got != 2 {
+		t.Fatalf("tool boxes = %d, want one per tool call: %.800s", got, body)
+	}
+	// Each box carries both halves.
+	if got := strings.Count(body, `chat-tool-part-head`); got != 4 {
+		t.Fatalf("tool parts = %d, want a Call and a Result part in each box: %.800s", got, body)
+	}
+	if !strings.Contains(body, `>Call<`) || !strings.Contains(body, `>Result<`) {
+		t.Fatalf("tool box missing its Call/Result halves: %.800s", body)
+	}
+	// JSON payloads (both sides of the first call, the call side of the
+	// second) render with the collapsible tree viewer.
+	if got := strings.Count(body, "chat-tool-tree"); got != 3 {
+		t.Fatalf("JSON tree blocks = %d, want 3: %.800s", got, body)
+	}
+	if !strings.Contains(body, `js-events-data`) || !strings.Contains(body, "src/main.go") {
+		t.Fatalf("tool payload not handed to the tree viewer: %.800s", body)
+	}
+	if !strings.Contains(body, `chat-tool-toolbar`) || !strings.Contains(body, `json-raw`) {
+		t.Fatalf("tool tree missing its toolbar/raw pane: %.800s", body)
+	}
+	if !strings.Contains(body, "<pre>404 Not Found</pre>") {
+		t.Fatalf("non-JSON tool output lost the plain <pre> fallback: %.800s", body)
+	}
+}
+
+// A tool call that has not returned yet renders as ONE box: the arguments with
+// a running marker and no Result half, instead of a call box waiting for a
+// second result box.
+func TestPartialChatThread_RendersRunningToolCallAsOneBox(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	form.Set("message", "hello agent")
+	if rec := chatPostForm(t, h, "/partials/chat/send", form); rec.Code != http.StatusOK {
+		t.Fatalf("send status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	user, err := eng.Users().GetByEmail("disabled@localhost")
+	if err != nil || user == nil {
+		t.Fatalf("expected synthetic user row: %v", err)
+	}
+	thread, err := eng.ChatRepo().FindThread(user.ID, chatProjectID(t, eng, "acme"), "researcher", "")
+	if err != nil || thread == nil {
+		t.Fatalf("expected thread: thread=%v err=%v", err, thread)
+	}
+	if _, err := eng.ChatRepo().AddToolCall(thread.ID, "list_directory", `{"path":"."}`); err != nil {
+		t.Fatalf("add tool call: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil))
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%.600s", rec.Code, body)
+	}
+	if got := strings.Count(body, `class="chat-msg chat-msg-tool`); got != 1 {
+		t.Fatalf("tool boxes = %d, want one running box: %.800s", got, body)
+	}
+	if !strings.Contains(body, "chat-msg-tool-running") || !strings.Contains(body, "running…") {
+		t.Fatalf("running tool call not marked as running: %.800s", body)
+	}
+	if strings.Contains(body, `>Result<`) {
+		t.Fatalf("running tool call rendered a Result half it does not have: %.800s", body)
+	}
+}
+
 func TestPartialChatSend_ValidationErrors(t *testing.T) {
 	eng, srv := chatTestServer(t, nil)
 	h := srv.Handler()
@@ -580,6 +697,32 @@ func TestChatSelectionFromQuery(t *testing.T) {
 	}
 }
 
+func TestChatToolPayloadJSON(t *testing.T) {
+	cases := []struct {
+		name      string
+		content   string
+		wantJSON  string
+		wantTrunc bool
+		wantOK    bool
+	}{
+		{"object", `{"path":"a/b.go","lines":12}`, `{"path":"a/b.go","lines":12}`, false, true},
+		{"array", `[{"path":"a"},{"path":"b"}]`, `[{"path":"a"},{"path":"b"}]`, false, true},
+		{"scalar string payload", `"no matches"`, `"no matches"`, false, true},
+		{"pretty printed", "{\n  \"ok\": true\n}", "{\n  \"ok\": true\n}", false, true},
+		{"jsonl folds to array", "{\"n\":1}\n{\"n\":2}", `[{"n":1},{"n":2}]`, false, true},
+		{"plain text is not json", "404 Not Found", "", false, false},
+		{"empty", "   ", "", false, false},
+		{"capped but parseable", `{"path":"a"}` + chatToolTruncationSuffix, `{"path":"a"}`, true, true},
+		{"capped mid-token falls back", `{"path":"aa` + chatToolTruncationSuffix, "", true, false},
+	}
+	for _, tc := range cases {
+		gotJSON, gotTrunc, gotOK := toolPayloadJSON(tc.content)
+		if gotOK != tc.wantOK || gotTrunc != tc.wantTrunc || gotJSON != tc.wantJSON {
+			t.Fatalf("%s: got (%q, trunc=%v, ok=%v), want (%q, trunc=%v, ok=%v)", tc.name, gotJSON, gotTrunc, gotOK, tc.wantJSON, tc.wantTrunc, tc.wantOK)
+		}
+	}
+}
+
 // The view model must render a finished assistant reply as markdown HTML
 // (via the shared drawerMarkdown converter) and a pending one as stage text.
 func TestChatMessageView_Rendering(t *testing.T) {
@@ -598,9 +741,32 @@ func TestChatMessageView_Rendering(t *testing.T) {
 	if !errView.Error || errView.Content == "" {
 		t.Fatalf("error view: %+v", errView)
 	}
-	tool := newChatMessageView(&sqlite.ChatMessage{Role: "tool", Status: "done", ToolName: "read_file", Content: "{}"})
-	if tool.ToolName != "read_file" {
+	// A finished tool row carries BOTH halves of the call.
+	tool := newChatMessageView(&sqlite.ChatMessage{Role: "tool", Status: "done", ToolName: "read_file", ToolArgs: `{"path":"a/b.go"}`, Content: `{"content":"package main"}`})
+	if tool.ToolName != "read_file" || tool.Running || tool.Error {
 		t.Fatalf("tool view: %+v", tool)
+	}
+	if tool.ToolArgsJSON != `{"path":"a/b.go"}` {
+		t.Fatalf("tool call args not normalized for the tree viewer: %+v", tool)
+	}
+	if tool.ContentJSON != `{"content":"package main"}` {
+		t.Fatalf("tool result not normalized for the tree viewer: %+v", tool)
+	}
+	if call, result := tool.CallPart(), tool.ResultPart(); !call.Present || !result.Present || call.Label != "Call" || result.Label != "Result" {
+		t.Fatalf("tool halves: call=%+v result=%+v", call, result)
+	}
+	// Non-JSON tool output keeps the plain <pre> path.
+	plain := newChatMessageView(&sqlite.ChatMessage{Role: "tool", Status: "done", ToolName: "shell", ToolArgs: `{"cmd":"x"}`, Content: "404 Not Found"})
+	if plain.ContentJSON != "" {
+		t.Fatalf("plain tool output should not get a JSON tree: %+v", plain)
+	}
+	if part := plain.ResultPart(); part.JSON != "" || !part.Present || part.Text != "404 Not Found" {
+		t.Fatalf("plain tool result part: %+v", part)
+	}
+	// A call still running has a Call half only.
+	running := newChatMessageView(&sqlite.ChatMessage{Role: "tool", Status: "running", ToolName: "list_directory", ToolArgs: `{"path":"."}`})
+	if !running.Running || !running.CallPart().Present || running.ResultPart().Present {
+		t.Fatalf("running tool view: %+v", running)
 	}
 	// Thought rows are plain text: no markdown HTML, no pending/error flags.
 	thought := newChatMessageView(&sqlite.ChatMessage{Role: "thought", Status: "done", Content: "<script>alert(1)</script> the tree has one file"})

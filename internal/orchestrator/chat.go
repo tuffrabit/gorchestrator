@@ -114,7 +114,7 @@ func (s *ChatService) SendMessage(ctx context.Context, threadID int64, text stri
 // model context for the next turn) without deleting the thread itself.
 // Retention of other threads is untouched. It is safe against the processing
 // loop for two reasons: TryLock on the per-thread lock means no goroutine for
-// this thread is inside its write phase (finalize/addToolMessage), and the
+// this thread is inside its write phase (finalize/addToolCallMessage), and the
 // id <= maxID watermark means a message pair a concurrent SendMessage inserts
 // after the snapshot survives and is processed normally (the HTTP handler must
 // not block behind a turn that can hold the lock for up to chatTurnTimeout).
@@ -155,6 +155,18 @@ func (s *ChatService) processDetached(threadID int64) {
 	lock := s.threadLock(threadID)
 	lock.Lock()
 	defer lock.Unlock()
+	// A turn that died mid-flight (crash, killed process) can leave a tool row
+	// stuck in "running": no result event ever reached it. Nothing else owns
+	// those rows, and this goroutine holds the only per-thread write lock, so
+	// closing them here keeps the drawer from rendering a permanently pending
+	// tool box.
+	if n, err := s.eng.chatRepo.CloseRunningToolMessages(threadID, "(no result: the turn ended before this call returned)"); err != nil {
+		log.Printf("chat thread %d: close stale tool calls: %v", threadID, err)
+	} else if n > 0 {
+		if thread, err := s.eng.chatRepo.GetThread(threadID); err == nil && thread != nil {
+			s.publish(threadID, thread.ProjectID)
+		}
+	}
 	s.processThread(ctx, threadID)
 }
 
@@ -294,6 +306,27 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		}
 	}
 
+	// pendingToolCalls holds this turn's tool call rows that have not been
+	// answered yet, keyed by tool name in call order. ADK emits the call and
+	// the response as two separate events; matching them here writes the
+	// result back onto the call's own row, so the drawer shows ONE box per
+	// tool call (arguments while running, result when it lands) instead of a
+	// call box followed by a second result box.
+	pendingToolCalls := map[string][]int64{}
+	takePendingCall := func(name string) int64 {
+		queue := pendingToolCalls[name]
+		if len(queue) == 0 {
+			return 0
+		}
+		id := queue[0]
+		if len(queue) == 1 {
+			delete(pendingToolCalls, name)
+		} else {
+			pendingToolCalls[name] = queue[1:]
+		}
+		return id
+	}
+
 	// thoughtBuf accumulates the model's chain-of-thought parts since the
 	// last flush. They are shown as their own chronological "thought" rows in
 	// the drawer (response → call → thought → call → response), but kept out
@@ -321,12 +354,24 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 	// finalize lands the turn's final text on the open segment and closes the
 	// earlier ones: segments that carry streamed text are completed in place
 	// (they are real replies in the interleaving), and a segment that only ever
-	// held stage text is deleted, so a tool turn leaves user → call → response →
-	// reply rather than a stray placeholder plus a lumped reply. Any thoughts
-	// still buffered are flushed first so no reasoning is dropped on an
-	// early-exit path (fail, panic, or a clean end).
+	// held stage text is deleted, so a tool turn leaves user → call → reply
+	// rather than a stray placeholder plus a lumped reply. Any thoughts still
+	// buffered are flushed first so no reasoning is dropped on an early-exit
+	// path (fail, panic, or a clean end), and any tool call row still waiting
+	// for a result is closed out instead of hanging in "running".
 	finalize := func(text, status string) {
 		flushThoughts()
+		for name, ids := range pendingToolCalls {
+			for _, id := range ids {
+				if id == 0 {
+					continue
+				}
+				if err := eng.chatRepo.SetMessageResult(id, "(no result: the turn ended before this call returned)", "error"); err != nil {
+					log.Printf("chat thread %d: close unanswered tool call %d (%s): %v", thread.ID, id, name, err)
+				}
+			}
+			delete(pendingToolCalls, name)
+		}
 		for _, seg := range segments {
 			if seg == cur {
 				if err := eng.chatRepo.SetMessageResult(seg.id, text, status); err != nil {
@@ -549,7 +594,9 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 				}
 				if p.FunctionCall != nil {
 					flushThoughts()
-					recordTool(s.addToolMessage(thread, p.FunctionCall.Name, p.FunctionCall.Args))
+					id := s.addToolCallMessage(thread, p.FunctionCall.Name, p.FunctionCall.Args)
+					pendingToolCalls[p.FunctionCall.Name] = append(pendingToolCalls[p.FunctionCall.Name], id)
+					recordTool(id)
 				}
 			}
 			// Event end: thoughts that were not followed by a call in this
@@ -560,7 +607,7 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 				if p == nil || p.FunctionResponse == nil {
 					continue
 				}
-				recordTool(s.addToolMessage(thread, p.FunctionResponse.Name, p.FunctionResponse.Response))
+				recordTool(s.completeToolMessage(thread, takePendingCall(p.FunctionResponse.Name), p.FunctionResponse.Name, p.FunctionResponse.Response))
 			}
 		}
 	}
@@ -655,24 +702,55 @@ func (s *ChatService) acquireChatModel(ctx context.Context, thread *sqlite.ChatT
 	return release, nil
 }
 
-// addToolMessage persists one tool call/response row for the drawer and
-// republishes immediately: tool blocks are what a user waits on during a turn,
-// so they render as they happen instead of arriving in a batch at the end. It
-// returns the new row id (0 on failure) so the turn can keep a following text
+// addToolCallMessage persists a tool call row (arguments only, status
+// "running") and republishes immediately: the call is what a user waits on
+// during a turn, so it renders the moment the model makes it instead of
+// arriving in a batch at the end. It returns the row id (0 on failure) so the
+// turn can fill in the result on the same row and keep a following text
 // segment sorted after this turn's tool rows.
-func (s *ChatService) addToolMessage(thread *sqlite.ChatThread, name string, payload any) int64 {
-	data, err := json.Marshal(payload)
-	content := fmt.Sprintf("%v", payload)
-	if err == nil {
-		content = cappedText(string(data))
-	}
-	id, err := s.eng.chatRepo.AddMessage(thread.ID, "tool", content, name, "done")
+func (s *ChatService) addToolCallMessage(thread *sqlite.ChatThread, name string, args any) int64 {
+	id, err := s.eng.chatRepo.AddToolCall(thread.ID, name, toolPayloadText(args))
 	if err != nil {
-		log.Printf("chat thread %d: save tool message: %v", thread.ID, err)
+		log.Printf("chat thread %d: save tool call %s: %v", thread.ID, name, err)
 		return 0
 	}
 	s.publish(thread.ID, thread.ProjectID)
 	return id
+}
+
+// completeToolMessage writes a tool result onto its own call's row: one row,
+// one box in the drawer. callID is the row addToolCallMessage created for this
+// call; when the response arrives with no matching call row (a call the model
+// never surfaced, or a call row whose insert failed) the result gets its own
+// row so nothing is lost. It returns the row id so the turn keeps its event
+// ordering.
+func (s *ChatService) completeToolMessage(thread *sqlite.ChatThread, callID int64, name string, result any) int64 {
+	content := toolPayloadText(result)
+	if callID != 0 {
+		if err := s.eng.chatRepo.SetMessageResult(callID, content, "done"); err != nil {
+			log.Printf("chat thread %d: save tool result %s (row %d): %v", thread.ID, name, callID, err)
+			return callID
+		}
+		s.publish(thread.ID, thread.ProjectID)
+		return callID
+	}
+	id, err := s.eng.chatRepo.AddMessage(thread.ID, "tool", content, name, "done")
+	if err != nil {
+		log.Printf("chat thread %d: save orphan tool result %s: %v", thread.ID, name, err)
+		return 0
+	}
+	s.publish(thread.ID, thread.ProjectID)
+	return id
+}
+
+// toolPayloadText renders one tool payload (call arguments or tool result) for
+// storage: JSON when the payload marshals, the Go rendering otherwise, always
+// capped so a huge tool output cannot bloat the thread.
+func toolPayloadText(payload any) string {
+	if data, err := json.Marshal(payload); err == nil {
+		return cappedText(string(data))
+	}
+	return cappedText(fmt.Sprintf("%v", payload))
 }
 
 func (s *ChatService) publish(threadID, projectID int64) {

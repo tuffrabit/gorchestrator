@@ -227,6 +227,16 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages(thread_id);
 ALTER TABLE issues ADD COLUMN pipeline_json TEXT NOT NULL DEFAULT '[]';
 `,
 	},
+	{
+		version: 14,
+		name:    "chat_tool_call_pairing",
+		sql: `
+-- One chat_messages row per tool call: the call arguments live in tool_args
+-- and the tool result stays in content, so the chat drawer renders a single
+-- box per call instead of a call box followed by a separate result box.
+ALTER TABLE chat_messages ADD COLUMN tool_args TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // Open opens the SQLite database at the given path, creating parent dirs if needed.

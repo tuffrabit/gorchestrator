@@ -6,6 +6,9 @@ function openDrawer(title) {
   var scrim = document.getElementById('scrim');
   var titleEl = document.getElementById('drawer-title');
   if (titleEl && title) titleEl.textContent = title;
+  // A reopened drawer is a fresh view: drop any remembered chat scroll so it
+  // opens pinned to the newest message instead of an old reading position.
+  chatScrollMemory = null;
   if (drawer) drawer.classList.add('open');
   if (scrim) scrim.classList.add('open');
   document.body.style.overflow = 'hidden';
@@ -65,7 +68,7 @@ document.addEventListener('htmx:afterSwap', function (e) {
 
 function initDrawerContent(root) {
   if (!root) return;
-  root.querySelectorAll('.events-tree').forEach(function (tree) {
+  root.querySelectorAll('.json-tree').forEach(function (tree) {
     if (tree.dataset.built) return;
     tree.dataset.built = '1';
     if (typeof renderJsonTree === 'function') renderJsonTree(tree);
@@ -83,25 +86,60 @@ function initDrawerContent(root) {
 
 var JSON_TREE_STRING_CAP = 300;
 
-// renderJsonTree builds a collapsible tree of the phase event log inside
-// container. The JSON array payload lives in a hidden sibling
-// .js-events-data element (HTML-escaped by the template; read via
-// textContent, which decodes it back).
+// jsonTreeScope finds the block a tree shares with its own toolbar: the
+// artifact drawer content pane, or one chat tool <details> (marked
+// .json-tree-scope) so Expand/Collapse/Raw only touch that call.
+function jsonTreeScope(el) {
+  if (el.closest) {
+    var found = el.closest('.json-tree-scope') || el.closest('.drawer-content-pane') || el.closest('.drawer-artifact');
+    if (found) return found;
+  }
+  return el.parentElement;
+}
+
+// renderJsonTree builds a collapsible tree inside container from the JSON in
+// the scope's hidden sibling .js-events-data element (HTML-escaped by the
+// template; read via textContent, which decodes it back). An activity log is
+// an array of event objects and gets one summary node per event; a chat tool
+// payload is a single value and gets one collapsed node.
 function renderJsonTree(container) {
-  var scope = container.closest('.drawer-content-pane') || container.parentElement;
-  var dataEl = scope.querySelector('.js-events-data');
+  var scope = jsonTreeScope(container);
+  var dataEl = scope && scope.querySelector('.js-events-data');
   if (!dataEl) return;
-  var events;
+  var payload;
   try {
-    events = JSON.parse(dataEl.textContent);
+    payload = JSON.parse(dataEl.textContent);
   } catch (err) {
-    container.textContent = 'Could not parse activity events.';
+    container.textContent = 'Could not parse JSON payload.';
     return;
   }
   container.textContent = '';
-  events.forEach(function (ev, i) {
-    container.appendChild(jsonTreeEventNode(ev, i));
-  });
+  if (container.classList.contains('events-tree') && Array.isArray(payload)) {
+    payload.forEach(function (ev, i) {
+      container.appendChild(jsonTreeEventNode(ev, i));
+    });
+    return;
+  }
+  container.appendChild(jsonTreeDocumentNode(payload));
+}
+
+// jsonTreeDocumentNode renders a whole payload (object or array) as one
+// collapsed node showing its children, so a large tool call starts folded
+// instead of dumping every nested key into the chat drawer.
+function jsonTreeDocumentNode(value) {
+  if (value === null || typeof value !== 'object') {
+    return jsonTreeValue(value);
+  }
+  var body = document.createElement('div');
+  if (Array.isArray(value)) {
+    if (value.length === 0) return jsonTreeLeaf('[]', 'jt-null');
+    value.forEach(function (item, i) { body.appendChild(jsonTreeRow('[' + i + ']', item)); });
+    return jsonTreeToggle('jt-event-head', '[… ' + value.length + (value.length === 1 ? ' item' : ' items') + ']', body, false);
+  }
+  var keys = Object.keys(value);
+  if (keys.length === 0) return jsonTreeLeaf('{}', 'jt-null');
+  keys.forEach(function (k) { body.appendChild(jsonTreeRow(k + ':', value[k])); });
+  return jsonTreeToggle('jt-event-head', '{… ' + keys.length + (keys.length === 1 ? ' key' : ' keys') + '}', body, false);
 }
 
 function jsonTreeEventNode(ev, i) {
@@ -234,7 +272,7 @@ function jsonTreeRow(key, value) {
 
 // jsonTreeAll expands/collapses every node in the tree containing btn.
 function jsonTreeAll(btn, open) {
-  var scope = btn.closest('.drawer-artifact');
+  var scope = jsonTreeScope(btn);
   if (!scope) return;
   scope.querySelectorAll('.json-tree .jt-toggle').forEach(function (head) {
     var body = head.nextElementSibling;
@@ -246,7 +284,7 @@ function jsonTreeAll(btn, open) {
 
 // jsonTreeToggleRaw switches between the tree and the raw JSONL text.
 function jsonTreeToggleRaw(btn) {
-  var scope = btn.closest('.drawer-artifact');
+  var scope = jsonTreeScope(btn);
   if (!scope) return;
   var tree = scope.querySelector('.json-tree');
   var raw = scope.querySelector('.json-raw');
@@ -470,6 +508,7 @@ function refreshIssueCard(issueId) {
 // --- Chat drawer (SSE refresh, drafts, auto-scroll) ------------------------
 
 var chatRefreshTimer = null;
+var chatScrollMemory = null;
 
 function chatThreadRoot() {
   return document.getElementById('chat-thread-inner');
@@ -501,12 +540,43 @@ function refreshChatThread() {
   }, 150);
 }
 
-function chatScrollThread(root) {
-  var box = root.querySelector('.chat-messages');
+function chatThreadBox(root) {
+  var r = root || chatThreadRoot();
+  return r ? r.querySelector('.chat-messages') : null;
+}
+
+// Snapshot the live scroll state while the old markup is still in the DOM.
+// htmx swaps replace #chat-thread wholesale, and the swapped-in .chat-messages
+// box always starts at scrollTop 0, so without this every refresh (a streamed
+// reply, a tool row, another browser tab's message) yanks a user reading
+// history back to the top.
+function chatCaptureScroll(root) {
+  var box = chatThreadBox(root);
   if (!box) return;
-  // Keep the user's place when they scrolled up to read history.
-  var nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
-  if (nearBottom) box.scrollTop = box.scrollHeight;
+  chatScrollMemory = {
+    key: chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent),
+    top: box.scrollTop,
+    distance: box.scrollHeight - box.scrollTop - box.clientHeight
+  };
+}
+
+function chatScrollThread(root) {
+  var box = chatThreadBox(root);
+  if (!box) return;
+  var prev = chatScrollMemory;
+  chatScrollMemory = null;
+  var max = box.scrollHeight - box.clientHeight;
+  // No memory (first render, drawer reopened, or a different project/agent
+  // selection) or the user was already parked at the bottom: follow the
+  // newest message.
+  if (!prev || prev.key !== chatDraftKey(root.dataset.chatProject, root.dataset.chatAgent) || prev.distance < 120) {
+    box.scrollTop = box.scrollHeight;
+    return;
+  }
+  // Otherwise keep the reading position, clamped into the (possibly shorter)
+  // new thread so the same messages stay under the user's eyes: messages only
+  // ever append at the bottom, so an unchanged scrollTop is the same place.
+  box.scrollTop = Math.max(0, Math.min(prev.top, max));
 }
 
 // Called by the inline script in the chat thread partial after every swap
@@ -539,6 +609,26 @@ document.addEventListener('input', function (e) {
     if (ta.value) localStorage.setItem(key, ta.value);
     else localStorage.removeItem(key);
   } catch (err) { /* storage unavailable */ }
+});
+
+// Snapshot the chat scroll position before a swap that replaces the thread
+// markup (SSE refresh, clear, project/identity change) so chatInitThread can
+// put it back. Only #chat-thread swaps qualify: a #drawer-body swap is a whole
+// drawer (re)open, which should start pinned at the newest message. A send is
+// excluded too — the user just wrote at the bottom, so that swap follows the
+// new message instead of the old reading position.
+document.addEventListener('htmx:beforeSwap', function (e) {
+  var tgt = e.detail && e.detail.target;
+  if (!tgt || (tgt.id !== 'chat-thread' && tgt.id !== 'chat-thread-inner')) return;
+  var root = chatThreadRoot();
+  if (!root) return;
+  var elt = e.detail && e.detail.elt;
+  var post = elt && elt.getAttribute ? (elt.getAttribute('hx-post') || elt.getAttribute('data-hx-post') || '') : '';
+  if (post === '/partials/chat/send') {
+    chatScrollMemory = null;
+    return;
+  }
+  chatCaptureScroll(root);
 });
 
 // Send lifecycle: remember the draft key so the post-send swap doesn't

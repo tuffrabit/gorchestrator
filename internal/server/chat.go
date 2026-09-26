@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -44,6 +45,56 @@ type chatMessageView struct {
 	ContentHTML template.HTML // assistant replies pre-rendered from markdown
 	Pending     bool          // assistant placeholder showing a stage string
 	Error       bool          // assistant row that finished with an error
+	// ContentJSON is the tool row RESULT normalized into a single JSON value
+	// for the collapsible tree viewer (see partials/chat_thread.html). Empty
+	// means "not JSON": the part keeps the plain <pre> rendering.
+	ContentJSON string
+	// ToolArgs / ToolArgsJSON are the same pair for the tool row's CALL side:
+	// one tool row carries both the arguments and the result, so the drawer
+	// renders them as two sections of a single box.
+	ToolArgs     string
+	ToolArgsJSON string
+	// Running marks a tool row whose call has not returned yet: the box shows
+	// the call arguments with a "running" marker and no result part.
+	Running bool
+	// Truncated marks a tool payload capped by the orchestrator; the tree pane
+	// shows a "truncated" note so a partial tree is not read as the whole call.
+	Truncated bool
+	// ArgsTruncated marks the call arguments specifically as capped.
+	ArgsTruncated bool
+}
+
+// chatToolPart is one side of a tool call box — the call arguments or the
+// result — as partials/chat_thread.html renders it. Present=false means the
+// side has nothing to show yet (a call still running has no result).
+type chatToolPart struct {
+	Label     string
+	Text      string // raw payload (template-escaped) for the plain <pre> path
+	JSON      string // payload normalized for the collapsible tree viewer
+	Truncated bool
+	Present   bool
+}
+
+// CallPart / ResultPart feed the two halves of a tool box to the shared
+// chat_tool_part sub-template.
+func (v *chatMessageView) CallPart() chatToolPart {
+	return chatToolPart{
+		Label:     "Call",
+		Text:      v.ToolArgs,
+		JSON:      v.ToolArgsJSON,
+		Truncated: v.ArgsTruncated,
+		Present:   v.ToolArgs != "" || v.ToolArgsJSON != "",
+	}
+}
+
+func (v *chatMessageView) ResultPart() chatToolPart {
+	return chatToolPart{
+		Label:     "Result",
+		Text:      v.Content,
+		JSON:      v.ContentJSON,
+		Truncated: v.Truncated,
+		Present:   v.Content != "" || v.ContentJSON != "",
+	}
 }
 
 // handlePartialChat renders the chat drawer shell: project + identity selects,
@@ -443,6 +494,8 @@ func newChatMessageView(m *sqlite.ChatMessage) *chatMessageView {
 		Status:   m.Status,
 		ToolName: m.ToolName,
 		Content:  m.Content,
+		// A tool row carries its call arguments alongside its result.
+		ToolArgs: m.ToolArgs,
 	}
 	// "thought" rows (the model's chain of thought) deliberately fall through
 	// to plain text: no markdown rendering, no pending/error styling — the
@@ -454,8 +507,54 @@ func newChatMessageView(m *sqlite.ChatMessage) *chatMessageView {
 		v.Error = true
 	case m.Role == "assistant":
 		v.ContentHTML = renderChatMarkdown(m.Content)
+	case m.Role == "tool":
+		// A tool row is one call: its arguments (tool_args) and its result
+		// (content). Both sides carry JSON-marshaled payloads, so each renders
+		// with the same collapsible tree the artifact drawer's activity tab
+		// uses instead of a wall of raw text.
+		v.Running = m.Status == "running"
+		// A call row closed out without a result (the turn died mid-call) is an
+		// error box, not a pending one.
+		v.Error = m.Status == "error"
+		if js, truncated, ok := toolPayloadJSON(m.ToolArgs); ok {
+			v.ToolArgsJSON = js
+			v.ArgsTruncated = truncated
+		}
+		if js, truncated, ok := toolPayloadJSON(m.Content); ok {
+			v.ContentJSON = js
+			v.Truncated = truncated
+		}
 	}
 	return v
+}
+
+// chatToolTruncationSuffix mirrors orchestrator.cappedText: tool payloads over
+// the event cap are cut and tagged with this marker.
+const chatToolTruncationSuffix = "\n... [truncated]"
+
+// toolPayloadJSON normalizes one tool row's content for the tree viewer. It
+// returns the JSON text to hand the JS tree builder, whether the payload was
+// capped, and whether the content is JSON at all. Plain-text tool output (or a
+// payload cut mid-token by the cap) reports ok=false and the caller keeps the
+// raw <pre> fallback.
+func toolPayloadJSON(content string) (string, bool, bool) {
+	raw := strings.TrimSpace(content)
+	truncated := strings.HasSuffix(raw, chatToolTruncationSuffix)
+	if truncated {
+		raw = strings.TrimSpace(strings.TrimSuffix(raw, chatToolTruncationSuffix))
+	}
+	if raw == "" {
+		return "", truncated, false
+	}
+	if json.Valid([]byte(raw)) {
+		return raw, truncated, true
+	}
+	// A tool that emitted one JSON object per line (JSONL) folds into a single
+	// array, exactly like the activity tab's eventsToJSONArray path.
+	if arr := eventsToJSONArray([]byte(raw)); arr != "" {
+		return arr, truncated, true
+	}
+	return "", truncated, false
 }
 
 // renderChatMarkdown renders an assistant reply for the drawer. Like the

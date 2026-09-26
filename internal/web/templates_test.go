@@ -56,3 +56,68 @@ func TestSubmitDrawerFormDoesNotCloseDrawerOnNestedHTMXRequests(t *testing.T) {
 		}
 	}
 }
+
+// TestChatPendingBubbleStopsTypingAnimation guards the chat drawer bug where
+// every chat-msg-pending bubble blinked the typing ellipsis forever. A pending
+// assistant row stays status="pending" while the turn appends thought/tool
+// rows and later reply segments after it, so the animation must be scoped to
+// the thread's newest bubble only.
+func TestChatPendingBubbleStopsTypingAnimation(t *testing.T) {
+	cssPath := "static/css/app.css"
+	cssData, err := os.ReadFile(cssPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", cssPath, err)
+	}
+	css := string(cssData)
+
+	guard := regexp.MustCompile(`(?s)\.chat-msg-pending:not\(:last-child\)[^{]*\{[^}]*animation:\s*none`)
+	if !guard.MatchString(css) {
+		t.Errorf("expected %s to stop the typing animation on superseded pending bubbles (rule .chat-msg-pending:not(:last-child) ... animation: none)", cssPath)
+	}
+
+	// The ellipsis itself must still animate for the newest pending bubble.
+	if !regexp.MustCompile(`(?s)\.chat-typing i\s*\{[^}]*animation:\s*chat-typing-blink`).MatchString(css) {
+		t.Errorf("expected %s to keep the chat-typing-blink animation on .chat-typing i", cssPath)
+	}
+
+	const tplPath = "templates/partials/chat_thread.html"
+	tplData, err := os.ReadFile(tplPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", tplPath, err)
+	}
+	tpl := string(tplData)
+
+	if !strings.Contains(tpl, `class="chat-msg chat-msg-assistant chat-msg-pending"`) {
+		t.Fatalf("expected pending assistant bubble markup in %s", tplPath)
+	}
+	// The pending bubble must sit directly in .chat-messages (no extra wrapper),
+	// otherwise the :last-child guard above would not match it.
+	if !regexp.MustCompile(`(?s)<div class="chat-messages">.*?{{range \.Messages}}`).MatchString(tpl) {
+		t.Errorf("pending bubbles must be rendered as direct children of .chat-messages in %s", tplPath)
+	}
+}
+
+// TestChatToolCallRendersAsOneBox guards the chat drawer bug where one tool
+// call produced two boxes: a call box from the FunctionCall event and a second
+// box from the FunctionResponse event. One call must render one <details>,
+// with its arguments and its result as two parts inside it.
+func TestChatToolCallRendersAsOneBox(t *testing.T) {
+	const tplPath = "templates/partials/chat_thread.html"
+	data, err := os.ReadFile(tplPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", tplPath, err)
+	}
+	tpl := string(data)
+
+	if got := strings.Count(tpl, `<details class="chat-msg chat-msg-tool`); got != 1 {
+		t.Errorf("%s renders %d tool <details>; a tool call must render exactly one box", tplPath, got)
+	}
+	if got := strings.Count(tpl, `{{template "chat_tool_part"`); got != 2 {
+		t.Errorf("%s invokes chat_tool_part %d times, want the call arguments and the result inside the same box", tplPath, got)
+	}
+	// Each part owns its own JSON tree scope so Expand/Raw do not leak from
+	// the arguments tree into the result tree (or between two calls).
+	if !strings.Contains(tpl, `class="chat-tool-part{{if .JSON}} json-tree-scope{{end}}"`) {
+		t.Errorf("%s must scope each tool part's JSON tree to that part", tplPath)
+	}
+}

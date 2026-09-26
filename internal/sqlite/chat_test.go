@@ -277,3 +277,101 @@ func TestChatRepo_SetMessageResult(t *testing.T) {
 		t.Fatalf("tool_name = %q, want grep", msgs[0].ToolName)
 	}
 }
+
+// TestChatRepo_ToolCallIsOneRow pins the storage shape the chat drawer renders:
+// a tool call is created with its arguments and stays "running" until its
+// result is written onto the SAME row.
+func TestChatRepo_ToolCallIsOneRow(t *testing.T) {
+	chat, userID, projectID := chatTestRepo(t)
+	thread, err := chat.GetOrCreateThread(userID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := chat.AddToolCall(thread.ID, "read_file", `{"path":"a/b.go"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := chat.ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Status != "running" || msgs[0].ToolArgs != `{"path":"a/b.go"}` || msgs[0].Content != "" {
+		t.Fatalf("after call: %v, want one running row holding the args", msgs)
+	}
+
+	if err := chat.SetMessageResult(id, `{"content":"package main"}`, "done"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err = chat.ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("got %d rows, want the result written onto the call row: %v", len(msgs), msgs)
+	}
+	m := msgs[0]
+	if m.Role != "tool" || m.ToolName != "read_file" || m.Status != "done" {
+		t.Fatalf("row = %+v, want done read_file tool row", m)
+	}
+	if m.ToolArgs != `{"path":"a/b.go"}` {
+		t.Fatalf("tool_args = %q, want the call args kept", m.ToolArgs)
+	}
+	if m.Content != `{"content":"package main"}` {
+		t.Fatalf("content = %q, want the tool result", m.Content)
+	}
+}
+
+func TestChatRepo_CloseRunningToolMessages(t *testing.T) {
+	chat, userID, projectID := chatTestRepo(t)
+	thread, err := chat.GetOrCreateThread(userID, projectID, "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := chat.GetOrCreateThread(userID, projectID, "architect", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := chat.AddToolCall(thread.ID, "read_file", `{"path":"a"}`); err != nil {
+		t.Fatal(err)
+	}
+	doneID, err := chat.AddToolCall(thread.ID, "grep_search", `{"pattern":"x"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.SetMessageResult(doneID, "3 matches", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := chat.AddToolCall(other.ID, "read_file", `{"path":"b"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := chat.CloseRunningToolMessages(thread.ID, "(no result)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("closed %d rows, want only the unanswered call of this thread", n)
+	}
+
+	msgs, err := chat.ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs[0].Status != "error" || msgs[0].Content != "(no result)" || msgs[0].ToolArgs != `{"path":"a"}` {
+		t.Fatalf("closed row = %+v, want error status with the note and its args kept", msgs[0])
+	}
+	if msgs[1].Status != "done" {
+		t.Fatalf("answered call was touched: %+v", msgs[1])
+	}
+	otherMsgs, err := chat.ListMessages(other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(otherMsgs) != 1 || otherMsgs[0].Status != "running" {
+		t.Fatalf("other thread rows = %v, want its call left running", otherMsgs)
+	}
+}
