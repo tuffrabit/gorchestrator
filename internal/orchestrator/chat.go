@@ -29,10 +29,10 @@ const (
 	// chatMaxMessageLen caps a single user message; anything longer is
 	// rejected rather than silently truncated.
 	chatMaxMessageLen = 8000
-	// chatTurnTimeout bounds one processing goroutine (which may cover
-	// several queued turns) so a wedged model call cannot pin a thread
-	// forever.
-	chatTurnTimeout = 30 * time.Minute
+	// defaultChatTurnTimeout is the fallback when the resolved config carries
+	// no turn timeout (TurnTimeoutDur == 0, e.g. a Config built directly in
+	// tests rather than via LoadFrom). Production config always sets it.
+	defaultChatTurnTimeout = 30 * time.Minute
 	// chatStreamPublishEvery throttles the chat_message republishes that
 	// streamed reply text triggers. Tool rows publish immediately (they are
 	// discrete and few); text parts can arrive many times a second, and the
@@ -117,7 +117,8 @@ func (s *ChatService) SendMessage(ctx context.Context, threadID int64, text stri
 // this thread is inside its write phase (finalize/addToolCallMessage), and the
 // id <= maxID watermark means a message pair a concurrent SendMessage inserts
 // after the snapshot survives and is processed normally (the HTTP handler must
-// not block behind a turn that can hold the lock for up to chatTurnTimeout).
+// not block behind a turn that can hold the lock for up to the configured
+// chat turn timeout).
 // It publishes EventChatMessage so other open drawers re-render.
 func (s *ChatService) ClearThread(ctx context.Context, threadID int64) (int, error) {
 	thread, err := s.eng.chatRepo.GetThread(threadID)
@@ -150,7 +151,11 @@ func (s *ChatService) ClearThread(ctx context.Context, threadID int64) (int, err
 // processDetached runs the per-thread processing loop with its own timeout
 // context and the per-thread serialization lock.
 func (s *ChatService) processDetached(threadID int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), chatTurnTimeout)
+	timeout := s.eng.cfg.Chat.TurnTimeoutDur
+	if timeout <= 0 {
+		timeout = defaultChatTurnTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	lock := s.threadLock(threadID)
 	lock.Lock()

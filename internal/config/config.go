@@ -132,6 +132,14 @@ type InferenceConfig struct {
 	Mode string `yaml:"mode"`
 }
 
+// ChatConfig configures dashboard chat behavior.
+type ChatConfig struct {
+	// TurnTimeout bounds one processing goroutine (which may cover several
+	// queued turns) so a wedged model call cannot pin a thread forever.
+	TurnTimeout    string        `yaml:"turn_timeout" json:"turn_timeout,omitempty"`
+	TurnTimeoutDur time.Duration `yaml:"-"`
+}
+
 // ServerConfig configures the serve daemon HTTP surface and worker pool.
 type ServerConfig struct {
 	Listen              string        `yaml:"listen"`
@@ -252,6 +260,7 @@ type Config struct {
 	Storage       StorageBackendConfig            `yaml:"storage"`
 	Inference     InferenceConfig                 `yaml:"inference"`
 	Server        ServerConfig                    `yaml:"server"`
+	Chat          ChatConfig                      `yaml:"chat"`
 	Auth          AuthConfig                      `yaml:"auth"`
 	Notifications NotificationsConfig             `yaml:"notifications"`
 	Escalation    EscalationConfig                `yaml:"escalation"`
@@ -342,6 +351,9 @@ func LoadFrom(path string) (*Config, error) {
 	}
 
 	if err := applyServerDefaults(&cfg); err != nil {
+		return nil, err
+	}
+	if err := applyChatDefaults(&cfg); err != nil {
 		return nil, err
 	}
 	if err := applyAuthDefaults(&cfg); err != nil {
@@ -593,6 +605,18 @@ func applyServerDefaults(cfg *Config) error {
 	if cfg.Server.PublicBaseURL == "" {
 		cfg.Server.PublicBaseURL = "http://" + cfg.Server.Listen
 	}
+	return nil
+}
+
+func applyChatDefaults(cfg *Config) error {
+	if cfg.Chat.TurnTimeout == "" {
+		cfg.Chat.TurnTimeout = "30m"
+	}
+	d, err := time.ParseDuration(cfg.Chat.TurnTimeout)
+	if err != nil {
+		return fmt.Errorf("parse chat.turn_timeout: %w", err)
+	}
+	cfg.Chat.TurnTimeoutDur = d
 	return nil
 }
 
