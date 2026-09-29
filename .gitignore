@@ -2,3 +2,5 @@ gorchestrator
 config.local.example.yaml
 .codegraph/
 .mcp.json
+agents_md_generator.py
+graphify-out/

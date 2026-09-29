@@ -1,8 +1,9 @@
 {{define "partials/submit_flow.html"}}
 {{/* Agent-flow builder: an ordered list of agent <select>s (one per step),
      plus add/remove controls. The hidden flow_state input is the
-     authoritative ordered flow ("id1,id2,..." with blanks for unpicked
-     steps); the handler diff's the changed select against it. */}}
+     authoritative ordered flow (length-prefixed CSV so blanks round-trip);
+     each select sends its 1-based row index as flow_pick so the handler
+     applies the change at that slot instead of guessing from param order. */}}
 <div class="flow-builder" id="flow-builder">
   <input type="hidden" name="project" value="{{.SelectedProject}}">
   <div class="form-row flow-heading">
@@ -26,6 +27,7 @@
       hx-target="#flow-builder"
       hx-swap="outerHTML"
       hx-trigger="change"
+      hx-vals='{"flow_pick": {{.Index}}}'
       hx-include="#flow-builder">
       {{range .Options}}
       <option value="{{.ID}}" {{if .Selected}}selected{{end}}>{{if .ID}}{{.ID}}{{else}}— pick an agent —{{end}}</option>

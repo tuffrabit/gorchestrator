@@ -462,12 +462,15 @@ func TestPartialSubmitFlow_Endpoint(t *testing.T) {
 		return rec.Body.String()
 	}
 
-	// Change event: the second select now picks implementer.
-	body := get("project=acme&flow_state=researcher,planner&flow_agent=researcher&flow_agent=implementer")
+	// Change event: the second select picks implementer. The select sends its
+	// 1-based row index as flow_pick plus its value first (htmx appends the
+	// triggering element before the rest), so the handler applies the change at
+	// that slot without disturbing the rows above it.
+	body := get("project=acme&flow_state=2:researcher,planner&flow_pick=2&flow_agent=implementer&flow_agent=researcher&flow_agent=planner")
 	if !strings.Contains(body, `value="implementer" selected`) {
 		t.Fatalf("changed pick not rendered: %s", body)
 	}
-	if !strings.Contains(body, `value="researcher,implementer"`) {
+	if !strings.Contains(body, `value="2:researcher,implementer"`) {
 		t.Fatalf("flow_state not updated: %s", body)
 	}
 

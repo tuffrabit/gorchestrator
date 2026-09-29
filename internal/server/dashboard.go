@@ -257,15 +257,16 @@ func (s *Server) handlePartialSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePartialSubmitFlow re-renders the flow builder. The hidden flow_state
-// input is the authoritative ordered flow; the request adds exactly one
-// change event (a changed select), a flow_remove index, or a flow_add.
+// input is the authoritative ordered flow (length-prefixed so blanks are
+// preserved); the request adds exactly one change event (a changed select,
+// carrying its row index as flow_pick), a flow_remove index, or a flow_add.
 func (s *Server) handlePartialSubmitFlow(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	project := q.Get("project")
 	if project == "" {
 		project = r.FormValue("project")
 	}
-	flow := splitFlowCSV(q.Get("flow_state"))
+	flow := decodeFlowCSV(q.Get("flow_state"))
 	switch {
 	case q.Get("flow_add") != "":
 		if len(flow) < maxFlowSteps {
@@ -276,25 +277,28 @@ func (s *Server) handlePartialSubmitFlow(w http.ResponseWriter, r *http.Request)
 			flow = append(flow[:i-1], flow[i:]...)
 		}
 	default:
-		// A select's change event: HTMX serializes every flow_agent select in
-		// document order, so the changed one is the first value that differs
-		// from the authoritative flow_state.
-		for i, v := range q["flow_agent"] {
-			v = strings.TrimSpace(v)
-			if i < len(flow) {
-				if v != flow[i] {
-					flow[i] = v
-					break
-				}
-				continue
-			}
-			// A select beyond the stored state (a blank slot never made it into
-			// flow_state because trailing blanks join to ""): record the pick.
-			if v != "" && len(flow) < maxFlowSteps {
-				flow = append(flow, v)
-				break
-			}
+		// A select's change event. The select carries the 1-based index of the
+		// row it belongs to (flow_pick), so its value is applied at exactly that
+		// slot. We deliberately do NOT infer the changed row from the order of
+		// the flow_agent values: htmx appends the triggering element's value
+		// first and then the rest in DOM order, so positional diffing corrupts
+		// the rows above the one that changed.
+		pick, err := strconv.Atoi(q.Get("flow_pick"))
+		if err != nil || pick < 1 {
+			break
 		}
+		// htmx sends the triggering select's value first.
+		picked := ""
+		if vals := q["flow_agent"]; len(vals) > 0 {
+			picked = strings.TrimSpace(vals[0])
+		}
+		for len(flow) < pick && len(flow) < maxFlowSteps {
+			flow = append(flow, "")
+		}
+		if len(flow) < pick {
+			break
+		}
+		flow[pick-1] = picked
 	}
 	data := s.submitFormData(r, project, flow, "", false)
 	if err := render(w, "partials/submit_flow.html", data); err != nil {
@@ -304,6 +308,46 @@ func (s *Server) handlePartialSubmitFlow(w http.ResponseWriter, r *http.Request)
 
 // maxFlowSteps mirrors orchestrator.maxFlowSteps for the submit UI cap.
 const maxFlowSteps = 8
+
+// encodeFlowCSV encodes the authoritative ordered flow for the hidden
+// flow_state input. The leading count keeps the encoding length-preserving so
+// the handler can tell "no steps" ("") apart from "one or more unpicked
+// steps" ("1:", "2:,", …): a bare comma-join collapses those, since
+// strings.Join([""], ",") == "" and round-trips to zero rows.
+func encodeFlowCSV(flow []string) string {
+	return fmt.Sprintf("%d:%s", len(flow), strings.Join(flow, ","))
+}
+
+// decodeFlowCSV parses a flow_state string back into the ordered flow, keeping
+// blank slots ("1:a:" → ["a", ""). splitFlowCSV remains as a fallback for
+// legacy/unprefixed values.
+func decodeFlowCSV(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	idx := strings.IndexByte(raw, ':')
+	if idx < 0 {
+		return splitFlowCSV(raw)
+	}
+	n, err := strconv.Atoi(raw[:idx])
+	if err != nil || n < 0 {
+		return splitFlowCSV(raw)
+	}
+	if n == 0 {
+		return nil
+	}
+	rest := strings.Split(raw[idx+1:], ",")
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		if i < len(rest) {
+			out = append(out, strings.TrimSpace(rest[i]))
+		} else {
+			out = append(out, "")
+		}
+	}
+	return out
+}
 
 // splitFlowCSV splits an authoritative flow-state CSV, keeping blank slots
 // ("a,,b" → ["a", "", "b"]).
@@ -476,7 +520,12 @@ func (s *Server) submitFormData(r *http.Request, selectedProject string, flow []
 	if pc, ok := s.eng.ProjectConfig(selectedProject); ok {
 		defaultFlow = pc.DefaultFlow
 	}
-	if len(flow) == 0 && len(defaultFlow) > 0 {
+	// Only seed the project default on the very first render, when no
+	// flow_state has been submitted at all. Once the user has interacted with
+	// the builder (even to remove every step, which encodes as "0:") the
+	// submitted flow is authoritative and must not be overwritten by the
+	// default.
+	if len(flow) == 0 && len(defaultFlow) > 0 && r.URL.Query().Get("flow_state") == "" {
 		flow = defaultFlow
 	}
 	data := map[string]any{
@@ -488,7 +537,7 @@ func (s *Server) submitFormData(r *http.Request, selectedProject string, flow []
 		"DryRun":          dryRun,
 		"CSRF":            auth.CSRFToken(r),
 		"Flow":            flow,
-		"FlowCSV":         strings.Join(flow, ","),
+		"FlowCSV":         encodeFlowCSV(flow),
 		"FlowSteps":       s.flowStepsForProject(selectedProject, flow),
 		"AgentIDs":        s.eng.Cfg().AgentIDs(),
 		"DefaultFlow":     defaultFlow,
