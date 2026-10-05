@@ -45,7 +45,25 @@ const (
 // in-flight turn.
 var ErrChatThreadBusy = fmt.Errorf("chat thread has a turn in progress")
 
+// chatStatusStopped is the assistant row status a user-stopped turn lands on.
+// It is distinct from "error" so the drawer can say "stopped" instead of
+// dressing a deliberate stop up as a failure, and distinct from "done" so a
+// half-finished reply is never reseeded as a finished answer.
+const chatStatusStopped = "stopped"
+
+// chatTurnReg tracks one thread's in-flight chat turn so StopThread can cancel
+// it. Chat turns run on detached goroutines with their own contexts (they are
+// deliberately NOT in the issue run registry: a chat turn must survive HTTP
+// disconnects and has no issue id), so they need their own registry.
+type chatTurnReg struct {
+	cancel  context.CancelFunc
+	stopped bool
+}
+
 // ChatService runs dashboard chat conversations against agent identities.
+// In-flight turns are registered per thread (turns) so StopThread can cancel
+// one: chat turns are detached from HTTP on purpose, so the issue run registry
+// (which is keyed by issue id and cancelled by StopIssue) has no handle on them.
 // Each SendMessage persists a user row plus a pending assistant placeholder,
 // then processes the turn asynchronously: the placeholder's content is
 // updated with stage text as the turn progresses, tool calls/responses land
@@ -63,6 +81,8 @@ type ChatService struct {
 	// threadLocks serializes processing per thread so back-to-back
 	// messages run in order.
 	threadLocks map[int64]*sync.Mutex
+	// turns holds each thread's in-flight turn registration (see chatTurnReg).
+	turns map[int64]*chatTurnReg
 	// newModel builds the turn LLM; replaceable in tests.
 	newModel func(ctx context.Context, cfg llm.Config) (adkmodel.LLM, error)
 }
@@ -71,6 +91,7 @@ func newChatService(eng *Engine) *ChatService {
 	return &ChatService{
 		eng:         eng,
 		threadLocks: map[int64]*sync.Mutex{},
+		turns:       map[int64]*chatTurnReg{},
 		newModel:    llm.New,
 	}
 }
@@ -148,18 +169,78 @@ func (s *ChatService) ClearThread(ctx context.Context, threadID int64) (int, err
 	return n, nil
 }
 
+// StopThread aborts the chat turn currently running for one thread: it marks
+// the turn stopped and cancels its context, so the model call, any pending
+// model load, and any in-flight tool call unwind. The turn's assistant row
+// lands on chatStatusStopped with whatever text had already streamed, its
+// unanswered tool rows are closed, and any further pending turns queued on the
+// same thread are landed stopped too instead of being run — one Stop press
+// silences the whole backlog until the next message. Turns already finished,
+// finished with an error, or queued for a LATER SendMessage (which builds its
+// own fresh turn) are untouched. It returns false when no turn is running.
+func (s *ChatService) StopThread(threadID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reg, ok := s.turns[threadID]
+	if !ok {
+		return false
+	}
+	reg.stopped = true
+	reg.cancel()
+	return true
+}
+
+// TurnActive reports whether a chat turn is currently running for the thread.
+func (s *ChatService) TurnActive(threadID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.turns[threadID]
+	return ok
+}
+
+// registerTurn records the thread's in-flight turn so StopThread can reach it.
+// The returned unregister must be deferred by the caller; it is identity-safe
+// (it only removes the entry it created).
+func (s *ChatService) registerTurn(threadID int64, cancel context.CancelFunc) (*chatTurnReg, func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reg := &chatTurnReg{cancel: cancel}
+	s.turns[threadID] = reg
+	return reg, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.turns[threadID] == reg {
+			delete(s.turns, threadID)
+		}
+	}
+}
+
+// turnStopped reports whether the user stopped this specific in-flight turn.
+// A plain ctx.Err() check is not enough: the same context is also cancelled by
+// the turn timeout and by engine shutdown, and only a user stop may be
+// reported as "stopped".
+func (s *ChatService) turnStopped(reg *chatTurnReg) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return reg != nil && reg.stopped
+}
+
 // processDetached runs the per-thread processing loop with its own timeout
 // context and the per-thread serialization lock.
 func (s *ChatService) processDetached(threadID int64) {
-	timeout := s.eng.cfg.Chat.TurnTimeoutDur
-	if timeout <= 0 {
-		timeout = defaultChatTurnTimeout
-	}
+	timeout := s.chatTurnTimeout()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	lock := s.threadLock(threadID)
 	lock.Lock()
 	defer lock.Unlock()
+	// Registration happens once this goroutine actually owns the thread: a
+	// goroutine still queued on the lock has no turn in flight, so StopThread
+	// must not report it as one (and must not cancel a turn it cannot see).
+	// Unregister is deferred before the unlock so a queued goroutine never sees
+	// a stale entry for the turn that just ended.
+	reg, unregisterTurn := s.registerTurn(threadID, cancel)
+	defer unregisterTurn()
 	// A turn that died mid-flight (crash, killed process) can leave a tool row
 	// stuck in "running": no result event ever reached it. Nothing else owns
 	// those rows, and this goroutine holds the only per-thread write lock, so
@@ -172,13 +253,13 @@ func (s *ChatService) processDetached(threadID int64) {
 			s.publish(threadID, thread.ProjectID)
 		}
 	}
-	s.processThread(ctx, threadID)
+	s.processThread(ctx, threadID, reg)
 }
 
 // processThread drains pending assistant turns for the thread, oldest first,
 // looping until a snapshot shows nothing pending — so messages sent while a
 // turn was in flight are picked up by the same goroutine, in order.
-func (s *ChatService) processThread(ctx context.Context, threadID int64) {
+func (s *ChatService) processThread(ctx context.Context, threadID int64, reg *chatTurnReg) {
 	eng := s.eng
 	// current is the assistant row handed to processTurn; the recover defer
 	// is the safety net that keeps it from dangling in 'pending' if a panic
@@ -198,6 +279,13 @@ func (s *ChatService) processThread(ctx context.Context, threadID int64) {
 	}()
 
 	for {
+		// A user stop covers this goroutine's whole backlog: anything still
+		// queued behind the turn that was stopped is landed "stopped" rather
+		// than run against the context StopThread already cancelled.
+		if s.turnStopped(reg) {
+			s.stopPendingTurns(threadID)
+			return
+		}
 		thread, err := eng.chatRepo.GetThread(threadID)
 		if err != nil || thread == nil {
 			return
@@ -230,16 +318,51 @@ func (s *ChatService) processThread(ctx context.Context, threadID int64) {
 			continue
 		}
 		current = assistant
-		s.processTurn(ctx, thread, user, assistant)
+		s.processTurn(ctx, thread, user, assistant, reg)
 		current = nil
+	}
+}
+
+// stopPendingTurns lands every row a stop left dangling: still-pending
+// assistant rows (including ones queued behind the stopped turn) become
+// stopped replies, and tool rows still "running" are closed out. Without this
+// a stopped thread would keep rendering a spinner forever, and ClearThread's
+// busy guard would keep refusing.
+func (s *ChatService) stopPendingTurns(threadID int64) {
+	eng := s.eng
+	closed, err := eng.chatRepo.CloseRunningToolMessages(threadID, "(no result: the turn was stopped before this call returned)")
+	if err != nil {
+		log.Printf("chat thread %d: close stopped tool calls: %v", threadID, err)
+	}
+	msgs, err := eng.chatRepo.ListMessages(threadID)
+	if err != nil {
+		log.Printf("chat thread %d: list messages after stop: %v", threadID, err)
+		return
+	}
+	changed := false
+	for _, m := range msgs {
+		if m.Role == "assistant" && m.Status == "pending" {
+			if err := eng.chatRepo.SetMessageResult(m.ID, "(stopped)", chatStatusStopped); err != nil {
+				log.Printf("chat thread %d: stop pending message %d: %v", threadID, m.ID, err)
+				continue
+			}
+			changed = true
+		}
+	}
+	if changed || closed > 0 {
+		_ = eng.chatRepo.TouchThread(threadID)
+		if thread, err := eng.chatRepo.GetThread(threadID); err == nil && thread != nil {
+			s.publish(threadID, thread.ProjectID)
+		}
 	}
 }
 
 // processTurn runs one chat turn: resolve config, acquire the model, build
 // the chat agent, reseed session history, run, and record the result. The
 // assistant row is never left pending: every exit path (including panics via
-// the deferred safety net) lands it on done or error.
-func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread, userMsg, assistantMsg *sqlite.ChatMessage) {
+// the deferred safety net) lands it on done, error, or — when reg was marked
+// stopped by StopThread — stopped, carrying whatever text had already streamed.
+func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread, userMsg, assistantMsg *sqlite.ChatMessage, reg *chatTurnReg) {
 	eng := s.eng
 
 	// stage updates the pending assistant row with progress text and
@@ -398,18 +521,45 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		_ = eng.chatRepo.TouchThread(thread.ID)
 		s.publish(thread.ID, thread.ProjectID)
 	}
+	// finalizeStopped lands a user-stopped turn: whatever already streamed
+	// stays as the reply, status is "stopped" (never reseeded into later turns
+	// as a finished answer), and finalize's own cleanup closes the turn's
+	// thought buffer and unanswered tool rows.
+	finalizeStopped := func() {
+		finished = true
+		text := strings.Join(cur.text, "\n")
+		if text == "" {
+			text = "(stopped)"
+		}
+		finalize(text, chatStatusStopped)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("chat thread %d: turn panic: %v", thread.ID, r)
 		}
 		if !finished {
 			// Safety net: a turn must never exit with a row still pending.
+			if s.turnStopped(reg) {
+				finalizeStopped()
+				return
+			}
 			finalize("Error: turn failed unexpectedly", "error")
 		}
 	}()
 	fail := func(cause error) {
+		// A stop that lands mid-setup (model load, model build, source prep)
+		// is a stop, not a failure: the cancelled context makes the cause an
+		// uninteresting "context canceled", so report the stop instead.
+		if s.turnStopped(reg) {
+			finalizeStopped()
+			return
+		}
 		finished = true
 		finalize("Error: "+cause.Error(), "error")
+	}
+	if s.turnStopped(reg) {
+		finalizeStopped()
+		return
 	}
 
 	stage("Preparing…")
@@ -578,6 +728,12 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 	// those deltas and persisting them again would duplicate the reply.
 	streamedPartial := false
 	for ev, err := range r.Run(ctx, userID, sessionID, genai.NewContentFromText(userMsg.Content, genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		// A stop surfaces here either as a cancellation error from the model /
+		// tool layer or as a cancelled context between events; both routes land
+		// the turn on "stopped" with the text streamed so far.
+		if s.turnStopped(reg) || ctx.Err() != nil {
+			break
+		}
 		if err != nil {
 			fail(fmt.Errorf("chat turn: %w", err))
 			return
@@ -645,12 +801,29 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 
 	// The open segment holds this turn's closing text; earlier segments were
 	// already persisted as they streamed.
+	if s.turnStopped(reg) {
+		finalizeStopped()
+		return
+	}
+	if ctx.Err() != nil {
+		fail(fmt.Errorf("turn timed out after %s: %w", s.chatTurnTimeout(), ctx.Err()))
+		return
+	}
 	finalText := strings.Join(cur.text, "\n")
 	if finalText == "" {
 		finalText = "(no response)"
 	}
 	finished = true
 	finalize(finalText, "done")
+}
+
+// chatTurnTimeout is the per-turn deadline processDetached runs under, resolved
+// the same way so error rows can name the wait that expired.
+func (s *ChatService) chatTurnTimeout() time.Duration {
+	if t := s.eng.cfg.Chat.TurnTimeoutDur; t > 0 {
+		return t
+	}
+	return defaultChatTurnTimeout
 }
 
 // acquireChatModel mirrors Engine.acquirePhaseModel residency semantics for a

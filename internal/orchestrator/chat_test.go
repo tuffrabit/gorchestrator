@@ -54,6 +54,13 @@ type fakeChatModel struct {
 	// other entry is a list_directory call. Entries are emitted in order, like
 	// a real model that narrates, calls, reads the result, and narrates again.
 	script [][]string
+	// holdFrom + release hold every model request with n >= holdFrom inside its
+	// iterator until release is closed or the turn's context is cancelled — the
+	// deterministic stand-in for a slow model, so the stop tests can read and
+	// interrupt a turn that is genuinely mid-flight instead of racing a turn
+	// that finishes in microseconds.
+	holdFrom int
+	release  chan struct{}
 }
 
 type capturedContent struct {
@@ -99,6 +106,18 @@ func (f *fakeChatModel) GenerateContent(ctx context.Context, req *adkmodel.LLMRe
 	}
 
 	return func(yield func(*adkmodel.LLMResponse, error) bool) {
+		f.mu.Lock()
+		release, hold := f.release, f.holdFrom > 0 && n >= f.holdFrom
+		f.mu.Unlock()
+		if hold {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				// What a real client does when the caller hangs up mid-request.
+				yield(nil, ctx.Err())
+				return
+			}
+		}
 		f.mu.Lock()
 		if n <= len(f.script) {
 			script := f.script[n-1]
@@ -333,6 +352,216 @@ func waitForChatMessages(t *testing.T, eng *Engine, threadID int64, want int) []
 			t.Fatalf("timed out waiting for %d completed messages; have %v", want, msgs)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForChatTurnInFlight polls until the thread is provably mid-turn: a model
+// request has been made, the processing goroutine owns the thread (TurnActive),
+// and an assistant row is still pending. That is the state the Stop button is
+// meant to interrupt, and the state StopThread must be able to reach.
+func waitForChatTurnInFlight(t *testing.T, eng *Engine, threadID int64, fake *fakeChatModel, minRequests int) []*sqlite.ChatMessage {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		msgs, err := eng.ChatRepo().ListMessages(threadID)
+		if err != nil {
+			t.Fatalf("list messages: %v", err)
+		}
+		pending := false
+		for _, m := range msgs {
+			if m.Role == "assistant" && m.Status == "pending" {
+				pending = true
+			}
+		}
+		if pending && len(fake.capturedRequests()) >= minRequests && eng.ChatService().TurnActive(threadID) {
+			return msgs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for an in-flight turn on thread %d; have %v", threadID, msgs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestChat_StopThreadCancelsInFlightTurn(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+
+	// Request 1 narrates and calls list_directory; request 2 (which follows the
+	// tool result) holds the turn open. So the stop lands on a turn that has
+	// already produced a real reply segment and a real tool row.
+	fake.script = [][]string{{"text:partial answer", "call"}, {"text:never emitted"}}
+	fake.holdFrom = 2
+	fake.release = make(chan struct{})
+	t.Cleanup(func() { close(fake.release) })
+
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "hello agent"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	mid := waitForChatTurnInFlight(t, eng, thread.ID, fake, 2)
+	if !strings.Contains(chatRowSummary(mid), "partial answer") {
+		t.Fatalf("mid-turn rows = %s, want the streamed reply already visible on the pending row", chatRowSummary(mid))
+	}
+
+	if !eng.ChatService().StopThread(thread.ID) {
+		t.Fatal("StopThread = false, want true for a thread with a running turn")
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 3)
+	if msgs[0].Role != "user" || msgs[0].Content != "hello agent" {
+		t.Fatalf("row 0 = %+v, want the user message", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Status != chatStatusStopped || msgs[1].Content != "partial answer" {
+		t.Fatalf("row 1 = %+v, want stopped assistant row keeping %q", msgs[1], "partial answer")
+	}
+	if msgs[2].Role != "tool" || msgs[2].Status != "done" {
+		t.Fatalf("row 2 = %+v, want the completed tool row", msgs[2])
+	}
+	if eng.ChatService().TurnActive(thread.ID) {
+		t.Fatal("TurnActive = true after the stopped turn, want the thread released")
+	}
+
+	// The turn unwound instead of running to its natural end: request 2 was
+	// entered (that is where the test held it) and answered nothing, and no
+	// third request followed.
+	if got := len(fake.capturedRequests()); got != 2 {
+		t.Fatalf("model requests after stop = %d, want 2 (the blocked one never answered)", got)
+	}
+
+	// Stopping must not wedge the thread: the next message runs normally.
+	fake.mu.Lock()
+	fake.holdFrom = 0
+	fake.script = nil
+	fake.mu.Unlock()
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "second question"); err != nil {
+		t.Fatalf("SendMessage after stop: %v", err)
+	}
+	msgs = waitForChatMessages(t, eng, thread.ID, 5)
+	if last := msgs[4]; last.Role != "assistant" || last.Status != "done" || last.Content != "chat reply" {
+		t.Fatalf("post-stop turn = %+v, want a normal done reply", last)
+	}
+	if got := len(fake.capturedRequests()); got != 3 {
+		t.Fatalf("model requests after the post-stop turn = %d, want 3 (2 stopped + 1 new)", got)
+	}
+}
+
+func TestChat_StopThreadClearsQueuedTurns(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+	// The very first model request holds the turn open, so nothing of the
+	// second message's turn is ever attempted.
+	fake.holdFrom = 1
+	fake.release = make(chan struct{})
+	t.Cleanup(func() { close(fake.release) })
+
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "first question"); err != nil {
+		t.Fatalf("first SendMessage: %v", err)
+	}
+	// Queued behind the in-flight turn: its pair is durable now, its
+	// processing goroutine is still waiting on the per-thread lock.
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "second question"); err != nil {
+		t.Fatalf("second SendMessage: %v", err)
+	}
+	waitForChatTurnInFlight(t, eng, thread.ID, fake, 1)
+
+	if !eng.ChatService().StopThread(thread.ID) {
+		t.Fatal("StopThread = false, want true")
+	}
+
+	msgs := waitForChatMessages(t, eng, thread.ID, 4)
+	stopped := 0
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			if m.Status != chatStatusStopped {
+				t.Fatalf("assistant row = %+v, want every queued turn landed stopped", m)
+			}
+			stopped++
+		}
+	}
+	if stopped != 2 {
+		t.Fatalf("stopped assistant rows = %d, want 2 (one per queued message)", stopped)
+	}
+	if got := len(fake.capturedRequests()); got != 1 {
+		t.Fatalf("model requests after stop = %d, want 1 (the backlog must not run)", got)
+	}
+	if eng.ChatService().TurnActive(thread.ID) {
+		t.Fatal("TurnActive = true after stopping the backlog, want false")
+	}
+}
+
+func TestChat_StopThreadWithoutTurn(t *testing.T) {
+	eng, user, project, _ := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if eng.ChatService().StopThread(thread.ID) {
+		t.Fatal("StopThread on an idle thread = true, want false")
+	}
+	if eng.ChatService().StopThread(999999) {
+		t.Fatal("StopThread on an unknown thread = true, want false")
+	}
+
+	// A turn that ran to completion leaves nothing to stop.
+	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "hello"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitForChatMessages(t, eng, thread.ID, 2)
+	if eng.ChatService().StopThread(thread.ID) {
+		t.Fatal("StopThread after a finished turn = true, want false")
+	}
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs[1].Status != "done" {
+		t.Fatalf("finished reply = %+v, want status done", msgs[1])
+	}
+}
+
+func TestChat_StoppedReplyIsNotSeededAsHistory(t *testing.T) {
+	eng, user, project, fake := chatTestEngine(t, nil)
+	thread, err := eng.ChatRepo().GetOrCreateThread(user.ID, project.ID, "researcher", "")
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	ctx := context.Background()
+	fake.script = [][]string{{"text:partial answer", "call"}, {"text:never emitted"}}
+	fake.holdFrom = 2
+	fake.release = make(chan struct{})
+	t.Cleanup(func() { close(fake.release) })
+
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "hello agent"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitForChatTurnInFlight(t, eng, thread.ID, fake, 2)
+	if !eng.ChatService().StopThread(thread.ID) {
+		t.Fatal("StopThread = false, want true")
+	}
+	waitForChatMessages(t, eng, thread.ID, 3)
+
+	fake.mu.Lock()
+	fake.holdFrom = 0
+	fake.script = nil
+	fake.mu.Unlock()
+	if err := eng.ChatService().SendMessage(ctx, thread.ID, "second question"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitForChatMessages(t, eng, thread.ID, 5)
+	reqs := fake.capturedRequests()
+	last := reqs[len(reqs)-1]
+	for _, c := range last {
+		if strings.Contains(c.text, "partial answer") {
+			t.Fatalf("stopped partial reply was seeded into the next turn: %+v", last)
+		}
 	}
 }
 

@@ -666,6 +666,20 @@ document.addEventListener('htmx:afterRequest', function (e) {
   } catch (err) { /* storage unavailable */ }
 });
 
+// A stop unwinds asynchronously: the model call, model load, or tool call has
+// to notice the cancellation before the turn's row lands on "stopped". The
+// swap rendered right after the POST can therefore still show the spinner, so
+// re-poll the thread a few times. The chat_message event the stopped turn
+// publishes normally gets there first; this is the fallback when SSE is down.
+document.addEventListener('htmx:afterRequest', function (e) {
+  var elt = e.detail && e.detail.elt;
+  var post = elt && elt.getAttribute ? (elt.getAttribute('hx-post') || elt.getAttribute('data-hx-post') || '') : '';
+  if (post !== '/partials/chat/stop') return;
+  refreshChatThread();
+  setTimeout(refreshChatThread, 600);
+  setTimeout(refreshChatThread, 1800);
+});
+
 document.addEventListener('DOMContentLoaded', function () {
   var expandId = document.body && document.body.dataset.expandId;
   var drawer = document.body && document.body.dataset.drawer;

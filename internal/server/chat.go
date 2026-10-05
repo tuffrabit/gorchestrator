@@ -57,6 +57,9 @@ type chatMessageView struct {
 	// Running marks a tool row whose call has not returned yet: the box shows
 	// the call arguments with a "running" marker and no result part.
 	Running bool
+	// Stopped marks an assistant row a user stop cut short: it keeps whatever
+	// text had already streamed but renders as a stopped note, not as an error.
+	Stopped bool
 	// Truncated marks a tool payload capped by the orchestrator; the tree pane
 	// shows a "truncated" note so a partial tree is not read as the whole call.
 	Truncated bool
@@ -321,7 +324,7 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 			// composer and drawer survive — a plain http.Error body would be
 			// swapped into #chat-thread and blank the composer.
 			data := s.chatThreadData(r, rp, identity, u)
-			data["Error"] = "A reply is still being generated. Try again in a moment."
+			data["Error"] = "A reply is still being generated. Stop it first, or try again in a moment."
 			if err := render(w, "partials/chat_thread.html", data); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
@@ -338,6 +341,86 @@ func (s *Server) handlePartialChatClear(w http.ResponseWriter, r *http.Request) 
 	_ = s.eng.Audit().Record(auditUID, "clear_chat", "chat_thread", strconv.FormatInt(thread.ID, 10), map[string]any{"messages_removed": n})
 
 	if err := render(w, "partials/chat_thread.html", s.chatThreadData(r, rp, identity, u)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handlePartialChatStop aborts the chat turn in flight for the thread the
+// drawer is showing (the same derived-selection resolution used by clear: the
+// thread id is never taken from the client, so no one can stop another user's
+// turn by guessing ids). Like the other chat partial handlers it sets no
+// HX-Trigger, so the drawer stays open, and it always re-renders the thread
+// partial: the turn unwinds asynchronously, so the swap shows the state at
+// request time and the chat_message event the stopped turn publishes lands the
+// final "stopped" row.
+func (s *Server) handlePartialChatStop(w http.ResponseWriter, r *http.Request) {
+	if err := parseRequestForm(r); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	u := auth.UserFromContext(r.Context())
+	project := strings.TrimSpace(r.FormValue("project"))
+	identity := chatSelectionFromQuery(r.FormValue("agent"), r.FormValue("identity"))
+
+	rp, err := s.chatProject(r.Context(), project)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	if identity == "" {
+		identity = s.defaultChatIdentity(project)
+	}
+	if !s.validChatAgent(identity) {
+		http.Error(w, s.unknownChatAgentMessage(identity), http.StatusUnprocessableEntity)
+		return
+	}
+
+	uid, err := s.chatUserID(u, false)
+	if err != nil {
+		http.Error(w, "could not resolve user: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var thread *sqlite.ChatThread
+	if uid != 0 {
+		thread, err = s.eng.ChatRepo().FindThread(uid, rp.Project.ID, identity, "")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	data := s.chatThreadData(r, rp, identity, u)
+	if thread == nil {
+		// Nothing to stop: the empty-state partial is the success shape.
+		if err := render(w, "partials/chat_thread.html", data); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if !s.eng.ChatService().StopThread(thread.ID) {
+		// The turn landed between the drawer rendering the spinner and this
+		// click. Re-render the thread unchanged with a notice: a plain
+		// http.Error body would be swapped into #chat-thread and blank the
+		// composer.
+		data["Error"] = "That reply already finished — nothing to stop."
+		if err := render(w, "partials/chat_thread.html", data); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	var auditUID *int64
+	if u != nil {
+		auditUID = &u.ID
+	}
+	_ = s.eng.Audit().Record(auditUID, "stop_chat", "chat_thread", strconv.FormatInt(thread.ID, 10), nil)
+
+	// The cancellation is async: the turn is still unwinding (model call, tool
+	// call, or model load) while this response renders. "Stopping…" keeps the
+	// drawer honest about that window instead of offering a second stop.
+	data["StoppingTurn"] = true
+
+	if err := render(w, "partials/chat_thread.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -485,6 +568,16 @@ func (s *Server) chatThreadData(r *http.Request, rp *orchestrator.RegisteredProj
 		views = append(views, newChatMessageView(m))
 	}
 	data["Messages"] = views
+	// RunningTurn drives the drawer's Stop button: the rows the user can see
+	// ARE the turn's state — a pending assistant row (or a tool call still
+	// waiting for its result) means a turn has not landed yet, so the drawer
+	// offers a stop exactly when a spinner is on screen.
+	for _, v := range views {
+		if v.Pending || v.Running {
+			data["RunningTurn"] = true
+			break
+		}
+	}
 	return data
 }
 
@@ -505,6 +598,8 @@ func newChatMessageView(m *sqlite.ChatMessage) *chatMessageView {
 		v.Pending = true
 	case m.Role == "assistant" && m.Status == "error":
 		v.Error = true
+	case m.Role == "assistant" && m.Status == "stopped":
+		v.Stopped = true
 	case m.Role == "assistant":
 		v.ContentHTML = renderChatMarkdown(m.Content)
 	case m.Role == "tool":

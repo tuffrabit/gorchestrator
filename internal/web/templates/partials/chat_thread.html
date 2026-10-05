@@ -12,6 +12,20 @@
       <input type="hidden" name="agent" value="{{.Agent}}">
       <button class="btn btn-danger" type="submit">Clear chat</button>
     </form>
+    {{if .RunningTurn}}
+    {{/* A turn is on screen (pending reply or a tool call still waiting): offer
+         the way out. Same derived-selection shape as the clear form, so the
+         server resolves the thread itself instead of trusting a client id. */}}
+    <form hx-post="/partials/chat/stop" hx-target="#chat-thread" hx-swap="innerHTML">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <input type="hidden" name="project" value="{{.Project}}">
+      <input type="hidden" name="agent" value="{{.Agent}}">
+      <button class="btn btn-danger" type="submit"{{if .StoppingTurn}} disabled{{end}}
+        title="Stop this reply now: the model turn is cancelled and the tool calls it left open are closed out">
+        {{if .StoppingTurn}}Stopping…{{else}}Stop reply{{end}}
+      </button>
+    </form>
+    {{end}}
   </div>
   {{end}}
   <div class="chat-messages">
@@ -49,6 +63,10 @@
         </div>
         {{else if .Error}}
         <div class="chat-msg chat-msg-assistant chat-msg-error">
+          <div class="chat-bubble">{{.Content}}</div>
+        </div>
+        {{else if .Stopped}}
+        <div class="chat-msg chat-msg-assistant chat-msg-stopped">
           <div class="chat-bubble">{{.Content}}</div>
         </div>
         {{else}}

@@ -678,6 +678,259 @@ func TestPartialChatClear_DoesNotAcceptClientThreadID(t *testing.T) {
 	}
 }
 
+// chatStopEngine builds a chat server whose model acquisition blocks on
+// release, so a turn is genuinely mid-flight when the test POSTs the stop.
+// Inference points at a handler that answers only once the turn's context is
+// cancelled (or the test releases it), which is how a slow model load looks in
+// production.
+func chatStopEngine(t *testing.T) (*orchestrator.Engine, *Server) {
+	t.Helper()
+	release := make(chan struct{})
+	loader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	t.Cleanup(func() {
+		close(release)
+		loader.Close()
+	})
+	eng, srv := chatTestServer(t, func(cfg *config.Config) {
+		cfg.Inference = config.InferenceConfig{Type: "llama-swap", BaseURL: loader.URL}
+	})
+	return eng, srv
+}
+
+// chatTestThread sends one message and returns the thread it landed on.
+func chatTestThread(t *testing.T, h http.Handler, eng *orchestrator.Engine, agent, message string) *sqlite.ChatThread {
+	t.Helper()
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", agent)
+	form.Set("message", message)
+	rec := chatPostForm(t, h, "/partials/chat/send", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	user, err := eng.Users().GetByEmail("disabled@localhost")
+	if err != nil || user == nil {
+		t.Fatalf("expected synthetic user row: user=%v err=%v", user, err)
+	}
+	thread, err := eng.ChatRepo().FindThread(user.ID, chatProjectID(t, eng, "acme"), agent, "")
+	if err != nil || thread == nil {
+		t.Fatalf("expected thread: thread=%v err=%v", thread, err)
+	}
+	return thread
+}
+
+func TestPartialChatStop_StopsInFlightTurn(t *testing.T) {
+	eng, srv := chatStopEngine(t)
+	h := srv.Handler()
+
+	thread := chatTestThread(t, h, eng, "researcher", "hello agent")
+
+	// The turn is stuck loading the model: exactly the state the Stop button is
+	// for.
+	deadline := time.Now().Add(10 * time.Second)
+	for !eng.ChatService().TurnActive(thread.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("chat turn never became active")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	rec := chatPostForm(t, h, "/partials/chat/stop", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stop status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Stopping…") {
+		t.Fatalf("stop response did not acknowledge the stop: %.600s", body)
+	}
+	// The drawer stays open: no HX-Trigger, and the composer survives.
+	if got := rec.Header().Get("HX-Trigger"); got != "" {
+		t.Fatalf("HX-Trigger = %q, want empty", got)
+	}
+	if !strings.Contains(body, `name="message"`) {
+		t.Fatalf("composer missing after stop: %.600s", body)
+	}
+
+	waitForChatTurnDone(t, eng, thread.ID, 2)
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs[1].Status != "stopped" {
+		t.Fatalf("stopped turn = %+v, want assistant row with status stopped", msgs[1])
+	}
+	if eng.ChatService().TurnActive(thread.ID) {
+		t.Fatal("thread still active after the stopped turn")
+	}
+}
+
+func TestPartialChatThread_OfferStopOnlyWhileRunning(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	thread := chatTestThread(t, h, eng, "researcher", "hello agent")
+	waitForChatTurnDone(t, eng, thread.ID, 2)
+
+	readThread := func() string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/partials/chat/thread?project=acme&agent=researcher", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("thread status = %d body=%.600s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	// A finished thread offers nothing to stop.
+	if body := readThread(); strings.Contains(body, `hx-post="/partials/chat/stop"`) {
+		t.Fatalf("finished turn offers a stop: %.800s", body)
+	}
+
+	// A pending assistant row is a turn in flight: the drawer must offer a stop.
+	if _, err := eng.ChatRepo().AddMessage(thread.ID, "assistant", "Thinking…", "", "pending"); err != nil {
+		t.Fatal(err)
+	}
+	body := readThread()
+	if !strings.Contains(body, `hx-post="/partials/chat/stop"`) || !strings.Contains(body, "Stop reply") {
+		t.Fatalf("in-flight thread has no stop action: %.800s", body)
+	}
+	if !strings.Contains(body, "chat-msg-pending") {
+		t.Fatalf("pending row lost its in-flight rendering: %.800s", body)
+	}
+	if !strings.Contains(body, `name="message"`) {
+		t.Fatalf("stop button crowd out the composer: %.800s", body)
+	}
+
+	// A stopped turn renders as stopped, not as an error or a spinner.
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ChatRepo().SetMessageResult(msgs[len(msgs)-1].ID, "(stopped)", "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	body = readThread()
+	if !strings.Contains(body, "chat-msg-stopped") || !strings.Contains(body, "(stopped)") {
+		t.Fatalf("stopped row not rendered as stopped: %.800s", body)
+	}
+	if strings.Contains(body, `hx-post="/partials/chat/stop"`) {
+		t.Fatalf("thread offers a stop after the row landed: %.800s", body)
+	}
+}
+
+func TestPartialChatStop_NoTurnRunning(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	thread := chatTestThread(t, h, eng, "researcher", "hello agent")
+	waitForChatTurnDone(t, eng, thread.ID, 2)
+	before, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil || len(before) != 2 {
+		t.Fatalf("messages before stop = %v err=%v", before, err)
+	}
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	rec := chatPostForm(t, h, "/partials/chat/stop", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stop status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "nothing to stop") {
+		t.Fatalf("stop with no turn in flight did not explain itself: %.600s", body)
+	}
+	// The finished reply is untouched and the composer survived the swap.
+	msgs, err := eng.ChatRepo().ListMessages(thread.ID)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("messages after a no-op stop = %v err=%v, want the original 2", msgs, err)
+	}
+	if msgs[1].Status != before[1].Status || msgs[1].Content != before[1].Content {
+		t.Fatalf("finished reply changed by a no-op stop: before=%+v after=%+v", before[1], msgs[1])
+	}
+	if !strings.Contains(body, `name="message"`) {
+		t.Fatalf("composer missing after no-op stop: %.600s", body)
+	}
+}
+
+func TestPartialChatStop_ValidationErrors(t *testing.T) {
+	_, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	cases := []url.Values{
+		{"project": {"nope"}, "agent": {"researcher"}},
+		{"project": {"acme"}, "agent": {"writer"}},
+		{"project": {""}, "agent": {"researcher"}},
+	}
+	for i, form := range cases {
+		rec := chatPostForm(t, h, "/partials/chat/stop", form)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("case %d status = %d body=%s, want 422", i, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestPartialChatStop_DoesNotAcceptClientThreadID(t *testing.T) {
+	eng, srv := chatTestServer(t, nil)
+	h := srv.Handler()
+
+	other, err := eng.Users().Create("other@example.com", "Other", sqlite.RoleMember, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherThread, err := eng.ChatRepo().GetOrCreateThread(other.ID, chatProjectID(t, eng, "acme"), "researcher", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ChatRepo().AddMessage(otherThread.ID, "user", "sensitive chat", "", "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.ChatRepo().AddMessage(otherThread.ID, "assistant", "", "", "pending"); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{}
+	form.Set("project", "acme")
+	form.Set("agent", "researcher")
+	form.Set("thread_id", strconv.FormatInt(otherThread.ID, 10))
+	rec := chatPostForm(t, h, "/partials/chat/stop", form)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stop status = %d body=%.600s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "No messages yet.") {
+		t.Fatalf("expected the empty state for a user with no thread: %.600s", rec.Body.String())
+	}
+
+	msgs, err := eng.ChatRepo().ListMessages(otherThread.ID)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("other user's thread was touched: %v err=%v", msgs, err)
+	}
+	if msgs[1].Status != "pending" {
+		t.Fatalf("other user's in-flight row changed: %+v", msgs[1])
+	}
+	if u, err := eng.Users().GetByEmail("disabled@localhost"); err != nil || u != nil {
+		t.Fatalf("stop must not create a user row: user=%v err=%v", u, err)
+	}
+}
+
+func TestChatMessageView_StoppedRow(t *testing.T) {
+	v := newChatMessageView(&sqlite.ChatMessage{Role: "assistant", Status: "stopped", Content: "partial answer"})
+	if !v.Stopped || v.Pending || v.Error {
+		t.Fatalf("stopped row view = %+v, want Stopped only", v)
+	}
+}
+
 func TestChatSelectionFromQuery(t *testing.T) {
 	if got := chatSelectionFromQuery("", "planner"); got != "planner" {
 		t.Fatalf("identity select value = %q", got)
