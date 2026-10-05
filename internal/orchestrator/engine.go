@@ -1354,7 +1354,7 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 	var finishDone *bool
 	var finalText string
 
-	for ev, err := range r.Run(ctx, "user", sessionID, userContent, agent.RunConfig{}) {
+	for ev, err := range r.Run(ctx, "user", sessionID, userContent, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if err != nil {
 			// Record the terminal error so the activity log ends with an
 			// explanation instead of dangling tool calls.
@@ -1371,6 +1371,12 @@ func (e *Engine) runAgentLoop(ctx context.Context, projectID, issueID int64, pha
 			return nil, false, "", 0, fmt.Errorf("loop %d: %w", loop, err)
 		}
 		if ev == nil || ev.Content == nil {
+			continue
+		}
+		if ev.Partial {
+			// Streaming deltas are for live display only. Audit rows
+			// (model_turn/tool_call/tool_result) and token accounting record
+			// the final event of each model call; usage arrives there too.
 			continue
 		}
 

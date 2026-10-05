@@ -33,7 +33,7 @@ func New(ctx context.Context, cfg Config) (model.LLM, error) {
 		// Temperature/max_tokens for Gemini are left to ADK defaults for now.
 		return NewGeminiModel(ctx, cfg.Model, apiKey, cfg.Timeout)
 	case "openai":
-		return NewOpenAIModelWithOptions(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout, cfg.Temperature, cfg.MaxTokens), nil
+		return NewOpenAIModelWithOptions(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout, cfg.Temperature, cfg.MaxTokens)
 	case "anthropic":
 		return NewAnthropicModelWithOptions(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout, cfg.Temperature, cfg.MaxTokens), nil
 	default:

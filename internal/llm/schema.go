@@ -7,6 +7,22 @@ import (
 	"google.golang.org/genai"
 )
 
+// functionDeclarations extracts the function declarations the agent declared
+// in the request config. Shared by the model adapters and the dry-run model.
+func functionDeclarations(cfg *genai.GenerateContentConfig) []*genai.FunctionDeclaration {
+	if cfg == nil {
+		return nil
+	}
+	var decls []*genai.FunctionDeclaration
+	for _, t := range cfg.Tools {
+		if t == nil {
+			continue
+		}
+		decls = append(decls, t.FunctionDeclarations...)
+	}
+	return decls
+}
+
 // emptyObjectSchema is the fallback when a function declaration has no
 // parameter schema. Prefer DeclarationParameters, which also handles ADK
 // function tools that populate ParametersJsonSchema instead of Parameters.

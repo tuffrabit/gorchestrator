@@ -573,12 +573,36 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		}
 	}
 
-	for ev, err := range r.Run(ctx, userID, sessionID, genai.NewContentFromText(userMsg.Content, genai.RoleUser), agent.RunConfig{}) {
+	// streamedPartial tracks the in-flight model call: when its text arrived
+	// as streaming deltas, the final event's text parts are the aggregate of
+	// those deltas and persisting them again would duplicate the reply.
+	streamedPartial := false
+	for ev, err := range r.Run(ctx, userID, sessionID, genai.NewContentFromText(userMsg.Content, genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if err != nil {
 			fail(fmt.Errorf("chat turn: %w", err))
 			return
 		}
 		if ev == nil || ev.Content == nil {
+			continue
+		}
+		if ev.Partial {
+			// Streaming delta: incremental text/thought only. Tool calls
+			// arrive on the final event, never on partials.
+			if ev.Content.Role == genai.RoleModel {
+				for _, p := range ev.Content.Parts {
+					if p == nil {
+						continue
+					}
+					if p.Text != "" && p.Thought {
+						thoughtBuf = append(thoughtBuf, p.Text)
+						continue
+					}
+					if p.Text != "" {
+						streamText(p.Text)
+					}
+				}
+			}
+			streamedPartial = true
 			continue
 		}
 		if ev.Content.Role == genai.RoleModel {
@@ -594,7 +618,8 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 					thoughtBuf = append(thoughtBuf, p.Text)
 					continue
 				}
-				if p.Text != "" {
+				if p.Text != "" && !streamedPartial {
+					// Non-streaming providers deliver the whole turn here.
 					streamText(p.Text)
 				}
 				if p.FunctionCall != nil {
@@ -607,6 +632,7 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 			// Event end: thoughts that were not followed by a call in this
 			// event still get their row before the turn moves on.
 			flushThoughts()
+			streamedPartial = false
 		} else if ev.Content.Role == genai.RoleUser {
 			for _, p := range ev.Content.Parts {
 				if p == nil || p.FunctionResponse == nil {

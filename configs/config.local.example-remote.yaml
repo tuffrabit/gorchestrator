@@ -1,0 +1,342 @@
+storage_root: ~/.config/gorchestrator/storage
+db_path: ~/.config/gorchestrator/gorchestrator.db
+# Local single-model-at-a-time inference via llama-swap.
+# The harness explicitly loads the phase's model before each stage and unloads
+# after (warmup request -> /running verify; /unload + poll). mode: exclusive
+# serializes ALL phases against this server, so it can never be double-booked.
+# Remove this block to fall back to implicit swap-on-request behavior.
+#
+# Sideload exception: an agent with `sideload: true` opts out of this lifecycle
+# entirely — its phase takes no exclusive lock and drives no load/unload, and
+# its model is protected from other phases' evictions (per-model unload keeps
+# it resident). Use it for a small always-loaded model that shares the server
+# with the swapped main model (configure llama-swap so the two coexist).
+inference:
+  type: llama-swap
+  base_url: http://192.168.1.132:8080   # management base; chat API is <base>/v1
+  mode: exclusive
+
+default_model:
+  # Fallback model for any agent stage without its own model block.
+  # provider: openai works for llama-swap's OpenAI-compatible endpoint.
+  provider: openai
+  model: qwen3.6-35b-a3b-reap-48-v2     # must match a model name in your llama-swap config
+  api_key_env: OPENAI_API_KEY   # unused by llama-swap, but the field must exist
+  base_url: http://192.168.1.132:8080/v1
+  timeout: 10m
+
+tools:
+  read_file:
+    max_bytes: 65536
+    max_lines: 2000
+
+# Three-stage local arrangement: fast researcher -> big single-shot planner -> mid implementer.
+# Every stage boundary is a human gate by default (adjudicator defaults to "human";
+# "self" opts back into agent self-approval, "null" disables gating entirely).
+# Each stage's model block points at llama-swap; the harness swaps models between stages.
+agents:
+  # RESEARCHER: fast + tool-using. Explores the workspace (read_file, list_directory,
+  # grep_search) and writes a context digest for the planner. Value is throughput,
+  # not depth — use the fastest model you have.
+  tielexplorer:
+    max_attempts: 3
+    # sideload: true   # if the researcher model is a small always-resident one:
+    #                  # skips lock/load/unload and is spared from evictions
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: tiel-coder-35b-a3b-mtp-ud-q4_k_xl
+      timeout: 60m
+    tools: [read_file, list_directory, grep_search, write_output]
+    system_prompt: |
+        You are an explorer agent. Your job is to explore the file system in the context of the user's input or questions and return answers and insights based on your findings.
+        You have access to these tools:
+        - read_file: read a file's content (whole-file or surgical line range)
+        - list_directory: list a directory
+        - grep_search: search file contents
+        - write_output: write your final findings to the designated output file
+        Rules:
+        1. Use tools to gather information from the allowed paths.
+        2. If prompted to or asked you can write your final findings using the write_output tool.
+        3. As the users's input and prompts and questions to inform your file system exploration and reasoning.
+  sharpsparkexplorer:
+    max_attempts: 3
+    # sideload: true   # if the researcher model is a small always-resident one:
+    #                  # skips lock/load/unload and is spared from evictions
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: sharp-spark-x2.5-4b-q6_k_xl
+      timeout: 60m
+    tools: [read_file, list_directory, grep_search, write_output]
+    system_prompt: |
+        You are an explorer agent. Your job is to explore the file system in the context of the user's input or questions and return answers and insights based on your findings.
+        You have access to these tools:
+        - read_file: read a file's content (whole-file or surgical line range)
+        - list_directory: list a directory
+        - grep_search: search file contents
+        - write_output: write your final findings to the designated output file
+        Rules:
+        1. Use tools to gather information from the allowed paths.
+        2. If prompted to or asked you can write your final findings using the write_output tool.
+        3. As the users's input and prompts and questions to inform your file system exploration and reasoning.
+  mimoexplorer:
+    max_attempts: 3
+    # sideload: true   # if the researcher model is a small always-resident one:
+    #                  # skips lock/load/unload and is spared from evictions
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: mimo-v2.6-distill-qwen-9b-q6_k
+      timeout: 60m
+    tools: [read_file, list_directory, grep_search, write_output]
+    system_prompt: |
+        You are an explorer agent. Your job is to explore the file system in the context of the user's input or questions and return answers and insights based on your findings.
+        You have access to these tools:
+        - read_file: read a file's content (whole-file or surgical line range)
+        - list_directory: list a directory
+        - grep_search: search file contents
+        - write_output: write your final findings to the designated output file
+        Rules:
+        1. Use tools to gather information from the allowed paths.
+        2. If prompted to or asked you can write your final findings using the write_output tool.
+        3. As the users's input and prompts and questions to inform your file system exploration and reasoning.
+  dumboexplorer:
+    max_attempts: 3
+    # sideload: true   # if the researcher model is a small always-resident one:
+    #                  # skips lock/load/unload and is spared from evictions
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: minicpm5-2b-q8_0
+      timeout: 60m
+    tools: [read_file, list_directory, grep_search, write_output]
+    system_prompt: |
+        You are an explorer agent. Your job is to explore the file system in the context of the user's input or questions and return answers and insights based on your findings.
+        You have access to these tools:
+        - read_file: read a file's content (whole-file or surgical line range)
+        - list_directory: list a directory
+        - grep_search: search file contents
+        - write_output: write your final findings to the designated output file
+        Rules:
+        1. Use tools to gather information from the allowed paths.
+        2. If prompted to or asked you can write your final findings using the write_output tool.
+        3. As the users's input and prompts and questions to inform your file system exploration and reasoning.
+  smartexplorer:
+    max_attempts: 3
+    # sideload: true   # if the researcher model is a small always-resident one:
+    #                  # skips lock/load/unload and is spared from evictions
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: ling-3.0-tiny-q6_k
+      timeout: 60m
+    tools: [read_file, list_directory, grep_search, write_output]
+    system_prompt: |
+        You are an explorer agent. Your job is to explore the file system in the context of the user's input or questions and return answers and insights based on your findings.
+        You have access to these tools:
+        - read_file: read a file's content (whole-file or surgical line range)
+        - list_directory: list a directory
+        - grep_search: search file contents
+        - write_output: write your final findings to the designated output file
+        Rules:
+        1. Use tools to gather information from the allowed paths.
+        2. If prompted to or asked you can write your final findings using the write_output tool.
+        3. As the users's input and prompts and questions to inform your file system exploration and reasoning.
+  smarterexplorer:
+    max_attempts: 3
+    # sideload: true   # if the researcher model is a small always-resident one:
+    #                  # skips lock/load/unload and is spared from evictions
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: qwen3.6-35b-a3b-reap-48-v2
+      timeout: 60m
+    tools: [read_file, list_directory, grep_search, write_output]
+    system_prompt: |
+        You are an explorer agent. Your job is to explore the file system in the context of the user's input or questions and return answers and insights based on your findings.
+        You have access to these tools:
+        - read_file: read a file's content (whole-file or surgical line range)
+        - list_directory: list a directory
+        - grep_search: search file contents
+        - write_output: write your final findings to the designated output file
+        Rules:
+        1. Use tools to gather information from the allowed paths.
+        2. If prompted to or asked you can write your final findings using the write_output tool.
+        3. As the users's input and prompts and questions to inform your file system exploration and reasoning.
+  # PLANNER: biggest + smartest, one-shot. single_shot bypasses the tool loop: the
+  # research artifact + a repo digest are pre-stuffed, one generation produces the
+  # plan. No tools exist in this mode — few/zero exploratory calls is enforced by
+  # construction.
+  #
+  # Sizing math (measured on the production server: planner ~40 tok/s prefill,
+  # ~10 tok/s decode, 131072-token context window; ≈4 bytes/token):
+  #   single_shot_context_bytes: 65536  ≈ 16k tokens  ≈ ~7 min prefill
+  #   max_tokens: 4096                  ≈ 4k tokens   ≈ ~7 min decode (upper bound)
+  # The binding constraint is the 131k window (digest + research artifact + output
+  # must fit), not wall clock. timeout must still cover a cold model load via
+  # llama-swap (the http client timeout spans the whole request incl. swap-wait).
+  tielimplementer:
+    single_shot: true
+    single_shot_context_bytes: 65536
+    # context_files: [path/to/key.go]   # alternative: pin exact files instead of auto-digest
+    max_tokens: 65536                    # backstop against a runaway generation
+    max_attempts: 1                     # human retry re-runs the whole generation anyway
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: tiel-coder-35b-a3b-mtp-ud-q4_k_xl
+      timeout: 2h
+    tools: [read_file, list_directory, grep_search, write_file, update_file]
+    system_prompt: |
+        You are an implementer agent. Understand the described issue along with any provided context then edit the workspace to implement the changes.
+        You have access to these tools:
+        - read_file: read files in the workspace or source snapshot
+        - list_directory: explore the workspace
+        - grep_search: search file contents
+        - write_file: create new files in the workspace
+        - update_file: overwrite existing files in the workspace
+        Rules:
+        1. Start with failing tests where possible.
+        2. Match the existing code style and include tests where the plan asks for them.
+        3. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.
+        4. If the implementation is incomplete, call finish_task with done=false and explain what is missing.
+  qwen38flashimplementer:
+    single_shot: true
+    single_shot_context_bytes: 65536
+    # context_files: [path/to/key.go]   # alternative: pin exact files instead of auto-digest
+    max_tokens: 65536                    # backstop against a runaway generation
+    max_attempts: 1                     # human retry re-runs the whole generation anyway
+    model:
+      provider: openai
+      base_url: http://192.168.1.132:8080/v1
+      model: qwen3.8-flash-next-gsq-rco-iq3_xxs
+      timeout: 2h
+    tools: [read_file, list_directory, grep_search, write_file, update_file]
+    system_prompt: |
+        You are an implementer agent. Understand the described issue along with any provided context then edit the workspace to implement the changes.
+        You have access to these tools:
+        - read_file: read files in the workspace or source snapshot
+        - list_directory: explore the workspace
+        - grep_search: search file contents
+        - write_file: create new files in the workspace
+        - update_file: overwrite existing files in the workspace
+        Rules:
+        1. Start with failing tests where possible.
+        2. Match the existing code style and include tests where the plan asks for them.
+        3. When finished, call finish_task with done=true and a brief rationale evaluating the implementation.
+        4. If the implementation is incomplete, call finish_task with done=false and explain what is missing.
+  # IMPLEMENTER: mid-size coder. Gets write_file, update_file, run_test on top of the
+  # read-only tools. Prioritize tool-calling reliability + code quality.
+  # smarterandslow:
+  #   max_attempts: 3
+  #   model:
+  #     provider: openai
+  #     base_url: http://192.168.1.132:8080/v1
+  #     model: qwen3.8-27b-gsq-rco-Iq3_s-mtp
+  #     timeout: 2h
+
+# Projects are declared ONLY here (YAML). Process start upserts the SQLite registry.
+# Issue submit / CLI / webhook hard-fail on unknown names — no create-on-submit.
+# source_path / git / test / agent flavors live under the project; not on the submit form.
+projects:
+  bunny:
+    #source_path: /home/boberto/dev/html/bunny
+    git:
+      repo_url: /home/boberto/dev/html/bunny
+      base_branch: main
+      push: true
+      create_pr: false
+     #   auth:
+     #     type: ssh_key
+     # test:
+     #   command: "go test ./..."
+     #   timeout: 60s
+     #   image: "golang:1.22"
+     #   secrets_env: []
+#     trust_external: false
+#     agents:
+#       researcher:
+#         default: thorough          # used when submit omits a choice
+#         flavors:
+#           thorough:
+#             model: { provider: openai, model: o3-mini }
+#             system_prompt_append: "Prefer root-cause depth..."
+#           cheap:
+#             model: { provider: openai, model: gpt-4o-mini }
+#       planner:
+#         default: standard
+#         flavors:
+#           standard: {}             # inherits global + built-in
+#       implementer:
+#         default: coder
+#         flavors:
+#           coder:
+#             model: { provider: anthropic, model: claude-sonnet-4 }
+  gorchestrator:
+    git:
+      repo_url: /home/boberto/dev/go/gorchestrator
+      base_branch: main
+      push: true
+      create_pr: false
+
+# MCP servers (deny by default). Only agents that list a server in mcp_servers see its tools.
+# mcp_servers:
+#   - name: internal-api
+#     command: ["./bin/my-mcp-server"]
+#     args: []
+#     env: [API_TOKEN]         # host env var NAMES passed through; values not logged
+
+# External adapters are declared explicitly by name + manifest path.
+# The core does not scan directories for adapters.
+# adapters:
+#   - name: s3
+#     manifest_path: ~/.config/gorchestrator/adapters/s3.yaml
+#   - name: slack
+#     manifest_path: ./adapters/slack.yaml
+#   - name: email
+#     manifest_path: ./adapters/email.yaml
+
+# Long-running daemon (`gorchestrator serve`)
+server:
+  listen: "0.0.0.0:8080"
+  # Keep at 1 on a single-model local server. mode: exclusive already guarantees
+  # phases serialize at the model level; this keeps the issue queue serial too.
+  max_concurrent_issues: 1
+  shutdown_timeout: 30s
+  public_base_url: "http://192.168.1.226:8080"
+
+# Authentication for the dashboard and HTTP API.
+# mode: local (dev/test) | oidc (production)
+auth:
+  mode: local
+  local_username: admin
+  local_password_env: GORCH_LOCAL_PASSWORD
+  # oidc:
+  #   issuer_url: "https://accounts.google.com"
+  #   client_id: "..."
+  #   client_secret_env: GORCH_OIDC_CLIENT_SECRET
+  #   scopes: ["openid", "profile", "email"]
+  bootstrap_admin_emails:
+    - admin@example.com
+  session_ttl: 168h
+
+# Notification sinks (console is always on when serve runs).
+# List adapter names that implement port: notification.
+notifications:
+  adapters: []
+  # adapters: [slack, email]
+
+# Storage backend: fs (default) or adapter (e.g. S3 via JSON-RPC).
+storage:
+  backend: fs
+  # adapter_name: s3
+
+# External triggers (webhook is built-in; github/jira are adapters).
+triggers:
+  webhook:
+    enabled: false
+    token_env: GORCH_WEBHOOK_TOKEN
+  adapters: []
+  # adapters: [github, jira]
+  trust_external: false   # external issues force human implementer gate

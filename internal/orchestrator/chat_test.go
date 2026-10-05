@@ -865,6 +865,9 @@ func TestChat_OpenAIProviderRendersRunningList(t *testing.T) {
 		{"content": "now let me read hello.go", "tool_calls": []map[string]any{toolCall("c2", "read_file", `{"path":"hello.go"}`)}},
 		{"content": "there is one file here: hello.go"},
 	}
+	// The runner requests SSE (StreamingModeSSE), so the stub speaks
+	// text/event-stream: one chunk carrying the narration and the call, one
+	// finishing chunk, one usage chunk, then [DONE].
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		requests++
@@ -878,15 +881,44 @@ func TestChat_OpenAIProviderRendersRunningList(t *testing.T) {
 		if n > len(rounds) {
 			choice = map[string]any{"content": "(script exhausted)"}
 		}
-		resp := map[string]any{"choices": []map[string]any{{"message": choice}},
-			"usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		writeData := func(obj map[string]any) {
+			b, _ := json.Marshal(obj)
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			flusher.Flush()
+		}
+		delta := map[string]any{"role": "assistant"}
+		if c, _ := choice["content"].(string); c != "" {
+			delta["content"] = c
+		}
+		if tcs, ok := choice["tool_calls"].([]map[string]any); ok {
+			delta["tool_calls"] = tcs
+		}
+		writeData(map[string]any{
+			"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 1, "model": "gpt-test",
+			"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": nil}},
+		})
+		finish := "stop"
+		if _, ok := choice["tool_calls"]; ok {
+			finish = "tool_calls"
+		}
+		writeData(map[string]any{
+			"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 1, "model": "gpt-test",
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": finish}},
+		})
+		writeData(map[string]any{
+			"id": "chatcmpl-test", "object": "chat.completion.chunk", "created": 1, "model": "gpt-test",
+			"choices": []map[string]any{},
+			"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+		})
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
 	}))
 	defer srv.Close()
 
 	eng.chatSvc.newModel = func(ctx context.Context, cfg llm.Config) (adkmodel.LLM, error) {
-		return llm.NewOpenAIModel("gpt-test", "", srv.URL, 5*time.Second), nil
+		return llm.NewOpenAIModel("gpt-test", "", srv.URL, 5*time.Second)
 	}
 
 	if err := eng.ChatService().SendMessage(context.Background(), thread.ID, "what is in this project"); err != nil {
