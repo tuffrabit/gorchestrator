@@ -23,6 +23,11 @@ type ModelConfig struct {
 	BaseURL    string        `yaml:"base_url"`
 	Timeout    string        `yaml:"timeout"`
 	TimeoutDur time.Duration `yaml:"-"`
+
+	// CaptureReasoning surfaces reasoning_content from OpenAI-compatible
+	// reasoning-parser servers as thought rows in chat (provider "openai"
+	// only; no effect on other providers). Off by default.
+	CaptureReasoning bool `yaml:"capture_reasoning"`
 }
 
 // ReadFileConfig configures the read_file tool.

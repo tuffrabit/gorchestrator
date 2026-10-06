@@ -18,6 +18,11 @@ type Config struct {
 	Timeout     time.Duration
 	Temperature *float64 // optional; provider-specific request field
 	MaxTokens   int      // optional completion cap; 0 = provider default
+
+	// CaptureReasoning recovers chain-of-thought from OpenAI-compatible
+	// reasoning-parser servers (reasoning_content) as thought parts. Off by
+	// default; see openai_reasoning.go.
+	CaptureReasoning bool
 }
 
 // New builds a model.LLM from configuration.
@@ -33,7 +38,7 @@ func New(ctx context.Context, cfg Config) (model.LLM, error) {
 		// Temperature/max_tokens for Gemini are left to ADK defaults for now.
 		return NewGeminiModel(ctx, cfg.Model, apiKey, cfg.Timeout)
 	case "openai":
-		return NewOpenAIModelWithOptions(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout, cfg.Temperature, cfg.MaxTokens)
+		return NewOpenAIModelWithOptions(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout, cfg.Temperature, cfg.MaxTokens, cfg.CaptureReasoning)
 	case "anthropic":
 		return NewAnthropicModelWithOptions(cfg.Model, cfg.APIKeyEnv, cfg.BaseURL, cfg.Timeout, cfg.Temperature, cfg.MaxTokens), nil
 	default:

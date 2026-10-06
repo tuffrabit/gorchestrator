@@ -75,7 +75,7 @@ See `configs/config.example.yaml` for the full surface.
 
 | Block | Purpose |
 |-------|---------|
-| `default_model` | Provider (`openai`, `anthropic`, `gemini`, `dryrun`), model id, `api_key_env`, optional `base_url` for OpenAI-compatible endpoints |
+| `default_model` | Provider (`openai`, `anthropic`, `gemini`, `dryrun`), model id, `api_key_env`, optional `base_url` for OpenAI-compatible endpoints, optional `capture_reasoning` (OpenAI-provider reasoning models only; off by default) |
 | `projects` | **YAML registry of projects** (source of truth). Each entry may set `source_path`, `git`, `test`, `trust_external`, and `default_flow` (fallback agent flow for submits that don't pick one). Synced into SQLite at process start. |
 | `server` | `listen`, `max_concurrent_issues`, `shutdown_timeout`, `public_base_url` |
 | `auth` | `mode: local \| oidc`, local password env, OIDC issuer/client, bootstrap admin emails |
@@ -103,6 +103,9 @@ default_model:
   api_key_env: OPENAI_API_KEY
   base_url: http://INFERENCE_HOST:8080/v1
   timeout: 300s
+  # capture_reasoning: true       # surface reasoning_content from reasoning-parser
+                                  # servers (llama-swap --reasoning-format, DeepSeek, ...)
+                                  # as thought rows in chat; off by default
 ```
 
 Tool schemas are sent as standard JSON Schema (lowercase types) so strict servers such as llama.cpp accept them.

@@ -9,6 +9,9 @@ default_model:
   api_key_env: OPENAI_API_KEY
   # base_url: http://localhost:8080/v1
   timeout: 360s
+  # capture_reasoning: true  # recover reasoning_content from reasoning-parser servers
+                             # (llama-swap/llama.cpp --reasoning-format, DeepSeek) as
+                             # chat thought rows; OpenAI provider only, off by default
 
 tools:
   read_file:

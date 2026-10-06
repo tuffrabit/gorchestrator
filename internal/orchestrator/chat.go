@@ -602,6 +602,8 @@ func (s *ChatService) processTurn(ctx context.Context, thread *sqlite.ChatThread
 		Timeout:     modelTimeout(cfg.Model),
 		Temperature: cfg.Temperature,
 		MaxTokens:   cfg.MaxTokens,
+
+		CaptureReasoning: cfg.Model.CaptureReasoning,
 	})
 	if err != nil {
 		fail(fmt.Errorf("build model: %w", err))

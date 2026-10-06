@@ -1234,6 +1234,8 @@ func (e *Engine) buildPhaseModel(ctx context.Context, cfg config.AgentConfig, is
 		Timeout:     modelTimeout(cfg.Model),
 		Temperature: cfg.Temperature,
 		MaxTokens:   cfg.MaxTokens,
+
+		CaptureReasoning: cfg.Model.CaptureReasoning,
 	}
 	if dryRun {
 		modelCfg.Provider = "dryrun"
